@@ -831,6 +831,50 @@ const capabilities = {
       "extendedHookEvents": []
     }
   },
+  "hub-mode": {
+    "id": "hub-mode",
+    "role": "feature",
+    "title": "Portfolio hub mode",
+    "description": "Marks a repo as a portfolio hub (multi-milestone numbering, archived phases, cross-repo STATE refs, .gsdrootallow whitelist) and relaxes `validate health` (W002/W005/W006/W007/W019) accordingly. Adds read-only `hub v1 *` query verbs (milestone/phase/phases/manifest/spoke). Only repo_type==='hub' triggers relaxations; 'spoke' is reserved and behaves as 'standalone'.",
+    "tier": "full",
+    "requires": [],
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [],
+    "hooks": [],
+    "config": {
+      "repo_type": {
+        "type": "enum",
+        "values": [
+          "standalone",
+          "spoke",
+          "hub"
+        ],
+        "default": "standalone",
+        "description": "Repo topology role. 'hub' relaxes phase-dir/roadmap/STATE/root-file validation for portfolio orchestration repos; 'spoke' is reserved (behaves as standalone today); 'standalone' is the strict default."
+      },
+      "workflow.hub_mode": {
+        "type": "boolean",
+        "default": false,
+        "description": "Master toggle for hub-mode behaviors. Reserved on/off gate; the active relaxation branch keys off repo_type==='hub' read directly in validate health."
+      }
+    },
+    "commands": [
+      {
+        "family": "hub",
+        "module": "hub-command-router.cjs",
+        "router": "routeHubCommand"
+      }
+    ],
+    "steps": [],
+    "contributions": [],
+    "gates": []
+  },
   "intel": {
     "id": "intel",
     "role": "feature",
@@ -2353,6 +2397,8 @@ const configKeys = {
   "workflow.schema_drift_gate": "drift",
   "workflow.post_planning_gaps": "gap-analysis",
   "graphify.enabled": "graphify",
+  "repo_type": "hub-mode",
+  "workflow.hub_mode": "hub-mode",
   "intel.enabled": "intel",
   "mempalace.enabled": "mempalace",
   "mempalace.memory_mode": "mempalace",
@@ -2435,6 +2481,23 @@ const configSchema = {
     "type": "boolean",
     "default": false,
     "description": "Enable the graphify knowledge-graph command + skill."
+  },
+  "repo_type": {
+    "owner": "hub-mode",
+    "type": "enum",
+    "default": "standalone",
+    "description": "Repo topology role. 'hub' relaxes phase-dir/roadmap/STATE/root-file validation for portfolio orchestration repos; 'spoke' is reserved (behaves as standalone today); 'standalone' is the strict default.",
+    "values": [
+      "standalone",
+      "spoke",
+      "hub"
+    ]
+  },
+  "workflow.hub_mode": {
+    "owner": "hub-mode",
+    "type": "boolean",
+    "default": false,
+    "description": "Master toggle for hub-mode behaviors. Reserved on/off gate; the active relaxation branch keys off repo_type==='hub' read directly in validate health."
   },
   "intel.enabled": {
     "owner": "intel",
@@ -3517,6 +3580,11 @@ const commandFamilies = {
     "module": "graphify-command-router.cjs",
     "router": "routeGraphifyCommand"
   },
+  "hub": {
+    "capId": "hub-mode",
+    "module": "hub-command-router.cjs",
+    "router": "routeHubCommand"
+  },
   "intel": {
     "capId": "intel",
     "module": "intel-command-router.cjs",
@@ -3641,6 +3709,7 @@ const _requiresGraph = {
   "gemini": [],
   "graphify": [],
   "hermes": [],
+  "hub-mode": [],
   "intel": [],
   "kilo": [],
   "kimi": [],

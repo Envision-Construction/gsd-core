@@ -129,6 +129,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/validate-command-router.cjs',
       'gsd-core/bin/lib/workstream-inventory.cjs',
       'gsd-core/bin/lib/roadmap-command-router.cjs',
+      'gsd-core/bin/lib/hub-query.cjs',
+      'gsd-core/bin/lib/hub-command-router.cjs',
       'gsd-core/bin/lib/state-command-router.cjs',
       'gsd-core/bin/lib/gap-checker.cjs',
       'gsd-core/bin/lib/config.cjs',

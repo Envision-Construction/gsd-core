@@ -11,6 +11,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { phaseVariants, buildRoadmapPhaseVariants, buildNotStartedPhaseVariants } from './validate.cjs';
 import { phaseDirNameRe, PHASE_TOKEN_FROM_DIR_RE, MILESTONE_ARCHIVE_DIR_RE, canonicalPlanStem } from './validate.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- hub-query.cjs is an export= CommonJS module
+import hubQueryMod = require('./hub-query.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 import planningWorkspace = require('./planning-workspace.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- frontmatter.cjs is an export= CommonJS module
@@ -1241,6 +1243,25 @@ function cmdValidateHealth(
   const statePath = path.join(planBase, 'STATE.md');
   const configPath = path.join(planBase, 'config.json');
   const phasesDir = path.join(planBase, 'phases');
+
+  // ── hub-mode (repo_type) gate ──────────────────────────────────────────────
+  // Read repo_type DIRECTLY from config.json (NOT loadConfig): this runs before
+  // other config-dependent checks and must fail-open to 'standalone'. Only
+  // repo_type==='hub' relaxes W002/W005/W006/W007/W019; 'spoke'/invalid/absent
+  // all behave as 'standalone' (an invalid value additionally fires W022 in the
+  // config-validation block below). Mirrors the deferred spec's raw-read ordering.
+  const VALID_REPO_TYPES = ['standalone', 'spoke', 'hub'];
+  let repoType = 'standalone';
+  try {
+    const rawCfgForType = fs.readFileSync(configPath, 'utf-8');
+    const parsedForType = JSON.parse(rawCfgForType) as Record<string, unknown>;
+    const rt = parsedForType['repo_type'];
+    if (typeof rt === 'string' && VALID_REPO_TYPES.includes(rt)) repoType = rt;
+  } catch {
+    /* config.json missing or unparseable — default to standalone (W003/E005 surface it) */
+  }
+  const isHub = repoType === 'hub';
+
   const _slashRuntime = resolveRuntime(cwd);
   const slash = (name: string) => formatGsdSlash(name, _slashRuntime) as string;
 
@@ -1295,10 +1316,33 @@ function cmdValidateHealth(
     repairs.push('regenerateState');
   } else {
     const stateContent = fs.readFileSync(statePath, 'utf-8');
-    const phaseRefs = [...stateContent.matchAll(/[Pp]hase\s+(\d+[A-Z]?(?:\.\d+)*)/g)].map(
-      (m) => m[1],
-    );
+    // W002: hub-mode drops cross-repo refs ("Envision-MCP Phase 27" via negative
+    // lookbehind) and plan-code refs ("Phase 27-01" via negative lookahead on
+    // BOTH a hyphen and a digit, so greedy \d+ can't backtrack to a short prefix).
+    // Standalone keeps the original bare regex.
+    const phaseRefRe = isHub
+      ? /(?<![A-Z][\w-]*\s)[Pp]hase\s+(\d+[A-Z]?(?:\.\d+)*)(?![-\d])/g
+      : /[Pp]hase\s+(\d+[A-Z]?(?:\.\d+)*)/g;
+    const phaseRefs = [...stateContent.matchAll(phaseRefRe)].map((m) => m[1]);
     const validPhases = collectDiskPhases(planBase);
+    // W002: hub-mode unions archived phase prefixes (phases/_archive/**) so STATE.md
+    // may reference historical phases without flagging. Advisory: fail-open.
+    if (isHub) {
+      try {
+        const archiveRoot = path.join(phasesDir, '_archive');
+        const walkArchive = (dir: string) => {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (!ent.isDirectory()) continue;
+            const pm = ent.name.match(/^(\d+[A-Z]?(?:\.\d+)*)-/);
+            if (pm) validPhases.add(pm[1]);
+            walkArchive(path.join(dir, ent.name));
+          }
+        };
+        if (fs.existsSync(archiveRoot)) walkArchive(archiveRoot);
+      } catch {
+        /* advisory — fail-open */
+      }
+    }
     try {
       if (fs.existsSync(roadmapPath)) {
         const roadmapRaw = fs.readFileSync(roadmapPath, 'utf-8');
@@ -1357,6 +1401,18 @@ function cmdValidateHealth(
           'W004',
           `config.json: invalid model_profile "${parsed['model_profile'] as string}"`,
           `Valid values: ${validProfiles.join(', ')}`,
+        );
+      }
+      // W022: invalid repo_type (hub-mode). W021 is already taken twice elsewhere
+      // in this command (phase-prefix mismatch ~1719, STATE-complete mismatch ~1822),
+      // so the next free code is W022. An invalid value falls back to standalone
+      // strictness (see the isHub gate above) AND fires this warning.
+      if (parsed['repo_type'] !== undefined && !VALID_REPO_TYPES.includes(parsed['repo_type'] as string)) {
+        addIssue(
+          'warning',
+          'W022',
+          `config.json: invalid repo_type "${parsed['repo_type'] as string}"`,
+          'Valid values: standalone, spoke, hub',
         );
       }
     } catch (err) {
@@ -1418,12 +1474,20 @@ function cmdValidateHealth(
     /* intentionally empty */
   }
 
+  // W005: phase-dir naming. The shared phaseDirNameRe already accepts \d{2,}
+  // (2+ digit prefixes, milestone-prefixed, deep, and project-code-prefixed
+  // variants) — multi-milestone numbering like 250-foo / 999.1-foo is valid in
+  // BOTH modes by upstream contract. Hub-mode's only W005 relaxation is skipping
+  // '_'-prefixed dirs (the conventional ignore marker, e.g. _archive). Standalone
+  // still flags such dirs; the regex/hint are otherwise identical across modes.
+  const w005Hint = isHub ? 'NNNN-name (2-4 digits)' : 'NN-name';
   for (const e of phaseDirEntries) {
+    if (isHub && e.name.startsWith('_')) continue;
     if (!e.name.match(phaseDirNameRe)) {
       addIssue(
         'warning',
         'W005',
-        `Phase directory "${e.name}" doesn't follow NN-name format`,
+        `Phase directory "${e.name}" doesn't follow ${w005Hint} format`,
         'Rename to match pattern (e.g., 01-setup)',
       );
     }
@@ -1526,12 +1590,62 @@ function cmdValidateHealth(
 
     const notStartedPhases = buildNotStartedPhaseVariants(roadmapContent);
 
+    // ── hub-mode W006: archive-aware skip ────────────────────────────────────
+    // Walk phases/_archive/** for phase-prefix dir names so a roadmap phase that
+    // was archived (not on the phases/ top level) does not trip W006. Advisory:
+    // fail-open to standalone behavior on any read error.
+    const hubArchivedPhases = new Set<string>();
+    if (isHub) {
+      try {
+        const archiveRoot = path.join(phasesDir, '_archive');
+        const walk = (dir: string) => {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (!ent.isDirectory()) continue;
+            const pm = ent.name.match(/^(\d+[A-Z]?(?:\.\d+)*)-/);
+            if (pm) hubArchivedPhases.add(pm[1]);
+            walk(path.join(dir, ent.name));
+          }
+        };
+        if (fs.existsSync(archiveRoot)) walk(archiveRoot);
+      } catch {
+        /* advisory — fail-open */
+      }
+    }
+
+    // ── hub-mode W007: scope to current-milestone numeric range ───────────────
+    // Compute {lo,hi} from the CURRENT MILESTONE SECTION ONLY (sliceCurrentMilestone
+    // section, not extractCurrentMilestone which leaks earlier-milestone headings).
+    // Advisory require in try/catch; fall back to standalone (no range) on error.
+    let hubPhaseRange: { lo: number; hi: number } | null = null;
+    if (isHub) {
+      try {
+        const version = hubQueryMod.readStateMilestone(cwd);
+        const section = hubQueryMod.sliceCurrentMilestoneSection(roadmapContentRaw, version);
+        if (section) {
+          const nums: number[] = [];
+          const re = /#{2,4}\s*Phase\s+(\d+[A-Z]?(?:\.\d+)*)\s*:/gi;
+          let mm: RegExpExecArray | null;
+          while ((mm = re.exec(section)) !== null) {
+            const n = parseInt(mm[1], 10);
+            if (Number.isFinite(n)) nums.push(n);
+          }
+          if (nums.length > 0) hubPhaseRange = { lo: Math.min(...nums), hi: Math.max(...nums) };
+        }
+      } catch {
+        /* advisory — fall back to standalone (no range scoping) */
+      }
+    }
+
     for (const p of roadmapPhases) {
       const variants = phaseVariants(p);
       const existsOnDisk = [...variants].some((v) => diskPhases.has(v));
       if (!existsOnDisk) {
         const isNotStarted = [...variants].some((v) => notStartedPhases.has(v));
         if (isNotStarted) continue;
+        if (isHub) {
+          const padded = /^\d+$/.test(p) ? p.padStart(2, '0') : p;
+          if (hubArchivedPhases.has(p) || hubArchivedPhases.has(padded)) continue;
+        }
         addIssue(
           'warning',
           'W006',
@@ -1544,6 +1658,10 @@ function cmdValidateHealth(
     for (const p of activeDiskPhases) {
       const variants = phaseVariants(p);
       if (![...variants].some((v) => fullRoadmapPhaseVariants.has(v))) {
+        if (isHub && hubPhaseRange) {
+          const n = parseInt(p, 10);
+          if (!Number.isFinite(n) || n < hubPhaseRange.lo || n > hubPhaseRange.hi) continue;
+        }
         addIssue(
           'warning',
           'W007',
@@ -1764,16 +1882,36 @@ function cmdValidateHealth(
   }
 
   try {
+    // W019: hub-mode consults .planning/.gsdrootallow (one filename per line,
+    // '#' comments, blank lines ignored, each trimmed) as a whitelist of
+    // hub-specific root docs. Advisory read: fail-open on error.
+    const hubRootAllow = new Set<string>();
+    if (isHub) {
+      try {
+        const allowRaw = fs.readFileSync(path.join(planBase, '.gsdrootallow'), 'utf-8');
+        for (const line of allowRaw.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          hubRootAllow.add(trimmed);
+        }
+      } catch {
+        /* advisory — fail-open */
+      }
+    }
+    const w019Fix = isHub
+      ? 'Move to .planning/milestones/ archive subdir or delete if stale, or add to .planning/.gsdrootallow if hub-specific. See templates/README.md for the canonical artifact list.'
+      : 'Move to .planning/milestones/ archive subdir or delete if stale. See templates/README.md for the canonical artifact list.';
     const entries = fs.readdirSync(planBase, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (!entry.name.endsWith('.md')) continue;
+      if (isHub && hubRootAllow.has(entry.name)) continue;
       if (!isCanonicalPlanningFile(entry.name)) {
         addIssue(
           'warning',
           'W019',
           `Unrecognized .planning/ file: ${entry.name} — not a canonical GSD artifact`,
-          'Move to .planning/milestones/ archive subdir or delete if stale. See templates/README.md for the canonical artifact list.',
+          w019Fix,
           false,
         );
       }
