@@ -1898,8 +1898,17 @@ Detect optional fields independently: \`model\`, \`reasoning_effort\`, \`task_na
 \`fork_turns\`, and \`fork_context\` may be added or removed without \`agent_type\` changing.
 Never infer one field from a schema/version label or from the presence of another field.
 
-- **agent_type-capable schema:** \`spawn_agent\` advertises \`agent_type\` — typed GSD agent dispatch is available.
+- **agent_type-capable schema:** \`spawn_agent\` advertises \`agent_type\` — typed dispatch can be requested; schema presence does not prove that a role can launch.
 - **Generic schema:** \`spawn_agent\` does not advertise \`agent_type\` — typed GSD agent dispatch is unavailable in this session, even if other optional fields are present.
+
+Dispatch failure boundary:
+- The workflow's required roles and the user's GSD-only instruction take precedence over adapter fallbacks.
+- A failed typed launch is not a generic-only schema. If a required role returns
+  \`agent type is currently not available\` or another launch error, stop that workflow step.
+  Do not retry as \`worker\`, \`default\`, \`general-purpose\`, or \`explorer\`.
+  Do not copy the role prompt into a generic agent or execute the blocked step inline.
+  Preserve the workflow checkpoint and report the failed role and error. Diagnose and
+  repair dispatch through an available permitted GSD role, then retry the required role.
 
 Typed mapping (agent_type-capable schema only):
 - \`Task(subagent_type="X", prompt="Y")\` → \`spawn_agent(agent_type="X", message="Y")\`
@@ -1936,7 +1945,9 @@ When only the generic \`multi_agent_v1\` schema is available, typed GSD agent di
 (\`gsd-planner\`, \`gsd-executor\`, etc.) is NOT possible. This is a known Codex limitation
 (openai/codex#15250). **This workaround is NOT equivalent to typed gsd-planner/gsd-executor
 execution** — GSD agents carry project-aware prompts, audit logging, and workflow context
-that a generic subagent lacks. Use the following fallback:
+that a generic subagent lacks. Use the following fallback
+only when the workflow explicitly permits it and the user has authorized that substitution.
+Otherwise preserve the checkpoint and report the missing typed dispatch capability:
 1. Resolve your active Codex config root — the directory that contains your \`config.toml\`.
    This directory is determined in priority order: \`$CODEX_HOME\` (if set), the path given
    by \`--config-dir\` (if passed on invocation), a local \`.codex\` directory in the current
@@ -1950,12 +1961,11 @@ that a generic subagent lacks. Use the following fallback:
    and report the schema limitation rather than silently degrading.
 
 Spawn restriction:
-- Codex restricts \`spawn_agent\` to cases where the user has explicitly
-  requested sub-agents. When automatic spawning is not permitted, do the
-  work inline in the current agent rather than attempting to force a spawn.
+- Follow the session's restrictions on sub-agent dispatch. Only run inline when the owning workflow explicitly permits inline execution.
+  Otherwise preserve the checkpoint and report the restriction; do not bypass a required role.
 - In some Codex sessions, multi-agent tooling can be deferred. If \`spawn_agent\`
   is not currently visible, discover tools first via \`tool_search\` before
-  defaulting to inline execution.
+  concluding typed dispatch is unavailable. Discovery failure does not authorize substitution.
 
 Parallel fan-out:
 - Spawn multiple agents → collect agent IDs → \`collaboration.wait_agent(timeout_ms=...)\` for each to complete
