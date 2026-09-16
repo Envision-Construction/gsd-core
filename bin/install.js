@@ -3943,8 +3943,7 @@ When only the generic \`multi_agent_v1\` schema is available, typed GSD agent di
 (openai/codex#15250). **This workaround is NOT equivalent to typed gsd-planner/gsd-executor
 execution** — GSD agents carry project-aware prompts, audit logging, and workflow context
 that a generic subagent lacks. Use the following fallback
-only when the workflow explicitly permits it and the user has authorized that substitution.
-Otherwise preserve the checkpoint and report the missing typed dispatch capability:
+only when the workflow explicitly permits it and the user has authorized that substitution:
 1. Resolve your active Codex config root — the directory that contains your \`config.toml\`.
    This directory is determined in priority order: \`$CODEX_HOME\` (if set), the path given
    by \`--config-dir\` (if passed on invocation), a local \`.codex\` directory in the current
@@ -3956,6 +3955,8 @@ Otherwise preserve the checkpoint and report the missing typed dispatch capabili
    know full typed-agent guarantees are not in effect.
 4. Where typed dispatch is mandatory for correctness (e.g. worktree isolation), fail closed
    and report the schema limitation rather than silently degrading.
+
+Otherwise preserve the checkpoint and report the missing typed dispatch capability.
 
 Spawn restriction:
 - Follow the session's restrictions on sub-agent dispatch. Only run inline when the owning workflow explicitly permits inline execution.

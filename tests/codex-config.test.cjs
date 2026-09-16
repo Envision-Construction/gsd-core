@@ -206,7 +206,14 @@ describe('getCodexSkillAdapterHeader', () => {
   test('workflow-required roles take precedence over adapter fallbacks', () => {
     const result = getCodexSkillAdapterHeader('gsd-debug');
     assert.match(result, /The workflow's required roles and the user's GSD-only instruction take precedence/);
-    assert.match(result, /only when the workflow explicitly permits it and the user has authorized that substitution/);
+    assert.match(
+      result,
+      /only when the workflow explicitly permits it and the user has authorized that substitution:\n1\. Resolve/,
+    );
+    assert.match(
+      result,
+      /silently degrading\.\n\nOtherwise preserve the checkpoint and report the missing typed dispatch capability\./,
+    );
     assert.match(result, /Only run inline when the owning workflow explicitly permits inline execution/);
   });
 
