@@ -194,6 +194,22 @@ function assertNoCodexBareGsdToolsInvocation(content, label) {
 
 
 describe('getCodexSkillAdapterHeader', () => {
+  test('a failed typed launch cannot authorize generic or inline execution', () => {
+    const result = getCodexSkillAdapterHeader('gsd-docs-update');
+    assert.match(result, /A failed typed launch is not a generic-only schema/);
+    assert.match(result, /agent type is currently not available/);
+    assert.match(result, /Do not retry as `worker`, `default`, `general-purpose`, or `explorer`/);
+    assert.match(result, /Do not copy the role prompt into a generic agent or execute the blocked step inline/);
+    assert.match(result, /Preserve the workflow checkpoint and report the failed role/);
+  });
+
+  test('workflow-required roles take precedence over adapter fallbacks', () => {
+    const result = getCodexSkillAdapterHeader('gsd-debug');
+    assert.match(result, /The workflow's required roles and the user's GSD-only instruction take precedence/);
+    assert.match(result, /only when the workflow explicitly permits it and the user has authorized that substitution/);
+    assert.match(result, /Only run inline when the owning workflow explicitly permits inline execution/);
+  });
+
   test('contains all three sections', () => {
     const result = getCodexSkillAdapterHeader('gsd-execute-phase');
     assert.ok(result.includes('<codex_skill_adapter>'), 'has opening tag');
