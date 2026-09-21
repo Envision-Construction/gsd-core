@@ -174,6 +174,7 @@ const DOCS_GUARD_TESTS = {
   // entry).
   'tests/learnings.test.cjs': ['docs/FEATURES.md'],
   'tests/analyze-dependencies.test.cjs': ['docs/COMMANDS.md'],
+  'tests/auto-select-attribute.test.cjs': ['docs/reference/plan-md.md'],
   'tests/autonomous-converge.test.cjs': [
     'docs/COMMANDS.md',
     'docs/how-to/run-phases-autonomously.md',
@@ -272,6 +273,32 @@ const DOCS_GUARD_TESTS = {
   // seeding, so a content edit to any of them (e.g. renaming a landmark
   // heading/string a hostile-input test targets) can change this test's
   // fixture assumptions.
+  // #4728: pins the retirement of Gemini CLI prose from every localized
+  // how-to/ARCHITECTURE/USER-GUIDE/CONFIGURATION/context-monitor mirror, plus
+  // the PRESERVE (Antigravity) and MODEL-AXIS (Gemini 2.5 Pro) negative-space
+  // checks in the same locales.
+  'tests/gemini-runtime-removed.test.cjs': [
+    'docs/ja-JP/how-to/install-on-your-runtime.md',
+    'docs/ko-KR/how-to/install-on-your-runtime.md',
+    'docs/pt-BR/how-to/install-on-your-runtime.md',
+    'docs/zh-CN/how-to/install-on-your-runtime.md',
+    'docs/ja-JP/ARCHITECTURE.md',
+    'docs/ko-KR/ARCHITECTURE.md',
+    'docs/pt-BR/ARCHITECTURE.md',
+    'docs/zh-CN/ARCHITECTURE.md',
+    'docs/ja-JP/USER-GUIDE.md',
+    'docs/ko-KR/USER-GUIDE.md',
+    'docs/pt-BR/USER-GUIDE.md',
+    'docs/zh-CN/USER-GUIDE.md',
+    'docs/ja-JP/CONFIGURATION.md',
+    'docs/ko-KR/CONFIGURATION.md',
+    'docs/pt-BR/CONFIGURATION.md',
+    'docs/zh-CN/CONFIGURATION.md',
+    'docs/ja-JP/context-monitor.md',
+    'docs/ko-KR/context-monitor.md',
+    'docs/pt-BR/context-monitor.md',
+    'docs/zh-CN/context-monitor.md',
+  ],
   'tests/gen-state-md-docs.test.cjs': [
     'docs/reference/state-md.md',
     'docs/ja-JP/reference/state-md.md',
@@ -376,6 +403,7 @@ const DOCS_GUARD_TESTS = {
     'docs/how-to/plan-a-phase.md',
     'docs/AGENTS.md',
   ],
+  'tests/ui-interaction-capture.test.cjs': ['docs/CONFIGURATION.md'],
   'tests/ui-spec-inventory-provenance.test.cjs': [
     'docs/FEATURES.md',
     'docs/how-to/design-a-ui-phase.md',

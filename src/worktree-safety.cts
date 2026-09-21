@@ -19,6 +19,18 @@ import { isContainedIn } from './security.cjs';
 // remote, stalled NFS mount, etc.).  Callers can override via deps.timeout.
 const DEFAULT_GIT_TIMEOUT_MS = 10000;
 
+// #4721: the wave's `git merge --no-ff` is the one call in this module that runs
+// the commit-family hooks (`pre-merge-commit`, `prepare-commit-msg`,
+// `commit-msg`, `post-merge`), and a repo whose pre-merge hook is a test-suite
+// gate routinely runs for minutes. That is hook runtime, not "git stalling", so
+// the merge gets its own budget instead of inheriting DEFAULT_GIT_TIMEOUT_MS —
+// raising the shared default would be the wrong lever, because every other
+// caller in the module is exactly what the 10 s comment above describes.
+// (`worktree add` runs `post-checkout` and every ref update runs
+// `reference-transaction`; those are plumbing-cheap and stay on the default.)
+// Callers override via deps.mergeTimeoutMs.
+const DEFAULT_MERGE_TIMEOUT_MS = 10 * 60 * 1000;
+
 // #3021: accept the Workflow tool's worktree-wf_<runid>-<n> naming convention
 // (claude-orchestration's isolation:"worktree" emission) alongside the
 // existing agent-<id> / worktree-agent-<id> shapes.
@@ -51,6 +63,20 @@ interface WorktreeBranchEntry {
 interface WorktreeEntry {
   path: string;
   branch: string | null;
+  /**
+   * #4415: git's own verdict that this administrative entry is stale, carrying
+   * the reason it gave — `null` when git did not mark it prunable. `git worktree
+   * list --porcelain` emits `prunable <reason>` for an entry whose checkout it
+   * cannot reach, while keeping the `branch` line.
+   *
+   * NOT a removal test, and measured rather than assumed: a parent directory at
+   * mode 000 also produces `prunable gitdir file points to non-existent location`
+   * for a checkout that is still there, because git cannot traverse the parent.
+   * Removed vs unreadable is `statSync`'s errno to answer; this field records
+   * git's staleness verdict and the reason text, which is worth surfacing to an
+   * operator but must not stand in for the errno.
+   */
+  prunable: string | null;
 }
 
 function parseWorktreePorcelain(porcelain: string): WorktreeBranchEntry[] {
@@ -71,7 +97,14 @@ function parseWorktreeEntries(porcelain: string): WorktreeEntry[] {
     if (!worktreePath) continue;
     const branchLine = lines.find((l) => l.startsWith('branch refs/heads/'));
     const branch = branchLine ? branchLine.slice('branch refs/heads/'.length).trim() : null;
-    entries.push({ path: worktreePath, branch });
+    // #4415: `prunable` appears either bare or with a reason. Keep the reason
+    // when git gives one, and fall back to a non-empty marker when it does not,
+    // so the field stays a truthful "git says stale" boolean either way.
+    const prunableLine = lines.find((l) => l === 'prunable' || l.startsWith('prunable '));
+    const prunable = prunableLine
+      ? (prunableLine.slice('prunable'.length).trim() || 'prunable')
+      : null;
+    entries.push({ path: worktreePath, branch, prunable });
   }
   return entries;
 }
@@ -103,6 +136,12 @@ interface WorktreeDeps {
   /** Injected current time in ms since epoch for deterministic tests (#1191). */
   nowMs?: number;
   parseWorktreePorcelain?: (porcelain: string) => WorktreeBranchEntry[];
+  /**
+   * #4721: budget for the wave's `git merge --no-ff` — the one call that runs
+   * the commit-family hooks. Defaults to DEFAULT_MERGE_TIMEOUT_MS; every other
+   * git call in the wave keeps the module default.
+   */
+  mergeTimeoutMs?: number;
 }
 
 function readWorktreeList(repoRoot: string, deps: WorktreeDeps = {}): WorktreeListResult {
@@ -645,6 +684,102 @@ function repoRootStillMidMerge(execGit: ExecGitFn, repoRoot: string): boolean {
   return true; // any other exit code (e.g. a fatal git error) — fail closed
 }
 
+/**
+ * #4721: after a merge that was KILLED — at its budget or by a signal — and
+ * did not leave MERGE_HEAD behind, undo whatever it staged in repoRoot's index
+ * and re-apply any work it had autostashed. (A kill that lands once MERGE_HEAD
+ * exists — inside `commit-msg`, say — is the ordinary #2852 path: `git merge
+ * --abort` restores the tree and re-applies an autostash itself, unstaged, as
+ * it does for any aborted autostashed merge.)
+ *
+ * Why the staged set is attributable to the merge — on this path only: `git
+ * merge` refuses to start when the index already differs from HEAD ("your
+ * local changes … would be overwritten", even for paths the branch never
+ * touches), and a refusal is an immediate exit with a code, never a kill. The
+ * one way for a KILLED merge to leave a dirty index with no MERGE_HEAD is a
+ * kill between populating the index and writing MERGE_HEAD — i.e. during a
+ * merge hook. The exception is `merge.autoStash`: git then parks the pre-existing
+ * work in MERGE_AUTOSTASH and starts anyway, and a killed merge never
+ * re-applies it. Handled below; it is why the reset runs even on a clean
+ * index.
+ *
+ * `git reset --merge` (no commit → HEAD) is the restore: it resets the index
+ * to HEAD and updates the worktree only for the paths the index changed,
+ * keeping unrelated unstaged edits intact, and it refuses rather than clobbers
+ * when an unstaged edit overlaps a staged path. It also moves a pending
+ * MERGE_AUTOSTASH into the stash list ("Autostash exists; creating a new stash
+ * entry"), which `git stash pop --index` then re-applies — the same outcome
+ * `git merge --abort` gives an autostashed merge that could be aborted.
+ *
+ * Returns `halt: true` only when repoRoot is still (or unverifiably) dirty —
+ * the same repo-level carve-out `repoRootStillMidMerge` uses, and for the same
+ * reason: every remaining entry's merge would run against a dirty index.
+ */
+function restoreMergeResidue(
+  execGit: ExecGitFn,
+  repoRoot: string,
+  branch: string,
+): { halt: boolean; warnings: WaveCleanupWarning[] } {
+  const stagedPaths = (raw: string): string[] => raw
+    .split('\n')
+    .map((line) => decodeGitQuotedPath(line.trim()))
+    .filter((p) => p.length > 0);
+  const leftStaged = (paths: Array<string | null>): { halt: boolean; warnings: WaveCleanupWarning[] } => ({
+    halt: true,
+    warnings: paths.map((p) => ({ code: WAVE_CLEANUP_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch, path: p })),
+  });
+
+  const staged = execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot });
+  if (!gitResultOk(staged)) {
+    // Cannot tell whether the index is dirty — fail closed, same as an
+    // unverifiable MERGE_HEAD check. A null path marks "the check itself could
+    // not run", the convention SCOPE_CHECK_UNAVAILABLE already uses.
+    return leftStaged([null]);
+  }
+  const before = stagedPaths(staged.stdout || '');
+
+  // Exit 0 = git parked pre-existing work here before starting the merge;
+  // exit 1 = no autostash. Anything else is unknown: do not pop blind, but do
+  // say so — the reset below will have moved any stash into the list unread.
+  const autostash = execGit(['rev-parse', '--verify', '-q', 'MERGE_AUTOSTASH'], { cwd: repoRoot });
+  const hadAutostash = !autostash.timedOut && autostash.exitCode === 0;
+  const autostashUnknown = !!autostash.timedOut || (autostash.exitCode !== 0 && autostash.exitCode !== 1);
+  if (before.length === 0 && !hadAutostash && !autostashUnknown) return { halt: false, warnings: [] };
+
+  const reset = execGit(['reset', '--merge'], { cwd: repoRoot });
+  const recheck = gitResultOk(reset) ? execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot }) : null;
+  if (!recheck || !gitResultOk(recheck)) {
+    // The reset failed, or its result could not be re-read: report the set we
+    // know was staged, and halt.
+    return leftStaged(before.length > 0 ? before : [null]);
+  }
+  const after = stagedPaths(recheck.stdout || '');
+  if (after.length > 0) return leftStaged(after);
+
+  const warnings: WaveCleanupWarning[] = before.map((p) => ({ code: WAVE_CLEANUP_WARNING.MERGE_RESIDUE_RESTORED, branch, path: p }));
+  if (hadAutostash) {
+    const pop = execGit(['stash', 'pop', '--index'], { cwd: repoRoot });
+    if (!gitResultOk(pop)) {
+      warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
+      // A failed pop keeps the stash entry, but it can leave conflict entries
+      // (`UU`) and partially applied paths behind it — and the next merge then
+      // fails with "you have unmerged files" (caught in review). Re-read rather
+      // than assume: a dirty index here halts exactly as an unrestorable
+      // residue does.
+      const afterPop = execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot });
+      if (!gitResultOk(afterPop)) return { halt: true, warnings: [...warnings, ...leftStaged([null]).warnings] };
+      const dirty = stagedPaths(afterPop.stdout || '');
+      if (dirty.length > 0) return { halt: true, warnings: [...warnings, ...leftStaged(dirty).warnings] };
+    }
+  } else if (autostashUnknown) {
+    warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
+  }
+  // Not a halt: the index is verified clean, or holds only the operator's own
+  // re-applied work (a successful `--index` pop), which the next merge
+  // autostashes again under the same config.
+  return { halt: false, warnings };
+}
+
 // #2596: the single definition of "this file is an executor-written SUMMARY
 // artifact". Shared by `defaultFindSummaryFiles` (which walks for them to
 // rescue) and the scope advisory below (which must never flag them) — a plan's
@@ -812,7 +947,19 @@ function rescueSummaryArtifacts(
   const mkdirSync = deps.mkdirSync || ((d: string, o?: { recursive?: boolean }) => fs.mkdirSync(d, o));
   const copyFileSync = deps.copyFileSync || fs.copyFileSync;
 
-  const summaryPaths = findSummaryFiles(worktreePath);
+  // #4758: resolve the manifest's worktree_path against repoRoot once, at this
+  // boundary, so every reader of the field here — the fs walker below and the
+  // `git -C` calls — resolves it the way the caller's git consumers already do
+  // (`-C <path>` with `{ cwd: repoRoot }`).  A relative value passed to the
+  // walker verbatim made `path.join` emit a relative directory whose reads
+  // resolved against process.cwd(), silently walking the wrong tree.
+  // With this resolution, the remaining deps-injectable readers (existsSync,
+  // readFileSync, mkdirSync, copyFileSync) only ever see absolute paths:
+  // `dest` is built from repoRoot, `absPath` from the walker's join off this
+  // resolved base.
+  const resolvedWorktreePath = path.resolve(repoRoot, worktreePath);
+
+  const summaryPaths = findSummaryFiles(resolvedWorktreePath);
   const rescuedRelPaths = new Set<string>();
   const failures: Array<{ relPath: string; error: string }> = [];
 
@@ -820,7 +967,7 @@ function rescueSummaryArtifacts(
     // relPath is the path relative to the worktree root (e.g. ".planning/q1-SUMMARY.md")
     // Normalize to forward slashes so the Set comparison against `git status --porcelain`
     // output works on Windows too (git always emits forward slashes in porcelain output).
-    const relPath = posixNormalize(absPath.slice(worktreePath.length).replace(/^[/\\]/, ''));
+    const relPath = posixNormalize(absPath.slice(resolvedWorktreePath.length).replace(/^[/\\]/, ''));
 
     // #706: skip rescue when the SUMMARY is already committed on the branch.
     // Use `git cat-file -e HEAD:<relPath>` (not `ls-files --error-unmatch`) so
@@ -839,7 +986,7 @@ function rescueSummaryArtifacts(
     // copy when the main tree already holds identical content (which is also what
     // guards the #706 merge collision). A divergent dest is overwritten, but only
     // uncommitted main-tree content could be lost (committed content is git-recoverable).
-    const catFileResult = execGit(['-C', worktreePath, 'cat-file', '-e', `HEAD:${relPath}`], { cwd: repoRoot });
+    const catFileResult = execGit(['-C', resolvedWorktreePath, 'cat-file', '-e', `HEAD:${relPath}`], { cwd: repoRoot });
     if (catFileResult.exitCode === 0) {
       // exit 0 → the SUMMARY is committed on HEAD; the merge will carry it, so skip rescue.
       continue;
@@ -887,6 +1034,42 @@ const WAVE_CLEANUP_WARNING = Object.freeze({
   SCOPE_OUT_OF_DECLARED: 'scope_out_of_declared',
   /** The scope diff could not be computed, so conformance is unknown. */
   SCOPE_CHECK_UNAVAILABLE: 'scope_check_unavailable',
+  /**
+   * #4721: a killed merge (at its budget, or by a signal) left this path
+   * staged in repoRoot's index with no MERGE_HEAD, and `git reset --merge`
+   * restored it to HEAD. Informational — repoRoot is clean again.
+   */
+  MERGE_RESIDUE_RESTORED: 'merge_residue_restored',
+  /**
+   * #4721: a killed merge left this path staged in repoRoot's index with no
+   * MERGE_HEAD and it could NOT be restored (null path: the index could not
+   * be read at all) — or a failed autostash pop left it unmerged. repoRoot is
+   * dirty; committing from it would squash the executor's history into one
+   * parent. The wave halts.
+   */
+  MERGE_RESIDUE_LEFT_STAGED: 'merge_residue_left_staged',
+  /**
+   * #4721: the killed merge had parked pre-existing work in MERGE_AUTOSTASH
+   * (`merge.autoStash`), and re-applying it failed or could not be verified.
+   * The work is in the stash list, not lost. Path is always null. On its own
+   * the index is clean and the wave continues; when a failed pop left
+   * unmerged entries it is accompanied by MERGE_RESIDUE_LEFT_STAGED rows and
+   * the wave halts.
+   */
+  MERGE_AUTOSTASH_UNRESTORED: 'merge_autostash_unrestored',
+  /**
+   * #4415: an entry was merged on the evidence that its checkout was already
+   * gone, rather than on a clean read of a present worktree.
+   *
+   * Emitted because "the harness cleanly removed a finished executor" and
+   * "something else removed this path" are the same signature to this code —
+   * git still registers the path -> branch binding, and `statSync` reports
+   * ENOENT, in both cases. Before this path existed, EVERY anomalous absence
+   * blocked loudly, which gave an operator something to investigate; accepting
+   * the routine case silently would take that signal away from the case that is
+   * not routine. Advisory, never a gate: the entry still merged.
+   */
+  ACCEPTED_ABSENT_WORKTREE: 'accepted_absent_worktree',
 });
 
 interface WaveCleanupWarning {
@@ -894,6 +1077,13 @@ interface WaveCleanupWarning {
   branch: string;
   /** The offending path; null when the check itself could not run. */
   path: string | null;
+  /**
+   * #4415: git's own words for why it considers the registration stale — the
+   * text of the porcelain `prunable` line. Present only on
+   * ACCEPTED_ABSENT_WORKTREE, and null when git marked the entry prunable with
+   * no reason (it emits the marker bare in some versions).
+   */
+  detail?: string | null;
 }
 
 /**
@@ -1027,6 +1217,129 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
   const allWarnings: WaveCleanupWarning[] = [];
   let ok = true;
 
+  // #4415: two questions, two sources, each asked only what it can actually prove.
+  //
+  //   IDENTITY  — "is the checkout registered at this path the branch the manifest
+  //               names?" — comes from `git worktree list --porcelain`.
+  //   REMOVAL   — "is the directory actually gone, as opposed to unreadable?" —
+  //               comes from `statSync`'s errno.
+  //
+  // Neither source can answer the other's question, and both mistakes have been
+  // measured rather than reasoned about:
+  //
+  // 1. An earlier cut inferred removal from `fs.existsSync` returning false and,
+  //    with no checkout left to read, fell back to `refs/heads/<branch>` for
+  //    identity. Git never loses the binding: after `rm -rf` it still prints
+  //    `worktree <path>` + `branch refs/heads/<branch>`. The ref fallback weakened
+  //    identity from "the checkout registered here is on this branch" to "a branch
+  //    by this name exists", which let a foreign sibling branch through the gate.
+  //
+  // 2. `prunable` is NOT a removal test. Measured: with a parent directory at mode
+  //    000, git emits `prunable gitdir file points to non-existent location` for a
+  //    checkout that is still there — it cannot traverse the parent, so it reports
+  //    the gitdir file as missing. Accepting `prunable` as "removed" would merge
+  //    over uncommitted work in an unreadable worktree, which is the very thing the
+  //    dirty check exists to refuse. `statSync` separates them: ENOENT is gone,
+  //    EACCES/EIO is unreadable.
+  //
+  // The identity read is a SNAPSHOT taken before the loop, and that is load-bearing:
+  // `git worktree prune` is repository-wide, so the first absent entry's teardown
+  // clears EVERY stale registration, including those of entries not yet evaluated.
+  // Measured: two removed worktrees, one `prune`, and both registrations are gone.
+  // Reading the list per entry would therefore merge the first harness-removed
+  // worktree of a wave and block the rest as `branch_mismatch` — worse than the bug
+  // this PR fixes, since a wave of parallel executors is the normal case.
+  //
+  // Captured LAZILY, on the first entry that actually needs identity, and reused for
+  // the rest of the wave. Laziness is what keeps the read off the happy path — a wave
+  // whose worktrees are all present never spends the subprocess — and it is still
+  // early enough to be a true pre-prune snapshot, because every teardown that prunes
+  // consults this predicate first.
+  let worktreeListSnapshot: WorktreeListResult | null = null;
+  const snapshotWorktreeList = (): WorktreeListResult => {
+    if (!worktreeListSnapshot) worktreeListSnapshot = readWorktreeList(plan.repoRoot, { execGit });
+    return worktreeListSnapshot;
+  };
+  const resolveAgainstRepoRoot = (worktreePath: string): string => path.resolve(plan.repoRoot, worktreePath);
+  const findRegistered = (listed: WorktreeListResult, target: string): WorktreeEntry | undefined => (
+    listed.ok
+      ? listed.entries.find((listedEntry) => resolveAgainstRepoRoot(listedEntry.path) === target)
+      : undefined
+  );
+
+  // `worktree_path` comes from the manifest verbatim and may be relative, while the
+  // porcelain always reports absolute paths; git resolves the manifest form against
+  // repoRoot (every call passes `-C <path>` with `cwd: plan.repoRoot`), so match it
+  // the same way.
+  const registeredFor = (worktreePath: string): WorktreeEntry | undefined => {
+    const target = resolveAgainstRepoRoot(worktreePath);
+    const fromSnapshot = findRegistered(snapshotWorktreeList(), target);
+    if (fromSnapshot) return fromSnapshot;
+    // Absent from the snapshot: it may have been registered after the wave began.
+    // A list that cannot be read yields no entry, which blocks — the fail-safe way.
+    return findRegistered(readWorktreeList(plan.repoRoot, { execGit }), target);
+  };
+
+  const statSyncRaw = deps.statSync || fs.statSync;
+  // Only ENOENT is removal. A path that stats successfully is present; any other
+  // errno means it could not be read, and an unreadable checkout blocked before
+  // this PR and must keep blocking.
+  const confirmedGone = (worktreePath: string): boolean => {
+    try {
+      statSyncRaw(resolveAgainstRepoRoot(worktreePath));
+      return false;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+    }
+  };
+
+  // Carries git's `prunable` reason for the most recent acceptance, so the
+  // warning below can quote git rather than paraphrase it. Set only on the
+  // accepting call; callers that reject never read it.
+  let lastAcceptedPrunableReason: string | null = null;
+  const absentAndIdentified = (worktreePath: string, branch: string): boolean => {
+    const registered = registeredFor(worktreePath);
+    if (!registered || registered.branch !== branch) return false;
+    if (!confirmedGone(worktreePath)) return false;
+    lastAcceptedPrunableReason = registered.prunable;
+    return true;
+  };
+
+  /**
+   * #4415 (maintainer review round 3): record that an entry took the absent path.
+   *
+   * Two Medium findings close here together. This code cannot distinguish "the
+   * harness cleanly removed a finished executor" from "an operator or an external
+   * process removed this path" — both leave git's registration intact and both
+   * stat ENOENT. Before the absent path existed, every anomalous absence blocked
+   * loudly; accepting the routine case silently would have removed that signal
+   * from the case that is not routine, reporting `merged_removed`/`ok`
+   * indistinguishably from an ordinary merge. The module already carries an
+   * advisory channel for a materially less risky condition (scope conformance) a
+   * few lines below, so withholding one here was inconsistent with its own
+   * pattern.
+   *
+   * It also gives `WorktreeEntry.prunable` its consumer. The field was parsed and
+   * documented as "worth surfacing to an operator" and then never read — dead
+   * weight, and its bare-marker test asserted an outcome driven by other code.
+   * Quoting git's own reason here is what that parsing was for.
+   */
+  const noteAcceptedAbsent = (result: WaveCleanupEntryResult, entry: CleanupManifestEntry): void => {
+    // The parser normalises a bare `prunable` line to the literal 'prunable' so the
+    // field stays truthy either way. That sentinel is the marker echoed back, not a
+    // reason, so it is reported as "no reason given" rather than quoted at an
+    // operator as though git had said something.
+    const reason = lastAcceptedPrunableReason === 'prunable' ? null : lastAcceptedPrunableReason;
+    const warning: WaveCleanupWarning = {
+      code: WAVE_CLEANUP_WARNING.ACCEPTED_ABSENT_WORKTREE,
+      branch: entry.branch,
+      path: entry.worktree_path,
+      detail: reason,
+    };
+    result.warnings.push(warning);
+    allWarnings.push(warning);
+  };
+
   // #2852: every per-entry failure site marks the SAME shape — status='blocked',
   // a reason code, the captured stderr, push to results, flip the overall `ok`
   // flag — and then either `continue` (isolate, the default) or, for the one
@@ -1050,12 +1363,45 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       warnings: [],
     };
 
+    // #4415: the harness may have already removed this worktree. Claude Code
+    // removes a subagent's worktree the moment the subagent finishes with a
+    // clean tree, and an executor that committed everything — SUMMARY.md
+    // included, under `commit_docs: true` — is exactly that case, so by wave
+    // cleanup the directory is routinely gone while the branch it left behind
+    // is intact and mergeable.
+    //
+    // `git -C <gone> rev-parse` fails, and that failure was indistinguishable
+    // from a genuine mismatch, so the entry blocked as `branch_mismatch` and
+    // nothing merged. Disambiguate at the point of failure rather than ahead of
+    // it: a SUCCESSFUL read still decides identity exactly as before (a present
+    // worktree on the wrong branch blocks, unchanged), and only a FAILED read
+    // asks git and the filesystem why.
+    let worktreeAbsent = false;
     const branchCheck = execGit(['-C', entry.worktree_path, 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd: plan.repoRoot });
-    if (!gitResultOk(branchCheck) || branchCheck.stdout.trim() !== entry.branch) {
+    if (!gitResultOk(branchCheck)) {
+      // The in-worktree read failed. Ask git WHY, instead of asking the
+      // filesystem WHETHER: identity is still on record in the porcelain output,
+      // so the #3677 swap control keeps its teeth here rather than degrading to
+      // "some branch by this name exists".
+      //
+      // Blocked unless git still binds this path to the branch the manifest names
+      // AND the directory is confirmed gone (ENOENT). Each way of failing that is a
+      // genuine mismatch: a different branch registered at the path is the swap the
+      // control exists to catch; a path git does not list at all is an entry naming
+      // something git has no record of; and a path that stats, or that fails to stat
+      // for any reason other than ENOENT, is a checkout that is present or merely
+      // unreadable — which blocked before this PR and must keep blocking.
+      if (!absentAndIdentified(entry.worktree_path, entry.branch)) {
+        blockEntry(result, 'branch_mismatch', branchCheck?.stderr || '');
+        // #2852: isolate — this entry's problem does not touch repoRoot's git state,
+        // so every remaining entry is still independently evaluated.
+        continue;
+      }
+      worktreeAbsent = true;
+      noteAcceptedAbsent(result, entry);
+    } else if (branchCheck.stdout.trim() !== entry.branch) {
       blockEntry(result, 'branch_mismatch', branchCheck?.stderr || '');
-      // #2852: isolate — this entry's problem does not touch repoRoot's git state,
-      // so every remaining entry is still independently evaluated.
-      continue;
+      continue; // #2852: isolate
     }
 
     const mergeBase = execGit(['merge-base', 'HEAD', entry.branch], { cwd: plan.repoRoot });
@@ -1130,39 +1476,108 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       allWarnings.push(...scopeWarnings);
     }
 
-    // Safety net: rescue uncommitted SUMMARY.md artifacts before the dirty check.
-    // The executor leaves <quick_id>-SUMMARY.md uncommitted by contract — the
-    // orchestrator commits it.  Mirrors quick.md shell fallback (#2296, #2070, #2838, #3804).
-    const { rescuedRelPaths, failures: rescueFailures } = rescueSummaryArtifacts(entry.worktree_path, plan.repoRoot, deps);
-    if (rescueFailures.length > 0) {
-      blockEntry(result, 'summary_rescue_failed', rescueFailures.map((f) => `${f.relPath}: ${f.error}`).join('; '));
-      continue; // #2852: isolate
+    // #4415: both steps below read the worktree directory. The rescue exists to
+    // save work the executor left UNCOMMITTED; the dirty check exists to refuse
+    // to merge over it. Against an absent path they fail differently, and only
+    // one of them is loud: the default SUMMARY finder catches the unreadable
+    // directory and simply returns no files, while `git -C <gone> status` errors
+    // — and THAT is what surfaced as `worktree_dirty`, a block with nothing
+    // merged. (Corrected in Codex review round 2: an earlier version of this
+    // comment claimed both reads error.)
+    //
+    // The harness removes a worktree only when its tree is clean, so in the case
+    // this fix targets there is genuinely nothing to rescue. That is a property
+    // of the harness, NOT something checked here: this code cannot tell who
+    // removed the directory, and a forced or manual `rm -rf` of a DIRTY worktree
+    // would already have destroyed an uncommitted SUMMARY before cleanup ran.
+    // What is claimed is only the narrow thing true either way — a missing
+    // source cannot be read, so skipping the read loses nothing that still
+    // exists. (Codex review round 1.)
+    if (!worktreeAbsent) {
+      // Safety net: rescue uncommitted SUMMARY.md artifacts before the dirty check.
+      // The executor leaves <quick_id>-SUMMARY.md uncommitted by contract — the
+      // orchestrator commits it.  Mirrors quick.md shell fallback (#2296, #2070, #2838, #3804).
+      //
+      // Destructured in place, not hoisted: every path that reaches the consumer
+      // below has already run this line. (An earlier cut hoisted it on the
+      // reasoning that the nested block created another route in; Codex review
+      // round 2 showed that is not so — flipping `worktreeAbsent` SKIPS the
+      // consumer rather than reaching it unassigned.)
+      const { rescuedRelPaths, failures: rescueFailures } = rescueSummaryArtifacts(entry.worktree_path, plan.repoRoot, deps);
+      if (rescueFailures.length > 0) {
+        blockEntry(result, 'summary_rescue_failed', rescueFailures.map((f) => `${f.relPath}: ${f.error}`).join('; '));
+        continue; // #2852: isolate
+      }
+
+      const worktreeStatus = execGit(['-C', entry.worktree_path, 'status', '--porcelain', '--untracked-files=all'], { cwd: plan.repoRoot });
+      if (!gitResultOk(worktreeStatus)) {
+        // #4415 (Codex review round 1): the harness can remove the worktree
+        // between the branch read and here — while the repoRoot-side base,
+        // deletion and scope checks run. `worktreeAbsent` records what was true
+        // at IDENTIFICATION time, not now, so without this a mid-entry removal
+        // failed `status` and blocked `worktree_dirty` with nothing merged: the
+        // same bug as the branch read, one window later. Same disambiguation,
+        // applied at the same point — the read failed, so ask why.
+        //
+        // Deliberately NOT extended to a rescue FAILURE above: a copy that
+        // errored part-way can mean an uncommitted SUMMARY was genuinely lost,
+        // and that must keep blocking. A rescue that simply finds nothing to
+        // copy reports no failure and falls through to here.
+        //
+        // Identity was already established by the successful branch read above, so
+        // the question here is only staleness — but it is asked of git, on the same
+        // terms as the identification site, because a `status` failure is no more
+        // self-explaining than a `rev-parse` failure was.
+        if (!absentAndIdentified(entry.worktree_path, entry.branch)) {
+          blockEntry(result, 'worktree_dirty', worktreeStatus?.stderr || '');
+          continue; // #2852: isolate
+        }
+        worktreeAbsent = true;
+        noteAcceptedAbsent(result, entry);
+      }
+      if (!worktreeAbsent) {
+        // Filter rescued SUMMARY paths out of the porcelain output before deciding dirty.
+        // A line like "?? .planning/q1-SUMMARY.md" should not block when the SUMMARY
+        // has already been rescued into the main tree.
+        const dirtyLines = (worktreeStatus.stdout || '')
+          .split('\n')
+          .filter((line) => {
+            if (!line.trim()) return false;
+            // porcelain v1 format: "XY path" (3-char prefix + space + path)
+            const filePath = line.slice(3).trim();
+            return !rescuedRelPaths.has(filePath);
+          });
+        if (dirtyLines.length > 0) {
+          blockEntry(result, 'worktree_dirty', dirtyLines.join('\n'));
+          continue; // #2852: isolate
+        }
+      }
     }
 
-    const worktreeStatus = execGit(['-C', entry.worktree_path, 'status', '--porcelain', '--untracked-files=all'], { cwd: plan.repoRoot });
-    if (!gitResultOk(worktreeStatus)) {
-      blockEntry(result, 'worktree_dirty', worktreeStatus?.stderr || '');
-      continue; // #2852: isolate
-    }
-    // Filter rescued SUMMARY paths out of the porcelain output before deciding dirty.
-    // A line like "?? .planning/q1-SUMMARY.md" should not block when the SUMMARY
-    // has already been rescued into the main tree.
-    const dirtyLines = (worktreeStatus.stdout || '')
-      .split('\n')
-      .filter((line) => {
-        if (!line.trim()) return false;
-        // porcelain v1 format: "XY path" (3-char prefix + space + path)
-        const filePath = line.slice(3).trim();
-        return !rescuedRelPaths.has(filePath);
-      });
-    if (dirtyLines.length > 0) {
-      blockEntry(result, 'worktree_dirty', dirtyLines.join('\n'));
-      continue; // #2852: isolate
-    }
-
-    const merge = execGit(['merge', entry.branch, '--no-ff', '--no-edit', '-m', `chore: merge executor worktree (${entry.branch})`], { cwd: plan.repoRoot });
+    // #4721: the merge runs user hooks, so it carries its own budget — see
+    // DEFAULT_MERGE_TIMEOUT_MS. Every other call in this gauntlet keeps the
+    // module default.
+    const mergeTimeoutMs = deps.mergeTimeoutMs ?? DEFAULT_MERGE_TIMEOUT_MS;
+    const merge = execGit(
+      ['merge', entry.branch, '--no-ff', '--no-edit', '-m', `chore: merge executor worktree (${entry.branch})`],
+      { cwd: plan.repoRoot, timeout: mergeTimeoutMs },
+    );
     if (!gitResultOk(merge)) {
-      blockEntry(result, 'merge_failed', merge?.stderr || merge?.stdout || '');
+      if (merge?.timedOut) {
+        // #4721: say "timeout" when it was one. The captured output is whatever
+        // the hook printed before git was killed, which read as a git error under
+        // the old `merge_failed` label and made a healthy executor branch look
+        // broken. The hook itself is a child of the killed git process and may
+        // still be running.
+        const partial = (merge.stderr || merge.stdout || '').trim();
+        blockEntry(
+          result,
+          'merge_timed_out',
+          `git merge did not finish within ${mergeTimeoutMs} ms and was killed (a merge hook such as pre-merge-commit may still be running; raise deps.mergeTimeoutMs or shorten the hook)${partial ? `; output before the kill: ${partial}` : ''}`,
+        );
+      } else {
+        blockEntry(result, 'merge_failed', merge?.stderr || merge?.stdout || '');
+      }
       // #2852: a failed --no-ff merge MIGHT leave repoRoot itself mid-merge
       // (MERGE_HEAD set, conflict markers in the tree) — unlike every other block
       // reason above, that specific state is NOT scoped to this one entry: a second
@@ -1181,22 +1596,112 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
         pending.push(...entries.slice(i + 1));
         break;
       }
+      // #4721: "no MERGE_HEAD" is not "tree never touched". A merge killed while
+      // its pre-merge-commit hook ran has already written the merged tree into
+      // repoRoot's index (and set ORIG_HEAD) but never got to write MERGE_HEAD,
+      // so the #2852 check above reads it as clean while the executor's whole
+      // diff sits staged against the old HEAD. `git merge --abort` cannot see
+      // that state either. Left alone, the next `git merge` in this wave would
+      // refuse ("your local changes would be overwritten") or, worse, an
+      // orchestrator that trusts the block reason and commits from repoRoot
+      // squashes the executor's history into one parent. Restore it; if that
+      // cannot be verified, halt the wave exactly as the mid-merge case does.
+      //
+      // ONLY when git was KILLED — at its budget, or by a signal from outside.
+      // A merge git REFUSED (no MERGE_HEAD either) leaves the index exactly as
+      // it found it — and "your local changes would be overwritten" is precisely
+      // the refusal a pre-existing dirty index earns, so on that path anything
+      // staged is the operator's own work and must not be touched (caught in
+      // review). A kill is the one shape that stages a tree git never finished
+      // with, and an external SIGTERM produces the same state as the timeout
+      // without `timedOut` (caught in review too). The seam normalizes a
+      // signal death to exitCode 1 and carries the signal alongside, so the
+      // signal — never the exit code — is the tell; a refused merge has none.
+      const mergeKilled = !!merge?.timedOut || !!merge?.signal;
+      if (mergeKilled) {
+        const residue = restoreMergeResidue(execGit, plan.repoRoot, entry.branch);
+        result.warnings.push(...residue.warnings);
+        allWarnings.push(...residue.warnings);
+        if (residue.halt) {
+          pending.push(...entries.slice(i + 1));
+          break;
+        }
+      }
       continue; // #2852: isolate — repoRoot is not (or no longer) mid-merge
     }
 
-    let remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
-    if (!gitResultOk(remove)) {
-      // Locked worktrees require unlock before remove (or --force --force).
-      // Attempt: git worktree unlock <path> (ignore failure — already unlocked is ok)
-      // then retry git worktree remove --force.  (#3707)
-      execGit(['worktree', 'unlock', entry.worktree_path], { cwd: plan.repoRoot });
-      remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
+    if (worktreeAbsent) {
+      // #4415 (Codex review round 2): this entry was accepted WITHOUT the rescue
+      // and dirty checks, on the evidence that it had no checkout. Never issue
+      // `worktree remove --force` for it. If a registered checkout has since
+      // reappeared at that path — recreated between the checks and here — a
+      // forced removal would delete contents that never passed either check,
+      // which is strictly worse than the bug this PR fixes.
+      //
+      // Re-confirm absence immediately before tearing down (maintainer review,
+      // Major). Presence was classified once, at identification, and everything
+      // between then and here — the base, deletion and scope gates, and the merge
+      // itself — is a window in which a worktree can reappear. "Prune only" was
+      // offered as sufficient on its own, on the argument that prune leaves a live
+      // checkout alone and the `branch -D` below would then fail visibly. That
+      // argument holds only while prune's own staleness check is not fooled by the
+      // same filesystem-visibility gap that produced the false absence one call
+      // earlier. If it is, prune clears the admin entry, `branch -D` then SUCCEEDS,
+      // and a live, unreviewed, un-rescued worktree loses its branch — destroying
+      // state, where the pre-fix bug only ever blocked. That asymmetry is why this
+      // check is worth a `statSync`: the failure it prevents is unrecoverable, and
+      // the check costs no subprocess.
+      if (!confirmedGone(entry.worktree_path)) {
+        blockEntry(result, 'worktree_remove_failed',
+          `worktree ${entry.worktree_path} reappeared after being accepted as absent; refusing to prune or delete its branch`);
+        continue; // #2852: isolate — the merge already landed on repoRoot
+      }
+      // Prune only: it clears the admin entry when the directory really is gone.
+      const prune = execGit(['worktree', 'prune'], { cwd: plan.repoRoot });
+      if (!gitResultOk(prune)) {
+        blockEntry(result, 'worktree_remove_failed', prune?.stderr || '');
+        continue; // #2852: isolate — the merge already landed on repoRoot
+      }
+    } else {
+      let remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
+      if (!gitResultOk(remove)) {
+        // Locked worktrees require unlock before remove (or --force --force).
+        // Attempt: git worktree unlock <path> (ignore failure — already unlocked is ok)
+        // then retry git worktree remove --force.  (#3707)
+        execGit(['worktree', 'unlock', entry.worktree_path], { cwd: plan.repoRoot });
+        remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
+      }
+      if (!gitResultOk(remove)) {
+        // #4415: a remove that fails only because the path is already gone ("is
+        // not a working tree") used to surface as `worktree_remove_failed` AFTER
+        // the merge had already landed, leaving the branch undeleted and the
+        // operator to run `git worktree prune` + `git branch -D` + `rm -rf` by
+        // hand every wave. What is actually left behind is the admin entry under
+        // .git/worktrees, which is exactly what `prune` clears. Staleness is
+        // re-read here rather than reusing the branch-step answer: the harness
+        // removes worktrees on subagent completion, which can land in between.
+        // Asked of git, so a `remove` that failed for any reason OTHER than the
+        // path being gone — a lock this did not clear, a permissions error — still
+        // blocks instead of being tidied away by a prune.
+        if (!absentAndIdentified(entry.worktree_path, entry.branch)) {
+          blockEntry(result, 'worktree_remove_failed', remove?.stderr || '');
+          // #2852: isolate — the merge already landed on repoRoot; only this entry's
+          // worktree/branch teardown is affected.
+          continue;
+        }
+        // NB: `git worktree prune` is repository-wide maintenance, not an
+        // entry-scoped operation — it clears every stale admin entry, not only this
+        // one. NOT harmless, and an earlier version of this comment was wrong to
+        // say so (Codex review round 4): because identity now comes from the
+        // registration, a prune here destroys the evidence later entries in the same
+        // wave need. That is why the identity read is a snapshot taken before the
+        // loop; see `worktreeListSnapshot`.
+        const prune = execGit(['worktree', 'prune'], { cwd: plan.repoRoot });
+        if (!gitResultOk(prune)) {
+          blockEntry(result, 'worktree_remove_failed', prune?.stderr || '');
+          continue; // #2852: isolate
+        }
     }
-    if (!gitResultOk(remove)) {
-      blockEntry(result, 'worktree_remove_failed', remove?.stderr || '');
-      // #2852: isolate — the merge already landed on repoRoot; only this entry's
-      // worktree/branch teardown is affected.
-      continue;
     }
 
     const branchDelete = execGit(['branch', '-D', entry.branch], { cwd: plan.repoRoot });
@@ -2253,6 +2758,295 @@ function cmdWorktreeReapOrphans(cwd: string, deps: RecordAgentCmdDeps & Worktree
   write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
 }
 
+// ─── Worker lifecycle records (#4624) ────────────────────────────────────────
+// Durable per-worker launch/terminal state for the orchestrator-worktree
+// backend. The dispatch fragment spawns external executor processes with a
+// bare background `wait`; when the orchestrator's turn ends before a worker
+// finishes, nothing records the launch or guarantees reconciliation, and a
+// resumed session has no state to recover — it re-derives everything from
+// manual PID/log discovery. These records persist the launch identity, the
+// result location, and the terminal outcome as a small JSON file beside the
+// worktree (NOT inside it — cleanup removes the worktree; the record must
+// survive it), so `worker-status` can answer "who was dispatched, is it
+// still running, did it finish its artifacts, does it need reconciliation"
+// deterministically on resume.
+
+/** Path of the lifecycle record for a worktree: a SIBLING of the worktree dir. */
+function workerRecordPath(worktreePath: string): string {
+  return `${worktreePath}.worker.json`;
+}
+
+interface WorkerRecord {
+  agentId: string;
+  pid: number;
+  plan: string;
+  worktreePath: string;
+  summaryPath: string;
+  logFile: string;
+  startedAt: string;
+  state: 'running' | 'complete';
+  exitCode: number | null;
+  note: string;
+  completedAt: string | null;
+}
+
+const RENAME_RETRY_ERRNOS = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+// local/require-fs-op-fallback: a concurrent reader or antivirus scanner can
+// transiently hold the rename target open on Windows (DEFECT.WINDOWS-FS-OPS) —
+// bounded retry on the transient errnos, per the house pattern.
+function renameWithRetry(tmp: string, target: string): void {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      fs.renameSync(tmp, target);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code && RENAME_RETRY_ERRNOS.has(code) && attempt < 3) {
+        const until = Date.now() + 25 * (attempt + 1);
+        while (Date.now() < until) { /* bounded spin: transient locks clear in <100ms */ }
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+function writeWorkerRecord(
+  recordPath: string,
+  record: WorkerRecord,
+  deps: Record<string, unknown> = {}
+): void {
+  const writeFile = (deps.writeFile as ((p: string, d: string) => void)) || ((p: string, d: string) => fs.writeFileSync(p, d));
+  const tmp = `${recordPath}.tmp-${process.pid}`;
+  writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`);
+  renameWithRetry(tmp, recordPath);
+}
+
+function cmdWorktreeWorkerRecord(cwd: string, args: string[] = [], deps: Record<string, unknown> = {}): void {
+  const flag = (name: string): string => {
+    const i = args.indexOf(name);
+    if (i < 0 || i + 1 >= args.length) return '';
+    return args[i + 1];
+  };
+  const write = (deps.write as ((s: string) => void)) || ((s: string) => process.stdout.write(s));
+  const writeErr = (deps.writeErr as ((s: string) => void)) || ((s: string) => process.stderr.write(s));
+
+  const worktreePath = flag('--path');
+  const pidText = flag('--pid');
+  const plan = flag('--plan');
+  const summaryPath = flag('--summary-path');
+  const logFile = flag('--log-file');
+  if (!worktreePath || !pidText || !plan || !summaryPath) {
+    writeErr('Usage: worktree worker-record --path <worktree> --pid <pid> --plan <plan_number> --summary-path <path> [--log-file <path>]\n');
+    process.exitCode = 2;
+    return;
+  }
+  const pid = Number(pidText);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    writeErr(`[gsd] worktree.worker-record: invalid --pid: ${pidText}\n`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const resolvedWorktree = path.resolve(cwd, worktreePath);
+  const recordPath = workerRecordPath(resolvedWorktree);
+  const readFile = (deps.readFile as ((p: string) => string)) || ((p: string) => fs.readFileSync(p, 'utf8'));
+  let existing: WorkerRecord | null = null;
+  try {
+    existing = JSON.parse(readFile(recordPath)) as WorkerRecord;
+  } catch { /* no record yet — first dispatch for this worktree */ }
+  if (existing && existing.state === 'running') {
+    // Duplicate-dispatch guard (#4624): a running record means a resumed
+    // session re-entered the dispatch step. The worker must be reconciled
+    // (worker-status → completion-reconciliation), never re-spawned.
+    const hint = 'A worker is already recorded RUNNING for this worktree. Reconcile it (worktree worker-status, then execute-phase/steps/completion-reconciliation.md) before any new dispatch — never re-dispatch a recorded plan.';
+    writeErr(`[gsd] worktree.worker-record: already_running — ${hint}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'already_running', hint, record: existing }, null, 2)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const record: WorkerRecord = {
+    agentId: path.basename(resolvedWorktree),
+    pid,
+    plan,
+    worktreePath: resolvedWorktree,
+    summaryPath: path.resolve(cwd, summaryPath),
+    logFile: logFile ? path.resolve(cwd, logFile) : '',
+    startedAt: new Date().toISOString(),
+    state: 'running',
+    exitCode: null,
+    note: '',
+    completedAt: null,
+  };
+  try {
+    writeWorkerRecord(recordPath, record, deps);
+  } catch (err) {
+    writeErr(`[gsd] worktree.worker-record: write_failed — ${(err as Error).message}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'write_failed', error: (err as Error).message }, null, 2)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  write(`${JSON.stringify({ ok: true, record }, null, 2)}\n`);
+}
+
+function workerStatusView(
+  record: WorkerRecord,
+  deps: Record<string, unknown> = {}
+): Record<string, unknown> {
+  // Only ESRCH is dead (defaultIsPidAlive contract): a verdict feeding a
+  // merge/reconcile decision must fail toward ALIVE on unrecognized errnos.
+  const pidAlive = (deps.isPidAlive as ((pid: number) => boolean)) || defaultIsPidAlive;
+  const exists = (deps.existsSync as ((p: string) => boolean)) || fs.existsSync;
+  const summaryExists = exists(record.summaryPath);
+  const alive = record.state === 'running' && pidAlive(record.pid);
+  return {
+    agentId: record.agentId,
+    pid: record.pid,
+    plan: record.plan,
+    worktreePath: record.worktreePath,
+    summaryPath: record.summaryPath,
+    logFile: record.logFile,
+    state: record.state,
+    exitCode: record.exitCode,
+    note: record.note,
+    startedAt: record.startedAt,
+    completedAt: record.completedAt,
+    pidAlive: record.state === 'running' ? alive : null,
+    summaryExists,
+    needsReconciliation: record.state === 'running' && !alive,
+  };
+}
+
+function readWorkerRecordsFromRoot(
+  root: string,
+  readFile: (p: string) => string,
+  readdir: (p: string) => string[]
+): { path: string; record: WorkerRecord }[] {
+  let entries: string[] = [];
+  try {
+    entries = readdir(root).filter((f) => f.endsWith('.worker.json'));
+  } catch { /* root missing — no workers ever recorded */ return []; }
+  const out: { path: string; record: WorkerRecord }[] = [];
+  for (const entry of entries) {
+    const recordPath = path.join(root, entry);
+    try {
+      out.push({ path: recordPath, record: JSON.parse(readFile(recordPath)) as WorkerRecord });
+    } catch { // a torn/partial record must not hide the others
+      out.push({ path: recordPath, record: null as unknown as WorkerRecord });
+    }
+  }
+  return out;
+}
+
+function cmdWorktreeWorkerStatus(cwd: string, args: string[] = [], deps: Record<string, unknown> = {}): void {
+  const flag = (name: string): string => {
+    const i = args.indexOf(name);
+    if (i < 0 || i + 1 >= args.length) return '';
+    return args[i + 1];
+  };
+  const write = (deps.write as ((s: string) => void)) || ((s: string) => process.stdout.write(s));
+  const writeErr = (deps.writeErr as ((s: string) => void)) || ((s: string) => process.stderr.write(s));
+
+  const worktreePath = flag('--path');
+  const root = flag('--root');
+  if (!worktreePath === !root) { // exactly one of the two
+    writeErr('Usage: worktree worker-status (--path <worktree> | --root <worktrees-dir>)\n');
+    process.exitCode = 2;
+    return;
+  }
+  const readFile = (deps.readFile as ((p: string) => string)) || ((p: string) => fs.readFileSync(p, 'utf8'));
+  const readdir = (deps.readdir as ((p: string) => string[])) || ((p: string) => fs.readdirSync(p));
+
+  const views: Record<string, unknown>[] = [];
+  if (worktreePath) {
+    const recordPath = workerRecordPath(path.resolve(cwd, worktreePath));
+    let record: WorkerRecord | null = null;
+    let unreadable = false;
+    try {
+      record = JSON.parse(readFile(recordPath)) as WorkerRecord;
+    } catch {
+      // A record that exists but cannot be parsed is NOT "never dispatched" —
+      // conflating the two invites a re-dispatch. Surface it as a candidate.
+      unreadable = fs.existsSync(recordPath);
+    }
+    if (unreadable) {
+      // exists but unparseable — a reconciliation candidate, never "never dispatched"
+      views.push({ state: 'unreadable', needsReconciliation: true, recordPath });
+    } else if (record) {
+      views.push(workerStatusView(record, deps));
+    } else {
+      // no record file: genuinely never dispatched (found:false)
+      write(`${JSON.stringify({ ok: true, found: false, workers: [] }, null, 2)}\n`);
+      return;
+    }
+  } else {
+    for (const { record } of readWorkerRecordsFromRoot(path.resolve(cwd, root), readFile, readdir)) {
+      if (!record) { // torn record is itself a reconciliation candidate
+        views.push({ state: 'unreadable', needsReconciliation: true });
+        continue;
+      }
+      views.push(workerStatusView(record, deps));
+    }
+  }
+  write(`${JSON.stringify({ ok: true, found: true, workers: views }, null, 2)}\n`);
+}
+
+function cmdWorktreeWorkerComplete(cwd: string, args: string[] = [], deps: Record<string, unknown> = {}): void {
+  const flag = (name: string): string => {
+    const i = args.indexOf(name);
+    if (i < 0 || i + 1 >= args.length) return '';
+    return args[i + 1];
+  };
+  const write = (deps.write as ((s: string) => void)) || ((s: string) => process.stdout.write(s));
+  const writeErr = (deps.writeErr as ((s: string) => void)) || ((s: string) => process.stderr.write(s));
+
+  const worktreePath = flag('--path');
+  const exitText = flag('--exit-code');
+  const note = flag('--note');
+  if (!worktreePath || !exitText) {
+    writeErr('Usage: worktree worker-complete --path <worktree> --exit-code <n> [--note <recovery info>]\n');
+    process.exitCode = 2;
+    return;
+  }
+  const exitCode = Number(exitText);
+  if (!Number.isInteger(exitCode)) {
+    writeErr(`[gsd] worktree.worker-complete: invalid --exit-code: ${exitText}\n`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const recordPath = workerRecordPath(path.resolve(cwd, worktreePath));
+  const readFile = (deps.readFile as ((p: string) => string)) || ((p: string) => fs.readFileSync(p, 'utf8'));
+  let record: WorkerRecord;
+  try {
+    record = JSON.parse(readFile(recordPath)) as WorkerRecord;
+  } catch (err) {
+    writeErr(`[gsd] worktree.worker-complete: no_record — ${(err as Error).message}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'no_record', error: (err as Error).message }, null, 2)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const alreadyComplete = record.state === 'complete';
+  record.state = 'complete';
+  record.exitCode = exitCode;
+  record.note = note || record.note || '';
+  record.completedAt = record.completedAt || new Date().toISOString();
+  try {
+    writeWorkerRecord(recordPath, record, deps);
+  } catch (err) {
+    writeErr(`[gsd] worktree.worker-complete: write_failed — ${(err as Error).message}\n`);
+    write(`${JSON.stringify({ ok: false, reason: 'write_failed', error: (err as Error).message }, null, 2)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  write(`${JSON.stringify({ ok: true, alreadyComplete, record }, null, 2)}\n`);
+}
+
 // Unused exports kept for API compatibility
 void parseWorktreeListPaths;
 
@@ -2328,6 +3122,7 @@ export = {
   planWorktreeWaveCleanup,
   executeWorktreeWaveCleanupPlan,
   WAVE_CLEANUP_WARNING,
+  DEFAULT_MERGE_TIMEOUT_MS,
   planWaveScopeConformance,
   isSummaryArtifactRelPath,
   cmdWorktreeCleanupWave,
@@ -2338,6 +3133,10 @@ export = {
   cmdWorktreeCreate,
   reapOrphanWorktrees,
   cmdWorktreeReapOrphans,
+  workerRecordPath,
+  cmdWorktreeWorkerRecord,
+  cmdWorktreeWorkerStatus,
+  cmdWorktreeWorkerComplete,
   resolveWorktreeRoot,
   pruneOrphanedWorktrees,
 };

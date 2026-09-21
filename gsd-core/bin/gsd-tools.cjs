@@ -1183,7 +1183,18 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             // First positional that isn't a flag also works (lenient); otherwise ignore unknown flags.
             if (!a.startsWith('-') && !pifRuntime) { pifRuntime = a; }
           }
-          const filename = getProjectInstructionFile(pifRuntime);
+          // A retired runtime id now THROWS rather than resolving (#4709 AC#1).
+          // Map it to the same clean single-line error routeSkillsRoot emits for
+          // an unknown runtime — a CLI must not answer a bad flag value with a
+          // stack trace. The thrown message already names the successor and the
+          // retiring issue, so it is surfaced verbatim.
+          let filename;
+          try {
+            filename = getProjectInstructionFile(pifRuntime);
+          } catch (err) {
+            if (err && err.code === 'GSD_RETIRED_RUNTIME') error(err.message);
+            throw err;
+          }
           process.stdout.write(filename + '\n');
   }
 
@@ -3006,6 +3017,12 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             worktreeSafety.cmdWorktreeRecordAgent(cwd, args.slice(2));
           } else if (subcommand === 'reap-orphans') {
             worktreeSafety.cmdWorktreeReapOrphans(cwd);
+          } else if (subcommand === 'worker-record') {
+            worktreeSafety.cmdWorktreeWorkerRecord(cwd, args.slice(2));
+          } else if (subcommand === 'worker-status') {
+            worktreeSafety.cmdWorktreeWorkerStatus(cwd, args.slice(2));
+          } else if (subcommand === 'worker-complete') {
+            worktreeSafety.cmdWorktreeWorkerComplete(cwd, args.slice(2));
           } else if (subcommand === 'base-check') {
             require('./lib/worktree-base-ref.cjs').cmdWorktreeBaseCheck(cwd, args.slice(2));
           } else if (subcommand === 'set-baseref') {
@@ -3013,7 +3030,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           } else if (subcommand === 'create') {
             worktreeSafety.cmdWorktreeCreate(cwd, args.slice(2));
           } else {
-            error('Unknown worktree subcommand. Available: cleanup-wave, record-agent, reap-orphans, base-check, set-baseref, create', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown worktree subcommand. Available: cleanup-wave, record-agent, reap-orphans, base-check, set-baseref, create, worker-record, worker-status, worker-complete', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
@@ -4532,7 +4549,7 @@ async function dispatchHostCommand({ command, args, cwd, raw, error, defaultValu
 // keep working. No shell is spawned (argv array) — no injection surface beyond
 // the old `timeout … bash -c "$CMD"`.
 function runWithTimeout(argv) {
-  const { spawn } = require('node:child_process');
+  const { spawn, spawnSync } = require('node:child_process');
   const os = require('node:os');
 
   const USAGE = 'Usage: gsd_run run-with-timeout <seconds> [--] <command> [args...]';
@@ -4557,9 +4574,11 @@ function runWithTimeout(argv) {
 
   const isWin = process.platform === 'win32';
   // Detached (own process group) on POSIX so a timeout can reap the WHOLE tree —
-  // a bare child.kill() misses grandchildren (e.g. a test runner's workers) and
-  // would not actually bound the wall clock. Windows has no POSIX process
-  // groups; a direct kill is the best portable option there.
+  // a bare child.kill() misses grandchildren (e.g. a test runner's workers).
+  // Windows has no POSIX process groups and process.kill(-pid) is unsupported
+  // there, so EVERY killTree attempt on Windows tree-kills via
+  // `taskkill /PID <pid> /T /F` while the root is alive (see killTree) — by the
+  // time the direct child exits, its descendants are already orphaned.
   const detached = !isWin && secs > 0;
   const spawnFailureCode = (err) =>
     (err && err.code === 'ENOENT' ? 127 : err && err.code === 'EACCES' ? 126 : 125);
@@ -4583,9 +4602,26 @@ function runWithTimeout(argv) {
   // cap's process-group kill (the wrapped child escapes reap → exit 124 never
   // fires) and risks cmd.exe mis-parsing an arg like `-e "setTimeout(()=>{})"`.
   // Only .cmd/.bat are the CVE-2024-27980 EINVAL cases that require mediation.
+  // #4797: the mediation is NOT hand-rolled here — the private `/d /s /c <cmd>
+  // ...args` copy broke on any shim path containing a space (Node quotes the
+  // argv token; `/s` strips the FIRST and LAST quote of the /c string, so
+  // cmd.exe took the pre-space fragment as the program). projectSpawnInvocation
+  // (the declared single owner, #3411/#3617) wraps the WHOLE command line in
+  // one extra quote pair with windowsVerbatimArguments — the shape that
+  // survives spaces. One behavior delta, accepted: the seam DECLINES mediation
+  // when the target or an arg carries CR/LF (the old block mediated anyway) —
+  // the unmediated spawn of a .cmd then fails EINVAL, loud, at the catch below.
   const winShim = isWin && /\.(cmd|bat)$/i.test(path.basename(cmd));
-  const spawnCmd = winShim ? (process.env.ComSpec || 'cmd.exe') : cmd;
-  const spawnArgs = winShim ? ['/d', '/s', '/c', cmd, ...cmdArgs] : cmdArgs;
+  let spawnCmd = cmd;
+  let spawnArgs = cmdArgs;
+  let spawnOpts;
+  if (winShim) {
+    const { projectSpawnInvocation } = require('./lib/shell-command-projection.cjs');
+    const inv = projectSpawnInvocation(cmd, cmdArgs);
+    spawnCmd = inv.command;
+    spawnArgs = inv.args;
+    if (inv.windowsVerbatimArguments) spawnOpts = { windowsVerbatimArguments: true };
+  }
   // Node's setTimeout delay is a 32-bit signed ms int; a larger value silently
   // clamps to 1ms → a spurious immediate timeout. Cap the budget (~24.8 days).
   const timerMs = Math.min(Math.round(secs * 1000), 2 ** 31 - 1);
@@ -4596,11 +4632,13 @@ function runWithTimeout(argv) {
   return new Promise((resolve) => {
     let child;
     try {
-      // #2667: on win32 `.cmd`/`.bat`/`.exe`, spawn cmd.exe with an explicit argv
-      // array (spawnCmd/spawnArgs) rather than the shim directly — preserves the
-      // array-only, no-shell-string argv contract. `detached` is always false on
-      // win32, so it never co-occurs with the cmd.exe mediation.
-      child = spawn(spawnCmd, spawnArgs, { stdio: 'inherit', detached });
+      // #2667: on win32 `.cmd`/`.bat` shims, spawn cmd.exe with an explicit
+      // argv ARRAY rather than the shim directly — preserves the array-only,
+      // no-shell-string argv contract. #4797: the exact argv shape (quote
+      // wrapping, verbatim arguments) is projected by projectSpawnInvocation —
+      // see the block above. `detached` is always false on win32, so it never
+      // co-occurs with the cmd.exe mediation.
+      child = spawn(spawnCmd, spawnArgs, { stdio: 'inherit', detached, ...spawnOpts });
     } catch (err) {
       process.stderr.write(`run-with-timeout: ${cmd}: ${err && err.message ? err.message : 'failed to start'}\n`);
       resolve(spawnFailureCode(err));
@@ -4611,6 +4649,27 @@ function runWithTimeout(argv) {
       try {
         if (detached && child.pid) {
           try { process.kill(-child.pid, signal); return; } catch { /* group already gone */ }
+        }
+        if (isWin && child.pid) {
+          // #4601: Windows has no POSIX process groups, so the tree kill rides
+          // on `taskkill /T`, which walks the child's descendants the way
+          // `process.kill(-pid)` reaches a POSIX group — this is what bounds
+          // the wall clock when the direct child mediates (cmd.exe /c shim) or
+          // spawns its own children. Deliberately NOT gated on the SIGKILL
+          // stage: child.kill on Windows is TerminateProcess regardless of
+          // signal, so by the time the direct child exits its descendants are
+          // orphaned and no taskkill can reach them — the tree kill must ride
+          // the FIRST attempt, while the root is still alive. /F is required:
+          // without it taskkill posts WM_CLOSE, which a headless CLI never
+          // pumps. Spawned as an argv array per the no-shell-for-argv-array
+          // contract, and bounded — a non-zero/absent status means taskkill
+          // lost a race with an exiting process, and we fall through to the
+          // direct kill so the attempt is never weaker than before.
+          const reap = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+            encoding: 'utf8',
+            timeout: 15000, // taskkill /T is sub-second in practice; bounded so a wedged taskkill can't hang the gate
+          });
+          if (reap.status === 0) return;
         }
         child.kill(signal);
       } catch { /* already exited */ }

@@ -2189,11 +2189,13 @@ describe('bug #950: quick-task SUMMARY must carry status: complete', () => {
       const criticalBlock = lines.slice(criticalIdx, criticalEndIdx).join('\n');
       assert.doesNotMatch(criticalBlock, /status: acknowledged/, 'the CRITICAL entry (and its continuation line) must NEVER be touched');
       assert.match(criticalBlock, /see also: - minor typo/, 'the CRITICAL entry continuation line is preserved verbatim');
-      // Measured: the write seam's `_normalizeMd` (src/shell-command-projection.cts:837)
-      // inserts a blank line before a list item whose predecessor is a non-blank, non-list
-      // line — so a blank line appears between the CRITICAL continuation line and the
-      // "- minor typo" bullet after this write. That is repo-wide `.md`-write normalization
-      // (50 callers through the single write seam), not something specific to this feature.
+      // The write seam's `_normalizeMd` carries no before-a-bullet insertion
+      // rule: #3854 guarded the indented-continuation predecessor, #4725
+      // removed the prose-predecessor case outright. No blank line is
+      // injected between the CRITICAL continuation line and the "- minor
+      // typo" bullet by this write — repo-wide `.md`-write normalization
+      // (50 callers through the single write seam), not something specific
+      // to this feature.
       assert.match(content, /- minor typo\n {2}status: acknowledged/, 'the standalone "minor typo" entry (its OWN span) now carries the marker');
 
       const after = audit(tmpDir);
@@ -2567,3 +2569,173 @@ describe('bug #950: quick-task SUMMARY must carry status: complete', () => {
     });
   });
 }
+
+
+// ────────────────────────────────────────────────────────────────────────
+// #4378 — audit seed identity agrees with list-seeds; acknowledge resolves
+// by canonical id (legacy stems still resolve for back-compat).
+// ────────────────────────────────────────────────────────────────────────
+{
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { cleanup } = require('./helpers.cjs');
+
+  function readJson4546(result) {
+    assert.ok(result.success, `command must succeed. stdout: ${result.output}\nstderr: ${result.error}`);
+    return JSON.parse(result.output);
+  }
+
+  function auditJson(tmpDir) {
+    return readJson4546(runGsdTools(['audit-open', '--json'], tmpDir));
+  }
+
+  function ack4546(tmpDir, args) {
+    return runGsdTools(['audit-open', 'acknowledge', ...args, '--json'], tmpDir);
+  }
+
+  describe('audit seed identity agrees with list-seeds (#4378)', () => {
+    let tmpDir;
+
+    beforeEach(() => { tmpDir = createTempProject('gsd-4378-seedident-'); });
+    afterEach(() => { cleanup(tmpDir); });
+
+    function planningPath(...segs) {
+      return path.join(tmpDir, '.planning', ...segs);
+    }
+
+    function seedItem(output, seedId) {
+      const item = output.items.seeds.find((s) => s.seed_id === seedId);
+      assert.ok(item, `expected a seed item with seed_id ${seedId}; got: ${JSON.stringify(output.items.seeds.map((s) => s.seed_id))}`);
+      return item;
+    }
+
+    test('legacy seed publishes the canonical frontmatter id, not the fused filename stem', () => {
+      const seedsDir = planningPath('seeds');
+      fs.mkdirSync(seedsDir, { recursive: true });
+      fs.writeFileSync(path.join(seedsDir, 'SEED-081-region-becomes.md'),
+        '---\nid: SEED-081\nstatus: dormant\n---\n# SEED-081: region idea\n', 'utf8');
+
+      const output = auditJson(tmpDir);
+      const item = seedItem(output, 'SEED-081');
+      assert.strictEqual(item.slug, 'region-becomes',
+        'slug is the remainder after the canonical id, matching list-seeds');
+      assert.ok(!output.items.seeds.some((s) => s.seed_id === 'SEED-081-region-becomes'),
+        'the fused filename stem must not resurface as a second id');
+    });
+
+    test('date-suffixed seed publishes its full id (never truncated at the date prefix)', () => {
+      const seedsDir = planningPath('seeds');
+      fs.mkdirSync(seedsDir, { recursive: true });
+      fs.writeFileSync(path.join(seedsDir, 'SEED-260914-k3x-my-slug.md'),
+        '---\nid: SEED-260914-k3x\nstatus: dormant\n---\n# SEED-260914-k3x: idea\n', 'utf8');
+
+      const output = auditJson(tmpDir);
+      const item = seedItem(output, 'SEED-260914-k3x');
+      assert.strictEqual(item.slug, 'my-slug');
+    });
+
+    test('acknowledge resolves the canonical id to the real file and writes the marker', () => {
+      const seedsDir = planningPath('seeds');
+      fs.mkdirSync(seedsDir, { recursive: true });
+      const legacyFile = path.join(seedsDir, 'SEED-081-region-becomes.md');
+      fs.writeFileSync(legacyFile,
+        '---\nid: SEED-081\nstatus: dormant\n---\n# SEED-081: region idea\n', 'utf8');
+
+      const result = ack4546(tmpDir, ['--category', 'seeds', '--seed-id', 'SEED-081', '--milestone', 'v1.0', '--at', '2026-09-15']);
+      assert.ok(result.success, `acknowledge by canonical id must succeed. stderr: ${result.error}`);
+      assert.match(fs.readFileSync(legacyFile, 'utf-8'), /^status: dormant$/m,
+        'verdict-preserving: the seed status line must be unchanged');
+
+      const after = auditJson(tmpDir);
+      assert.equal(after.counts.seeds, 0, 'acknowledged seed drops out of counts');
+    });
+
+    test('full filename stem still resolves (back-compat with pre-canonical callers)', () => {
+      const seedsDir = planningPath('seeds');
+      fs.mkdirSync(seedsDir, { recursive: true });
+      fs.writeFileSync(path.join(seedsDir, 'SEED-081-region-becomes.md'),
+        '---\nid: SEED-081\nstatus: dormant\n---\nbody\n', 'utf8');
+
+      const result = ack4546(tmpDir, ['--category', 'seeds', '--seed-id', 'SEED-081-region-becomes', '--milestone', 'v1.0', '--at', '2026-09-15']);
+      assert.ok(result.success, `acknowledge by legacy stem must succeed. stderr: ${result.error}`);
+    });
+
+    test('an unknown seed id still fails with the file-not-found error', () => {
+      const seedsDir = planningPath('seeds');
+      fs.mkdirSync(seedsDir, { recursive: true });
+      fs.writeFileSync(path.join(seedsDir, 'SEED-081-region-becomes.md'),
+        '---\nid: SEED-081\nstatus: dormant\n---\nbody\n', 'utf8');
+
+      const result = ack4546(tmpDir, ['--category', 'seeds', '--seed-id', 'SEED-999', '--milestone', 'v1.0', '--at', '2026-09-15']);
+      assert.equal(result.success, false, 'an unresolvable id must fail');
+      assert.match(String(result.error), /file not found: seeds\/SEED-999\.md/,
+        'the error names the unresolvable id exactly as before');
+    });
+  });
+}
+
+// ─── #4802: an unparseable frontmatter block must not be spliced over ──────
+
+describe('#4802: acknowledge refuses targets whose frontmatter fails to parse', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  let tmpDir;
+
+  beforeEach(() => { tmpDir = createTempProject('gsd-4802-'); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  function planningPath(...segs) {
+    return path.join(tmpDir, '.planning', ...segs);
+  }
+
+  // A real YAML SYNTAX error (the issue's second shape: an invalid backslash
+  // escape inside a double-quoted value). Note the issue's first shape
+  // (unescaped colons inside a double-quoted value) is actually LEGAL YAML —
+  // double-quoted scalars may contain colons — so the fixture uses a shape
+  // that genuinely fails to parse. Empirically verified against the built
+  // frontmatter.cjs: this content returns an object marked
+  // FRONTMATTER_UNPARSEABLE.
+  const UNPARSEABLE_FM = [
+    '---',
+    'status: complete',
+    'ref: "bad\\q escape"',
+    'key-decisions:',
+    '  - decision one',
+    '---',
+  ].join('\n');
+
+  function ack(tmpDir, args) {
+    return runGsdTools(['audit-open', 'acknowledge', ...args, '--json'], tmpDir);
+  }
+
+  test('threads: an unparseable-frontmatter target is refused, file byte-identical', () => {
+    const threadsDir = planningPath('threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+    const filePath = path.join(threadsDir, 'broken-yaml.md');
+    const before = UNPARSEABLE_FM + '\n# Thread\n';
+    fs.writeFileSync(filePath, before, 'utf-8');
+
+    const result = ack(tmpDir, ['--category', 'threads', '--slug', 'broken-yaml', '--milestone', 'v1.0']);
+    assert.ok(!result.success, `acknowledge must refuse; stdout: ${result.output}\nstderr: ${result.error}`);
+    assert.ok(
+      (result.error || '').includes('not parseable YAML') && (result.error || '').includes('broken-yaml.md'),
+      `the refusal must name the file and the unparseable frontmatter; stderr: ${result.error}`,
+    );
+    assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), before,
+      'the file must be byte-identical — no splice may discard frontmatter');
+  });
+
+  test('uat_gaps (phase-scoped): an unparseable-frontmatter target is refused, file byte-identical', () => {
+    const ctxDir = planningPath('phases', '01-init');
+    fs.mkdirSync(ctxDir, { recursive: true });
+    const filePath = path.join(ctxDir, 'CONTEXT.md');
+    const before = UNPARSEABLE_FM + '\n# Context\n';
+    fs.writeFileSync(filePath, before, 'utf-8');
+    fs.writeFileSync(path.join(ctxDir, '01-01-PLAN.md'), '# Plan\n');
+
+    const result = ack(tmpDir, ['--category', 'uat_gaps', '--phase', '01', '--file', 'CONTEXT.md', '--milestone', 'v1.0']);
+    assert.ok(!result.success, `acknowledge must refuse; stdout: ${result.output}\nstderr: ${result.error}`);
+    assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), before,
+      'the file must be byte-identical — no splice may discard frontmatter');
+  });
+});

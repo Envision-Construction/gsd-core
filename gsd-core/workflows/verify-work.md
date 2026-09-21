@@ -39,7 +39,7 @@ No Pass/Fail buttons. No severity questions. Just: "Here's what should happen. D
 If $ARGUMENTS contains a phase number, load context:
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd_run is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; case "$(gsd_run runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') GSD_IDENTITY_STATUS=ok;; esac; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 GSD_WS=""
 echo "$ARGUMENTS" | grep -qE -- '--ws[[:space:]]+[A-Za-z0-9._-]+' && GSD_WS=$(echo "$ARGUMENTS" | grep -oE -- '--ws[[:space:]]+[A-Za-z0-9._-]+')
 PHASE_ARG=$(echo "$ARGUMENTS" | sed -E 's/--ws[[:space:]]+[A-Za-z0-9._-]+//g' | xargs)
@@ -183,18 +183,31 @@ instrument — the executor's own narration is never the last word. For each `*-
 BASE=$(grep -oE '^plan_head_before: [0-9a-f]{7,40}' "$SUMMARY_FILE" | awk '{print $2}')
 CLAIMED=$(grep -oE '^commits: [0-9]+' "$SUMMARY_FILE" | grep -oE '[0-9]+' || echo absent)
 ACTUAL=$(git rev-list --count "${BASE}"..HEAD)
+AFTER=$(grep -oE '^plan_head_after: [0-9a-f]{7,40}' "$SUMMARY_FILE" | awk '{print $2}')
 ```
 - A `commits: absent` or `plan_head_before: absent` SUMMARY (pre-#3968 legacy) is reported as
   a WARNING with the measured git state, not a mismatch.
-- `ACTUAL == CLAIMED` is consistent. `ACTUAL == CLAIMED + 1` is ALSO consistent: the
-  SUMMARY/metadata commit itself lands after the executor measured, so exactly one
-  post-measurement commit is expected.
-- Anything else is a **BLOCKER** — the phase must not read as done: real project evidence
-  (#3968) showed 14 plans declaring `commits: 1` with zero git activity, their code sitting
-  uncommitted and one `git reset --hard` from loss. Record it as `commit_claim_mismatch`
-  with both numbers and the SUMMARY path; a mismatch means either the executor narrated
-  instead of measuring or commits were lost after the fact — both require reconciliation
-  before the phase can pass.
+- **Bounded reconciliation (#4670).** A SUMMARY carrying `plan_head_after:` (the executor's
+  HEAD at its measurement moment — after the last task commit, before the SUMMARY commit) is
+  reconciled against the plan's OWN window:
+```bash
+if git merge-base --is-ancestor "$AFTER" HEAD 2>/dev/null \
+   && [ "$(git rev-list --count "${BASE}..${AFTER}")" = "$CLAIMED" ]; then
+  : # consistent
+fi
+```
+  Consistent → done. Anything else is a **BLOCKER** — `commit_claim_mismatch` with both
+  numbers and the SUMMARY path: commits claimed but never made (#3968), task commits lost
+  after the fact, or the plan's recorded window rewritten afterwards (a rebase/amend/cherry-pick
+  of those commits makes `$AFTER` a non-ancestor — recount that plan's commits manually
+  before treating it as a genuine mismatch). The unbounded `${BASE}..HEAD` count is NOT
+  evidence either way: it grows with every later plan's commits and execute-phase's own
+  phase-completion commit, so an honest plan would read as a mismatch (#4670).
+- **Legacy fallback (#4670).** A SUMMARY with a base but no `plan_head_after:` (pre-#4670)
+  cannot be bounded to its own window — report the measured `${BASE}..HEAD` count as a
+  **WARNING** with the SUMMARY's task-commit list for manual counting. The old
+  `ACTUAL == CLAIMED` / `ACTUAL == CLAIMED + 1` tolerance was a guess that later plans'
+  commits defeat; it must never produce a BLOCKER on the unsound window.
 </step>
 
 <step name="extract_tests">
@@ -377,7 +390,7 @@ Display the returned checkpoint EXACTLY as-is:
 - Do NOT add commentary before or after the block.
 - If you notice protocol/meta markers such as `to=all:`, role-routing text, XML system tags, hidden instruction markers, ad copy, or any unrelated suffix, discard the draft and output `{CHECKPOINT}` only.
 
-**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Gemini CLI, etc.) where `AskUserQuestion` is not available.
+**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Antigravity, etc.) where `AskUserQuestion` is not available.
 Wait for user response (plain text, no AskUserQuestion).
 </step>
 
@@ -542,6 +555,42 @@ Commit the UAT file:
 gsd_run query commit "test({phase_num}): complete UAT - {passed} passed, {issues} issues" --files ".planning/phases/XX-name/{phase_num}-UAT.md"
 ```
 
+**If the UAT file has a non-empty `## Deferred Follow-Ups` section,** those items are currently visible only inside this phase's `*-UAT.md` — offer to promote them to the roadmap backlog so they stay visible at the project level (#4546; reuses the exact entry mechanism `next.md`'s `prior_phase_completeness` step uses for plans-without-summaries):
+
+```
+Deferred follow-ups recorded: {N}
+
+They currently live only in {phase_num}-UAT.md. Promote them to the ROADMAP.md backlog?
+
+  [P] Promote to ROADMAP.md 999.x backlog
+  [K] Keep them in the UAT file only
+
+Choice [K]:
+```
+
+(TEXT_MODE: present this as a plain-text numbered list per the text-mode convention and wait for the typed choice.)
+
+**If the user chooses [P]:**
+1. Compute the next backlog number: `{backlog_number}` = the smallest positive integer not already used by an existing `### Phase 999.{n}` heading in `.planning/ROADMAP.md` — scan the headings rather than counting them, since numbering may be non-contiguous. If `.planning/ROADMAP.md` does not exist, create it containing only a `## Backlog` section and use `1`.
+2. Append to that `## Backlog` section one backlog entry per deferred follow-up (each with its own `999.{backlog_number}` heading, incrementing per entry), with `test`/`idea`/`deferred_at` verbatim from the section's YAML and `{idea}` flattened to a single line (newlines → spaces — a multi-line response would corrupt the single-line entry; this mirrors `next.md`'s use of a slug for the same reason):
+
+```markdown
+### Phase 999.{backlog_number}: Follow-up — Phase {phase_num} deferred UAT follow-up: Test {test} (BACKLOG)
+
+**Goal:** Resolve the UAT checkpoint deferred during Phase {phase_num} verification
+**Source phase:** {phase_num}
+**Deferred at:** {date} during /gsd:verify-work {phase} session completion
+**Follow-ups:**
+- [ ] Test {test}: {idea} (deferred {deferred_at})
+```
+
+3. Commit the deferral record:
+```bash
+gsd_run query commit "docs: defer Phase {phase_num} UAT follow-ups to backlog" --files .planning/ROADMAP.md
+```
+
+**If the user chooses [K]:** continue to the summary unchanged — the deferred items remain in the UAT file's `## Deferred Follow-Ups` section.
+
 Present summary:
 ```
 ## UAT Complete: Phase {phase}
@@ -603,7 +652,7 @@ If an active secure-phase step hook exists AND `SECURITY_FILE` exists: check fro
 
 If no active secure-phase step hook exists OR (`SECURITY_FILE` exists AND `threats_open` is `0`):
 
-If execution verification is waiting only on human UAT and this session recorded zero issues, canonicalize the report before the shared completion predicate:
+If execution verification is waiting only on human UAT and this session recorded zero issues, canonicalize the report before the shared completion predicate. (#4663) Zero issues is NOT pass evidence on its own — blocked rows are not issues by this workflow's own rule, so a session that observed nothing (0 passed / 0 issues / N blocked) must NOT flip the report. The flip runs the SAME UAT-row predicate the phase-close uses, in its `--uat-only` form: it skips the verification-status blockers (the report still reads `human_needed` at this point — the full predicate could never pass here), and `passed` means at least one UAT check passed with no row pending/blocked/failed or skipped without a reason. The flagged transition-gate call below stays the final say on canonical verification:
 
 ```bash
 PHASE_DIR=$(printf '%s' "$INIT" | jq -r '.phase_dir // empty')
@@ -612,19 +661,35 @@ VERIFICATION_STATUS=$(gsd_run query verification.status "$PHASE_DIR" 2>/dev/null
 VERIFICATION_STATUS_VALUE=$(printf '%s' "$VERIFICATION_STATUS" | jq -r '.status // empty' 2>/dev/null || echo "")
 PHASE_VERIFICATION_STATUS="$VERIFICATION_STATUS_VALUE"
 if [ "$VERIFICATION_STATUS_VALUE" = "human_needed" ]; then
-  gsd_run query frontmatter.set "$VERIFICATION_FILE" --field status --value passed
+  UAT_PRECHECK=$(gsd_run phase uat-passed "{phase}" --uat-only 2>/dev/null)
+  UAT_PRECHECK_PASSED=$(printf '%s' "$UAT_PRECHECK" | jq -r '.passed // false' 2>/dev/null || echo "false")
+  if [ "$UAT_PRECHECK_PASSED" = "true" ]; then
+    gsd_run query frontmatter.set "$VERIFICATION_FILE" --field status --value passed
+  else
+    UAT_BLOCKERS=$(printf '%s' "$UAT_PRECHECK" | jq -r '.blockers | length' 2>/dev/null)
+    [ -n "$UAT_BLOCKERS" ] || UAT_BLOCKERS="?"
+    echo "NOT canonicalizing: ${UAT_BLOCKERS} UAT row(s) blocked or not passing; verification stays human_needed. Resolve or pass them, then re-run /gsd:verify-work {phase}." >&2
+  fi
 fi
 ```
 
-If `PHASE_VERIFICATION_STATUS` is `stale`, stop before phase advancement and present:
+If `PHASE_VERIFICATION_STATUS` is `stale`, the covered source files changed after the verifier
+last ran — re-run the VERIFIER, not this workflow (`/gsd:verify-work` never rewrites
+VERIFICATION.md; its only write is the human_needed canonicalization, #4663). Spawn the
+verifier for this phase exactly as execute-phase's `verify_phase_goal` step does (subagent
+`gsd-verifier`; phase directory, goal, requirement IDs, and all SUMMARYs in
+`<required_reading>`), then re-read `verification.status` and continue at the fresh/passed
+case below. (#4682)
 
 ```
-All UAT tests passed, but phase advancement is blocked until canonical verification is fresh.
+Verification is stale: covered source files changed after the verifier last ran.
 
 Blocking completion:
 verification is stale
 
-- `/gsd:verify-work {phase}` — re-run verification against the latest summaries
+- Re-run the verifier for phase {phase} (dispatch `gsd-verifier` as in execute-phase's
+  verify_phase_goal step) to regenerate VERIFICATION.md with a fresh digest, then re-run
+  `/gsd:verify-work {phase}`
 ```
 
 Otherwise, check the shared UAT-plus-verification completion predicate before transition:

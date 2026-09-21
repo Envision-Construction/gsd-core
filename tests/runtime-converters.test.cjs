@@ -452,10 +452,10 @@ Do nothing.`;
 //
 // The gemini-RUNTIME's own top-level converter (convertClaudeToGeminiAgent) and
 // its dedicated test coverage were removed with the gemini runtime (#1928,
-// Google sunset Gemini CLI 2026-06-18). convertGeminiToolName and
-// claudeToGeminiTools STAY — they are shared infra reused by Antigravity (which
-// runs on the same backend tool-name vocabulary), so the Antigravity-facing
-// regression coverage below is retained unchanged.
+// Google sunset Gemini CLI 2026-06-18). convertAntigravityToolName and
+// claudeToAntigravityTools STAY — they are shared infra reused by Antigravity
+// (which runs on the same backend tool-name vocabulary), so the
+// Antigravity-facing regression coverage below is retained unchanged.
 
 describe('#1394 regression: excludes Skill/SlashCommand from Antigravity frontmatter', () => {
   // Skill/SlashCommand are Claude-only tools with no Gemini-backend built-in
@@ -463,7 +463,7 @@ describe('#1394 regression: excludes Skill/SlashCommand from Antigravity frontma
   // emit an invalid 'skill'/'slashcommand' tool name, which fails frontmatter
   // validation (tools.N: Invalid tool name) and aborts the entire agent load.
 
-  // Antigravity reuses convertGeminiToolName (it runs on the Gemini backend),
+  // Antigravity reuses convertAntigravityToolName (it runs on the Gemini backend),
   // so the exclusion intentionally applies there too. Antigravity surfaces GSD
   // skills through the skill surface (SKILL.md), not the agent tools: allowlist,
   // so dropping the invalid 'skill' tool name does not remove skill access —
@@ -478,12 +478,12 @@ tools: Read, Write, Bash, Skill, WebFetch, SlashCommand
 <role>Plan the phase.</role>`;
 
     const result = convertClaudeAgentToAntigravityAgent(input);
-    const toolsLine = result.split('\n').find(l => l.startsWith('tools:')) || '';
+    const toolsItems = result.split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(2));
 
-    assert.ok(toolsLine.includes('read_file'), 'maps Read -> read_file');
-    assert.ok(toolsLine.includes('web_fetch'), 'maps WebFetch -> web_fetch');
-    assert.ok(!/\bskill\b/.test(toolsLine), 'no invalid skill tool in Antigravity frontmatter');
-    assert.ok(!/\bslashcommand\b/.test(toolsLine), 'no invalid slashcommand tool in Antigravity frontmatter');
+    assert.ok(toolsItems.includes('view_file'), 'maps Read -> view_file (#4705 native name)');
+    assert.ok(toolsItems.includes('web_fetch'), 'maps WebFetch -> web_fetch');
+    assert.ok(!toolsItems.some(t => /\bskill\b/.test(t)), 'no invalid skill tool in Antigravity frontmatter');
+    assert.ok(!toolsItems.some(t => /\bslashcommand\b/.test(t)), 'no invalid slashcommand tool in Antigravity frontmatter');
   });
 });
 
@@ -2665,5 +2665,42 @@ describe('#3706: the layout seam actually threads the variant', () => {
       cleanup(configDir);
       cleanup(noConfigRoot);
     }
+  });
+});
+
+// ── #4705 — Antigravity agent tools: native names, YAML sequence ─────────────
+// The converter emitted Gemini CLI tool names as a comma-separated scalar;
+// Antigravity's documented subagent contract (antigravity.google/docs/subagents)
+// wants a YAML sequence of native tool names (view_file, grep_search,
+// run_command, replace_file_content are the documented examples). A scalar or a
+// wrong-vocabulary grant can hang the subagent per Antigravity's own warning.
+describe('#4705 — Antigravity agent tools are native names in a YAML sequence', () => {
+  const input = `---
+name: example-reviewer
+description: Inspect source files
+tools: Read, Grep, Bash
+---
+
+Inspect source files.`;
+
+  test('emits the documented native tools as a YAML sequence (#4705)', () => {
+    const result = convertClaudeAgentToAntigravityAgent(input);
+    assert.match(result, /tools:\n- view_file\n- grep_search\n- run_command\n/,
+      'tools must be a YAML sequence of Antigravity-native names (view_file, grep_search, run_command)');
+    assert.doesNotMatch(result, /tools:.*,/m, 'no comma-separated scalar may survive');
+  });
+
+  test('Edit maps to the documented replace_file_content (#4705)', () => {
+    const result = convertClaudeAgentToAntigravityAgent(
+      `---\nname: e\ndescription: d\ntools: Edit\n---\n\nbody`);
+    assert.match(result, /- replace_file_content/, 'Edit -> replace_file_content (documented native name)');
+    assert.ok(!/- replace\b/.test(result), 'the Gemini CLI name replace must not survive');
+  });
+
+  test('unmapped tools keep their lowercase grant (no silent restriction drop) (#4705)', () => {
+    const result = convertClaudeAgentToAntigravityAgent(
+      `---\nname: e\ndescription: d\ntools: Glob, WebFetch\n---\n\nbody`);
+    assert.match(result, /- glob/, 'undocumented tools keep their mapped/lowercase grant');
+    assert.match(result, /- web_fetch/, 'WebFetch stays granted');
   });
 });

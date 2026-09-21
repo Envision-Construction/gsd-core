@@ -231,9 +231,9 @@ function searchPhaseInContent(content: string, escapedPhase: string, phaseNum: s
 
   const section = content.slice(headerIndex, sectionEnd).trim();
 
-  // Extract goal if present (supports both **Goal:** and **Goal**: formats)
-  const goalMatch = section.match(/\*\*Goal(?::\*\*|\*\*:)\s*([^\n]+)/i);
-  const goal = goalMatch ? goalMatch[1].trim() : null;
+  // Extract goal if present (supports both **Goal:** and **Goal**: formats).
+  // #4731: multiline-aware — hard-wrapped Goals read past the line break.
+  const goal = roadmapParserModule.extractPhaseFieldMultiline(section, 'Goal');
 
   // Mode: vertical-MVP slice mode flag. Lowercased + trimmed for canonical
   // comparison; unrecognized values are preserved verbatim for forward-compat.
@@ -509,8 +509,7 @@ function collectAnalyzePhases(
     const sectionEnd = nextHeader ? sectionStart + nextHeader.index! : content.length;
     const section = content.slice(sectionStart, sectionEnd);
 
-    const goalMatch = section.match(/\*\*Goal(?::\*\*|\*\*:)\s*([^\n]+)/i);
-    const goal = goalMatch ? goalMatch[1].trim() : null;
+    const goal = roadmapParserModule.extractPhaseFieldMultiline(section, 'Goal');
 
     const modeMatch = section.match(/\*\*Mode(?::\*\*|\*\*:)\s*([^\n]+)/i);
     const mode = modeMatch ? modeMatch[1].trim().toLowerCase() : null;
@@ -1236,9 +1235,17 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
     }
 
     // Mark completed plan checkboxes (e.g. "- [ ] 50-01-PLAN.md", "- [ ] 50-01:", or "- [ ] **50-01**")
-    for (const summaryFile of phaseInfo!.summaries) {
-      const planId = summaryFile.replace('-SUMMARY.md', '').replace('SUMMARY.md', '');
-      if (!planId) continue;
+    // #4741: tick only plans the phase's own COUNT still counts. `plans` is the
+    // superseded-filtered set (#2349 via scanPhasePlans) while `summaries` is
+    // the raw *-SUMMARY.md listing — a superseded plan can carry a SUMMARY
+    // (e.g. `status: halted`), and ticking it read as "executed" right under a
+    // count line that excludes it. The prefix match mirrors the checkbox regex
+    // below (rows match by planId prefix, which the PLAN-01.md naming shape
+    // relies on), so non-superseded plans tick exactly as before.
+    const tickableSummaries = phaseInfo!.summaries
+      .map((summaryFile) => ({ summaryFile, planId: summaryFile.replace('-SUMMARY.md', '').replace('SUMMARY.md', '') }))
+      .filter(({ planId }) => planId !== '' && phaseInfo!.plans.some((planFile) => planFile.startsWith(planId)));
+    for (const { planId } of tickableSummaries) {
       const planEscaped = escapeRegex(planId);
       const planCheckboxPattern = new RegExp(
         `(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${planEscaped}(?:\\*\\*)?)`,
@@ -1267,9 +1274,28 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
     // Detection is scoped to the active region so a plan that appears in an
     // archived <details> block is still correctly detected as missing from the
     // active milestone section.
+    //
+    // #4786: a plan row may be written WITH the `-PLAN.md` suffix (canonical
+    // template form) or WITHOUT it (hand-written form: `- [x] 659-01 — desc`).
+    // The tick loop above keys on the bare planId stem with a PREFIX match
+    // (pre-existing, out of scope here), while detection required the full
+    // `-PLAN.md` filename — so every suffix-less row was counted missing and
+    // the insertion fired BESIDE the recognized list — 32 checkbox lines for
+    // 16 plans, exit 0. The stem arm below accepts the bare id only up to a
+    // boundary (whitespace / `:` / dashes / `-PLAN.md` / `.md` / `**` / `)`),
+    // so `5-011` never satisfies `5-01`. Deliberately NOT in the boundary set:
+    // `.` — a dotted sub-id (`5-01.5`) is a real distinct plan, and counting
+    // its row as 5-01's presence would suppress a genuine insertion.
     const missingPlans = phaseInfo!.plans.filter((planFile) => {
       const planEscaped = escapeRegex(planFile);
-      return !new RegExp(`-\\s*\\[[x ]\\]\\s*(?:\\*\\*)?${planEscaped}`, 'i').test(activeRegion);
+      if (new RegExp(`-\\s*\\[[x ]\\]\\s*(?:\\*\\*)?${planEscaped}`, 'i').test(activeRegion)) return false;
+      const stem = planFile.replace(/-PLAN\.md$/i, '');
+      const stemEscaped = escapeRegex(stem);
+      const stemPresent = new RegExp(
+        `-\\s*\\[[x ]\\]\\s*(?:\\*\\*)?${stemEscaped}(?=$|\\s|:|—|–|-PLAN\\.md|\\.md|\\*\\*|\\))`,
+        'i'
+      ).test(activeRegion);
+      return !stemPresent;
     });
 
     if (missingPlans.length > 0) {
@@ -1320,9 +1346,9 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
       if (withRows !== roadmapContent) {
         roadmapContent = withRows;
         // Mark any newly-inserted rows that already have summaries as complete
-        for (const summaryFile of phaseInfo!.summaries) {
-          const planId = summaryFile.replace('-SUMMARY.md', '').replace('SUMMARY.md', '');
-          if (!planId) continue;
+        // (#4741: same superseded-filtered tick list as the loop above — a
+        // pre-existing superseded row must stay unchecked on this path too).
+        for (const { planId } of tickableSummaries) {
           const planEscaped = escapeRegex(planId);
           const planCheckboxPattern = new RegExp(
             `(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${planEscaped}(?:\\*\\*)?)`,
@@ -1644,6 +1670,7 @@ function cmdRoadmapAnnotateDependencies(cwd: string, phaseNum: string | null | u
     cross_cutting_constraints: crossCuttingTruths.length,
   }, raw, updated ? `annotated ${waves.length} wave(s), ${crossCuttingTruths.length} constraint(s)` : 'skipped (already annotated or no plan list)');
 }
+
 
 export = {
   cmdRoadmapGetPhase,

@@ -18,7 +18,7 @@
 import frontmatter = require('./frontmatter.cjs');
 import { stateReplaceField, stateExtractField, stateReplaceFieldIfTemplate, stateReplaceFieldWithFallback, stateReplaceFieldInSession, stateCurrentPositionSlice } from './state-document.cjs';
 import { KNOWN_TEMPLATE_DEFAULTS, toFiniteNumber, computeProgressPercent } from './state-document.cjs';
-import { tokenizeHeadings } from './markdown-sectionizer.cjs';
+import { tokenizeHeadings, withSection } from './markdown-sectionizer.cjs';
 import type { HeadingToken } from './markdown-sectionizer.cjs';
 import { deriveProgressFromRoadmap, clampPercent, clampPercentFromFraction, renderProgressBar } from './phase-lifecycle.cjs';
 import { escapeRegex } from './pattern.cjs';
@@ -517,6 +517,82 @@ export function openStateTransaction(init: StateTransactionInit): StateTransacti
  */
 export function rebuildStateTransaction(init: StateTransactionInit): StateTransaction {
   return createStateTransaction('rebuild', init, 'rebuildStateTransaction');
+}
+
+// ----------------------------------------------------------------------------
+// StateWriteIntent — ADR-4629 §8.1 (epic #4629, child C1, migration step 1)
+// ----------------------------------------------------------------------------
+//
+// ADR-1769 Decision 2 scoped the state-transition model to 10 transitions and
+// REJECTED covering all 16 writers; the residual writers still ride an opaque
+// `transformFn: (content: string) => string` (`readModifyWriteStateMd`,
+// src/state.cts). The write seam preserves FRONTMATTER, but the opaque body
+// transform is neither verified (did every intended assertion land? §8.2) nor
+// bounded (did anything OUTSIDE the declared scope change? §8.3) — the residue
+// behind the write-path bugs epic #4629 absorbs.
+//
+// StateWriteIntent is the declared replacement: which field/section assertions
+// the write must land (required vs best-effort) and the mutation scope it may
+// touch (narrow | broad). It EXTENDS StateTransaction so an intent IS-A
+// transaction everywhere the write seam already expects one. C1 ships the TYPE +
+// constructor only — §8.1's caller-side rule ("no residual caller supplies an
+// anonymous transform") is statused *Required — Phase 2*, so nothing constructs
+// this in production yet; C2 (the verifying executor) and C3+ (caller migration)
+// consume it.
+
+export type StateAssertionRequirement = 'required' | 'best-effort';
+export type StateMutationScope = 'narrow' | 'broad';
+
+/** One declared post-state assertion: a frontmatter field or a body section. */
+export type StateFieldAssertion = {
+  readonly field: string;
+  readonly requirement: StateAssertionRequirement;
+};
+
+export type StateWriteIntentInit = {
+  readonly assertions?: ReadonlyArray<StateFieldAssertion>;
+  readonly scope?: StateMutationScope;
+};
+
+/**
+ * ADR-4629 §8.1: a StateTransaction PLUS the declared write intent — the
+ * assertions verified against the re-read file (§8.2) and the mutation scope the
+ * write may not exceed (§8.3). Both are Phase-2 consumers; the type exists now so
+ * Phase 2 has a surface to build on.
+ */
+export type StateWriteIntent = StateTransaction & {
+  readonly assertions: ReadonlyArray<StateFieldAssertion>;
+  readonly scope: StateMutationScope;
+};
+
+/**
+ * Extend an existing StateTransaction into a StateWriteIntent. The base
+ * transaction is REQUIRED — an absent base is a construction failure, mirroring
+ * `createStateTransaction`'s ADR-3473 §8.6 posture (do not tolerate null). `scope`
+ * defaults to the conservative `'narrow'`; `assertions` defaults to none. Frozen
+ * so an intent, like a transaction, cannot be mutated after construction.
+ */
+export function createStateWriteIntent(
+  transaction: StateTransaction,
+  init: StateWriteIntentInit = {},
+): StateWriteIntent {
+  if (transaction === null || typeof transaction !== 'object' || Array.isArray(transaction)) {
+    const err = new Error(
+      'createStateWriteIntent: a base StateTransaction is required (build it with ' +
+      'openStateTransaction / rebuildStateTransaction first). Per ADR-4629 §8.1, an absent ' +
+      'transaction is a construction failure — do not tolerate null.',
+    ) as Error & { code: string };
+    err.code = 'STATE_WRITE_INTENT_TRANSACTION_REQUIRED';
+    throw err;
+  }
+  const assertions: ReadonlyArray<StateFieldAssertion> = Object.freeze(
+    (init.assertions ?? []).map((a) => Object.freeze({ field: a.field, requirement: a.requirement })),
+  );
+  return Object.freeze({
+    ...transaction,
+    assertions,
+    scope: init.scope ?? 'narrow',
+  });
 }
 
 // ----------------------------------------------------------------------------
@@ -2069,8 +2145,26 @@ function completePhaseCore(
     updated.push('Status');
   }
 
-  // Current Plan — reset for the next phase.
-  const planAfter = stateReplaceFieldWithFallback(body, 'Current Plan', 'Plan', 'Not started');
+  // Current Plan — reset for the next phase. #4823: when a Current Position
+  // section exists (the canonical layout, #2956 locator), the reset is scoped
+  // to it — the whole-body fallback 'Plan' run matched any hard-wrapped prose
+  // line starting with `plan:` anywhere in the document and rewrote it to
+  // 'Not started', silently destroying narrative. Legacy sectionless layouts
+  // (fields at top level, no section) keep the whole-body behavior unchanged:
+  // there is no section to scope to, and their fields are the intended
+  // targets.
+  let planAfter;
+  const positionScope = stateCurrentPositionSlice(body);
+  if (positionScope !== null) {
+    planAfter = withSection(
+      body,
+      (h) => (h.level === 2 || h.level === 3) && h.text.trim().toLowerCase() === 'current position',
+      (sectionBody) => stateReplaceFieldWithFallback(sectionBody, 'Current Plan', 'Plan', 'Not started'),
+      { levelBounded: true },
+    );
+  } else {
+    planAfter = stateReplaceFieldWithFallback(body, 'Current Plan', 'Plan', 'Not started');
+  }
   if (planAfter !== body) {
     body = planAfter;
     updated.push('Current Plan');

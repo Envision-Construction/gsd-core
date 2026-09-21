@@ -19,7 +19,7 @@ Read all files referenced by the invoking prompt's execution_context before star
 Parse arguments and load project state:
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd_run is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; case "$(gsd_run runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') GSD_IDENTITY_STATUS=ok;; esac; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 PHASE_ARG="${1}"
 
 # Parse all code-review flags into a structured IR via code-review-flags.cjs.
@@ -59,9 +59,10 @@ Parse from init JSON: `phase_found`, `phase_dir`, `phase_number`, `phase_name`, 
 
 **Input sanitization (defense-in-depth):**
 ```bash
-# Validate PADDED_PHASE contains only digits and dotted segments (e.g., "02", "03.1", "23.1.2")
-if ! [[ "$PADDED_PHASE" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
-  echo "Error: Invalid phase number format: '${PADDED_PHASE}'. Expected digits (e.g., 02, 03.1, 23.1.2)."
+# Validate PADDED_PHASE matches the canonical phase-number grammar (src/phase-id.cts): digits,
+# an optional single uppercase letter, then dotted segments (e.g., "02", "03.1", "23.1.2", "12A")
+if ! [[ "$PADDED_PHASE" =~ ^[0-9]+[A-Z]?(\.[0-9]+)*$ ]]; then
+  echo "Error: Invalid phase number format: '${PADDED_PHASE}'. Expected digits with an optional letter suffix (e.g., 02, 03.1, 23.1.2, 12A)."
   # Exit workflow
 fi
 ```
@@ -150,6 +151,49 @@ If --files NOT provided:
 if [ -z "$FILES_OVERRIDE" ]; then
   SUMMARIES=$(ls "${PHASE_DIR}"/*-SUMMARY.md 2>/dev/null)
   REVIEW_FILES=()
+
+  # Keep the literal heredoc outside command substitution: Bash 3.2 (the
+  # system Bash on macOS) reparses heredoc bodies nested directly in $(...).
+  extract_summary_files() {
+    node - "$1" 2>/dev/null <<'NODE'
+    const fs = require('fs');
+    const content = fs.readFileSync(process.argv[2], 'utf-8');
+    const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
+    if (!match) { process.exit(0); }
+    const yaml = match[1];
+    const files = [];
+    let inSection = null;
+    for (const line of yaml.split('\n')) {
+      if (/^\s+created:/.test(line)) { inSection = 'created'; continue; }
+      if (/^\s+modified:/.test(line)) { inSection = 'modified'; continue; }
+      if (/^\s*[\w-]+:/.test(line) && !/^\s*-/.test(line)) { inSection = null; continue; }
+      if (inSection && /^\s+-\s+(.+)/.test(line)) {
+        let raw = line.match(/^\s+-\s+(.+)/)[1].trim();
+        raw = raw.replace(/^['"]|['"]$/g, '');
+        raw = raw.replace(/\s+\([^)]*\)\s*$/, '');
+        raw = raw.split(/\s+—\s/)[0].trim();
+        // #2666: accept root-level paths (no `/`) and known extensionless build
+        // files, not only nested paths with a trailing extension. The pre-fix
+        // guard required BOTH a directory separator AND a trailing dot-extension,
+        // which silently dropped every repository-root file (Dockerfile,
+        // renovate.json, AGENTS.md, package.json, .gitlab-ci.yml, …) and every
+        // extensionless build file anywhere in the tree (**/Dockerfile, **/Makefile).
+        // Prose bullets are rejected by the known-filename / has-extension
+        // distinction, with the post-processing existence check (`[ -f ]`) as a
+        // backstop — a prose string is never a real file on disk.
+        const KNOWN_EXTENSIONLESS_BUILD_FILES = new Set([
+          'dockerfile', 'containerfile', 'makefile', 'justfile', 'procfile',
+        ]);
+        const hasExtension = /\.[A-Za-z0-9]+$/.test(raw);
+        const basename = raw.split('/').pop().toLowerCase();
+        if (hasExtension || KNOWN_EXTENSIONLESS_BUILD_FILES.has(basename)) {
+          files.push(raw);
+        }
+      }
+    }
+    if (files.length) console.log(files.join('\n'));
+NODE
+  }
   
   if [ -n "$SUMMARIES" ]; then
     # Rewrapped through unquoted command substitution (gsd-core#4109): a bare
@@ -166,44 +210,7 @@ if [ -z "$FILES_OVERRIDE" ]; then
 
       # Extract key_files.created and key_files.modified using node for reliable YAML parsing
       # This avoids fragile awk parsing that breaks on indentation differences
-      EXTRACTED=$(node -e "
-        const fs = require('fs');
-        const content = fs.readFileSync('$summary', 'utf-8');
-        const match = content.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/);
-        if (!match) { process.exit(0); }
-        const yaml = match[1];
-        const files = [];
-        let inSection = null;
-        for (const line of yaml.split('\n')) {
-          if (/^\s+created:/.test(line)) { inSection = 'created'; continue; }
-          if (/^\s+modified:/.test(line)) { inSection = 'modified'; continue; }
-          if (/^\s*[\w-]+:/.test(line) && !/^\s*-/.test(line)) { inSection = null; continue; }
-          if (inSection && /^\s+-\s+(.+)/.test(line)) {
-            let raw = line.match(/^\s+-\s+(.+)/)[1].trim();
-            raw = raw.replace(/^['"]|['"]$/g, '');
-            raw = raw.replace(/\s+\([^)]*\)\s*$/, '');
-            raw = raw.split(/\s+—\s/)[0].trim();
-            // #2666: accept root-level paths (no `/`) and known extensionless build
-            // files, not only nested paths with a trailing extension. The pre-fix
-            // guard required BOTH a directory separator AND a trailing dot-extension,
-            // which silently dropped every repository-root file (Dockerfile,
-            // renovate.json, AGENTS.md, package.json, .gitlab-ci.yml, …) and every
-            // extensionless build file anywhere in the tree (**/Dockerfile, **/Makefile).
-            // Prose bullets are rejected by the known-filename / has-extension
-            // distinction, with the post-processing existence check (`[ -f ]`) as a
-            // backstop — a prose string is never a real file on disk.
-            const KNOWN_EXTENSIONLESS_BUILD_FILES = new Set([
-              'dockerfile', 'containerfile', 'makefile', 'justfile', 'procfile',
-            ]);
-            const hasExtension = /\.[A-Za-z0-9]+$/.test(raw);
-            const basename = raw.split('/').pop().toLowerCase();
-            if (hasExtension || KNOWN_EXTENSIONLESS_BUILD_FILES.has(basename)) {
-              files.push(raw);
-            }
-          }
-        }
-        if (files.length) console.log(files.join('\n'));
-      " 2>/dev/null)
+      EXTRACTED=$(extract_summary_files "$summary")
       
       # Add extracted files to REVIEW_FILES array
       if [ -n "$EXTRACTED" ]; then
@@ -526,11 +533,21 @@ This `if`/`else`/`fi` is the entire guard: when `DEPTH_OK` is not the literal st
 </step>
 
 <step name="check_empty_scope">
-If REVIEW_FILES is empty:
+An empty `REVIEW_FILES` (#3661) means nothing new to re-review — NOT a phase with no standing findings. #4665: with `--fix` + an existing REVIEW.md, route to `dispatch-fix` (the flag covers "if REVIEW.md already exists"):
+
+```bash
+REVIEW_PATH="${PHASE_DIR}/${PADDED_PHASE}-REVIEW.md"
+if [ "${#REVIEW_FILES[@]}" -ne 0 ]; then
+  # non-empty scope: no-op
+  true
+elif [ "$FIX_FLAG" != "true" ] || [ ! -f "${REVIEW_PATH}" ]; then
+  echo "No source files changed in phase ${PHASE_ARG}. Skipping review."
+  # Exit workflow. Do NOT spawn agent or create REVIEW.md.
+  exit 0
+fi
 ```
-No source files changed in phase ${PHASE_ARG}. Skipping review.
-```
-Exit workflow. Do NOT spawn agent or create REVIEW.md.
+
+**`--fix` recovery:** proceed DIRECTLY to `dispatch-fix`, skipping `structural_pre_pass`, `dispatch_reviewer_lanes`, `spawn_reviewer`, `commit_review` — no fresh review, nothing to commit; `code-review-fix.md` resolves the existing REVIEW.md and owns the fix logic. The reviewer agent is not dispatched here.
 </step>
 
 <step name="structural_pre_pass">

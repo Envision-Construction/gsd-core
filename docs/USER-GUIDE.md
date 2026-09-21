@@ -9,7 +9,7 @@ A narrative companion guide to GSD Core — orient yourself here, then follow th
 
 ## Table of Contents
 
-- [Slash-command forms](#slash-command-forms-hyphen-vs-colon)
+- [Slash-command forms](#slash-command-form)
 - [Namespace routing primer](#namespace-routing-primer-gsd-ns--v140)
 - [Reading GSD's output](#reading-gsds-output)
 - [Project lifecycle overview](#project-lifecycle-overview)
@@ -392,7 +392,7 @@ Seeds are forward-looking ideas with trigger conditions. Unlike backlog items, s
 /gsd-capture --seed "Add real-time collab when WebSocket infra is in place"
 ```
 
-`/gsd-new-milestone` scans all seeds and presents matches. **Storage:** `.planning/seeds/SEED-NNN-slug.md`
+`/gsd-new-milestone` scans all seeds and presents matches. **Storage:** `.planning/seeds/SEED-YYMMDD-xxx-slug.md`
 
 Once you've parked a few, audit them on demand instead of waiting for the next milestone to surface them:
 
@@ -844,7 +844,7 @@ For the full audit, harness reference, and the composition note with `model_prof
 
 > **Codex CLI minimum supported version: `0.130.0`** (issue [#3562](https://github.com/open-gsd/gsd-core/issues/3562)).
 
-If you installed GSD for a non-Claude runtime, the installer already configured model resolution. No manual setup is needed — `resolve_model_ids: "omit"` is set automatically, which tells GSD to skip Anthropic model ID resolution and let the runtime choose its own default model.
+If you installed GSD for a non-Claude runtime, the installer already configured model resolution. No manual setup is needed — `resolve_model_ids: "omit"` is set automatically as a Claude protection, and your install's recorded runtime identity tells GSD to skip Anthropic model ID resolution and resolve from the runtime's own model tiers instead.
 
 To assign different models on a non-Claude runtime:
 

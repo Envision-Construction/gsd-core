@@ -139,6 +139,80 @@ function parseFrontmatterCritical(frontmatter) {
 // file list, and must strip em-dash descriptions and parentheticals.
 // ---------------------------------------------------------------------------
 describe('Bug 1 — compute_file_scope SUMMARY parser', () => {
+  test('#4461: the shipped compute_file_scope bash fence parses verbatim', () => {
+    const src = readFileNormalized(WORKFLOW_PATH);
+    const stepStart = src.indexOf('<step name="compute_file_scope">');
+    assert.notStrictEqual(stepStart, -1, 'compute_file_scope step must exist');
+    const marker = src.indexOf('EXTRACTED=$(', stepStart);
+    assert.notStrictEqual(marker, -1, 'Tier-2 SUMMARY extractor must exist');
+    const fenceStart = src.lastIndexOf('```bash\n', marker);
+    const fenceEnd = src.indexOf('\n```', marker);
+    assert.ok(fenceStart !== -1 && fenceEnd !== -1, 'Tier-2 SUMMARY bash fence must be complete');
+    const script = src.slice(fenceStart + '```bash\n'.length, fenceEnd);
+
+    const result = runHook('-n', ['-c', script], {
+      interpreter: 'bash',
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+
+    assert.equal(result.exitCode, 0, `bash rejected the shipped fence:\n${result.stderr}`);
+  });
+
+  test('#4461: the shipped extractor helper treats adversarial SUMMARY text and argv as inert data', () => {
+    const src = readFileNormalized(WORKFLOW_PATH);
+    const helperStart = src.indexOf('  extract_summary_files() {');
+    // Anchor on the real loop gate, not the whitespace-only separator above it:
+    // editors are entitled to trim trailing spaces without changing behavior.
+    const helperEnd = src.indexOf('\n  if [ -n "$SUMMARIES" ]; then', helperStart);
+    assert.ok(helperStart !== -1 && helperEnd !== -1, 'extract_summary_files helper must be extractable');
+    const helper = src.slice(helperStart, helperEnd);
+
+    const dir = createTempDir('gsd-4461-adversarial-');
+    try {
+      const sentinel = path.join(dir, 'MUST-NOT-EXIST');
+      // This directly executes the shipped helper's argv boundary. It does
+      // not claim the workflow's outer SUMMARY-list iteration preserves
+      // whitespace; that pre-existing shell-word-splitting behavior remains
+      // tracked separately by #4109.
+      // Double quotes are not legal in Windows filenames. Keep the argv
+      // adversarial with shell syntax, whitespace, and a quote that is valid
+      // on every supported filesystem; the SUMMARY payload below exercises
+      // a literal double quote independently.
+      const summary = path.join(dir, "SUMMARY $(not-a-command) 'quoted'.md");
+      // Git Bash launches the native Windows Node binary in CI. Forward-slash
+      // absolute paths survive that argv boundary on both platforms, while a
+      // raw drive path's backslashes are MSYS quoting syntax rather than data.
+      const shellSentinel = sentinel.replace(/\\/g, '/');
+      const shellSummary = summary.replace(/\\/g, '/');
+      const dollarPath = `src/$(touch ${shellSentinel}).js`;
+      const backtickPath = `src/\`touch ${shellSentinel}\`.js`;
+      const quotePath = 'src/"quoted".js';
+      fs.writeFileSync(summary, [
+        '---',
+        'key-files:',
+        '  created:',
+        `    - ${dollarPath}`,
+        '  modified:',
+        `    - ${backtickPath}`,
+        `    - ${quotePath}`,
+        '---',
+        '',
+      ].join('\n'));
+
+      const script = ['set -eu', helper, 'extract_summary_files "$SUMMARY_PATH"'].join('\n');
+      const result = toLegacyResult(runHook('-c', [script, 'bash'], {
+        interpreter: 'bash',
+        env: { ...process.env, SUMMARY_PATH: shellSummary },
+        timeoutMs: PROBE_TIMEOUT_MS,
+      }));
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepStrictEqual(result.stdout.trim().split('\n'), [dollarPath, backtickPath, quotePath]);
+      assert.ok(!fs.existsSync(sentinel), 'SUMMARY payload must never execute command substitutions');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
   test('extracts only key-files.created and key-files.modified entries', () => {
     const yaml = [
       'key-files:',
@@ -1501,5 +1575,77 @@ describe('CONS-01..03 — external reviewer evidence consolidation (#4209)', () 
       assert.ok(blockText.includes(prohibition),
         `EXTERNAL_EVIDENCE_BLOCK must restate "${prohibition}" (SAFE-03..06)`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #4665 — `--fix` must be able to act on an existing REVIEW.md even when the
+// incremental scope for a FRESH review is empty. check_empty_scope used to
+// exit the entire workflow whenever REVIEW_FILES was empty — before
+// dispatch-fix — so the documented contract ("after review completes (or if
+// REVIEW.md already exists), auto-apply findings found") was unreachable for
+// any phase whose post-review changes are planning artifacts only.
+// ---------------------------------------------------------------------------
+
+describe('#4665 — check_empty_scope --fix recovery onto an existing REVIEW.md', () => {
+  const readWorkflow = () => fs.readFileSync(WORKFLOW_PATH, 'utf8');
+
+  test('check_empty_scope recovers --fix onto an existing REVIEW.md instead of exiting (#4665)', () => {
+    const src = readWorkflow();
+    const stepIdx = src.indexOf('<step name="check_empty_scope">');
+    const nextStepIdx = src.indexOf('<step name="structural_pre_pass">');
+    assert.ok(stepIdx !== -1, 'check_empty_scope step must exist');
+    assert.ok(nextStepIdx > stepIdx, 'structural_pre_pass must follow check_empty_scope');
+    const block = src.slice(stepIdx, nextStepIdx);
+
+    // The recovery computes the phase's REVIEW.md path with the same
+    // expression spawn_reviewer uses.
+    assert.ok(
+      block.includes('REVIEW_PATH="${PHASE_DIR}/${PADDED_PHASE}-REVIEW.md"'),
+      'check_empty_scope must compute REVIEW_PATH exactly as spawn_reviewer does'
+    );
+    // The skip is now guarded: it fires only when --fix is absent OR no
+    // REVIEW.md exists on disk.
+    assert.ok(
+      block.includes('FIX_FLAG') && block.includes('-f "${REVIEW_PATH}"'),
+      'the empty-scope skip must be guarded on FIX_FLAG and the existing REVIEW.md file check'
+    );
+    // The fence must be self-contained about its own precondition: an explicit
+    // emptiness check, so a literal-minded execution cannot read the recovery
+    // paragraph as skipping a needed fresh review on a non-empty scope.
+    assert.ok(
+      block.includes("\"${#REVIEW_FILES[@]}\" -ne 0"),
+      'check_empty_scope must assert REVIEW_FILES emptiness explicitly, not only in prose'
+    );
+  });
+
+  test('the fix-recovery path routes to dispatch-fix past the fresh-review steps (#4665)', () => {
+    const src = readWorkflow();
+    const stepIdx = src.indexOf('<step name="check_empty_scope">');
+    const nextStepIdx = src.indexOf('<step name="structural_pre_pass">');
+    const block = src.slice(stepIdx, nextStepIdx);
+
+    assert.match(block, /dispatch-fix/, 'the recovery must route to dispatch-fix');
+    assert.match(
+      block, /structural_pre_pass[\s\S]*dispatch_reviewer_lanes[\s\S]*spawn_reviewer[\s\S]*commit_review/,
+      'the recovery must name the fresh-review steps it skips (no reviewer spawn, nothing to commit)'
+    );
+    assert.doesNotMatch(
+      block, /spawn the (reviewer|agent)|gsd-code-reviewer/,
+      'the recovery must not contain an instruction to spawn a fresh reviewer'
+    );
+  });
+
+  test('the plain empty-scope skip survives for the non-fix path (#4665)', () => {
+    const src = readWorkflow();
+    const stepIdx = src.indexOf('<step name="check_empty_scope">');
+    const nextStepIdx = src.indexOf('<step name="structural_pre_pass">');
+    const block = src.slice(stepIdx, nextStepIdx);
+
+    assert.ok(
+      block.includes('No source files changed in phase ${PHASE_ARG}. Skipping review.'),
+      'the plain skip text must remain for invocations without --fix or without an existing REVIEW.md'
+    );
+    assert.match(block, /Exit workflow/i, 'the non-recovery path must still end the workflow');
   });
 });
