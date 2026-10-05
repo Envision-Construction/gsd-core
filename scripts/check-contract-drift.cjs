@@ -27,6 +27,10 @@
  *   7. Reverse direction: a workflow/command matching a quoted `## TOKEN`
  *      no agent declares or emits is dispatch-on-phantom
  *      (unmatched_consumer_token) — F9's shape from the consumer side.
+ *   8. Every reference pointer an agent file carries either resolves to
+ *      exactly the regular file it names, contained under
+ *      gsd-core/references/, or is reported (unresolved_reference_include) —
+ *      a pointer the follower declines is never silently dropped (#4930).
  *
  * Exit 0 = clean. Exit 1 = violations (with diagnostics on stderr).
  */
@@ -35,6 +39,9 @@
 
 const fs   = require('fs');
 const path = require('path');
+// The repo's ONE containment decision (ADR-4650, src/security.cts) — realpath-resolved, so an
+// intermediate component referring outside the root is refused before this loop reads the file.
+const { tryWithinRoot } = require('../gsd-core/bin/lib/security.cjs');
 
 function resolveRoot(argv) {
   const idx = argv.indexOf('--root');
@@ -92,8 +99,9 @@ function toRepoRelative(absPath) {
 /**
  * referenceIncludes(content)
  *
- * Plain scan for `@~/.claude/gsd-core/references/*.md` tokens anywhere in an
- * agent file's content -- inside an `<execution_context>` block (already
+ * Plain scan for `@~/.claude/gsd-core/references/*.md` tokens (and the bare
+ * `@gsd-core/references/*.md` spelling, #4841) anywhere in an agent file's
+ * content -- inside an `<execution_context>` block (already
  * covered structurally by `executionContextRefs` in command-contract-helpers,
  * but a raw regex over the whole string picks those up too) and, just as
  * importantly, OUTSIDE one: agents frequently point at a reference doc from
@@ -105,17 +113,94 @@ function toRepoRelative(absPath) {
  * lives in `gsd-core/references/planner-guidance.md`, which the agent only
  * `@`-includes -- so the producer scan below must follow these includes to
  * see markers an agent's contract legitimately delegates to a reference doc.
- * Returns ROOT-relative paths (`gsd-core/references/foo.md`), de-duplicated.
+ * Returns `{ includes, declined }`: `includes` are ROOT-relative paths
+ * (`gsd-core/references/foo.md`), de-duplicated; `declined` are the pointers
+ * this scan refused to follow, as written, each with its reason (#4930).
  */
 function referenceIncludes(content) {
   const seen = new Set();
-  const re = /@~\/\.claude\/gsd-core\/references\/[A-Za-z0-9._-]+\.md/g;
+  const declined = new Map();
+  // Both spellings the agent corpus has carried: the installed-path form the
+  // installer rewrites per profile, and the bare repo-relative `@gsd-core/…`
+  // form (#4841) that it does not. The bare form is now refused in agents/ by
+  // tests/shipped-reference-cites.test.cjs; it is followed here so a pointer
+  // that slips past that gate is still scanned rather than silently dropped.
+  //
+  // THE TOKEN IS CAPTURED WHOLE AND THE NAME GRAMMAR IS ANCHORED AT BOTH ENDS.
+  // Nested names are allowed (`few-shot-examples/verifier.md`); every segment
+  // starts with `[A-Za-z0-9_-]` — narrower than "non-dot", since `+x.md` and
+  // `é.md` do not match either — so a `.` or `..` segment is never a name.
+  // Anchoring is what makes that a statement about the whole pointer rather
+  // than about its first few segments: an earlier form of this pattern ended
+  // at `\.md` with no following boundary, so `…/references/tdd.md/xx/yy` was
+  // followed as `tdd.md`, and THIS FUNCTION'S CALLER READS THE PATH IT
+  // RETURNS — `fs.readFileSync` in main()'s agent loop — so a truncated prefix
+  // folded the wrong file's text into the scanned corpus. Matching the whole
+  // whitespace-delimited token and requiring it to satisfy the grammar end to
+  // end closes that by construction, and for any separator spelling rather
+  // than the ones a boundary lookahead happens to enumerate.
+  //
+  // ANCHORING DOES NOT ESTABLISH CONTAINMENT, and an earlier revision of this
+  // comment said it did. The grammar's refusal of `.`/`..` segments covers the
+  // TEXTUAL half only: an intermediate component that refers outside the tree
+  // is resolved transparently on the way to the file. Containment is decided
+  // separately, below, by `tryWithinRoot` — and it has to be, because this
+  // loop READS what it resolves.
+  //
+  // A token that does not parse WHOLE is declined rather than truncated — the
+  // conservative half of the same rule — and the decline is RETURNED, not
+  // dropped (#4930): main() reports it as unresolved_reference_include. A
+  // skipped pointer is a scan this tool did not perform, and the verdict it
+  // prints depends on that scan, so the skip has to be visible in the tool's
+  // own output. tests/shipped-reference-cites.test.cjs reports the same token
+  // for the shipped agents/ tree; this is the half that holds for any --root.
+  // FOUR spellings. `@$HOME/.claude/` is a second installed-path form the installer rewrites
+  // explicitly (applyAgentPathRewritesInner's `/\$HOME\/\.claude\//g` replace, beside the `~/.claude/`
+  // one). The fourth is a FAMILY rather than a string: `--relative-includes` (#4377) makes a local
+  // install emit project-relative includes whose prefix is DERIVED from the resolved config dir, so it
+  // is matched by SHAPE — one or MORE leading segments before `gsd-core` (a config dir nested under
+  // the project root emits `@config/nested/gsd-core/…`), none of them `.` or `..`. The `+` keeps the
+  // bare form the bare form by construction, since it needs a segment BEFORE `gsd-core`.
+  //
+  // THE SHAPE IS NARROWER THAN THE FAMILY, and saying otherwise would be the overstatement this
+  // function has already had to retract once. `_computePathPrefix` can emit a prefix this character
+  // class does not match — a config dir named `config+nested` or `ümlaut` — and widening the class to
+  // arbitrary directory names is what would turn every `@scope/…` token in prose into a pointer. So a
+  // prefix outside the class is not followed, which is where this follower was for ALL
+  // project-relative spellings before #4841. The gate's own comment states the same bound; the two
+  // must not drift apart, because between them they are the only record of it.
+  const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+)?gsd-core\/references\/(\S+)/g;
+  const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
+  // Trailing prose punctuation is not part of a filename — a pointer may end a
+  // sentence or sit inside backticks, parentheses or bold markers. The class
+  // cannot eat into `.md`, which ends at `d`.
+  // START-ANCHORED: this tests a CUT SUFFIX, so it must be punctuation END TO END. An unanchored
+  // `/…$/` answers true for `/xx?`, which would let the loop cut a separator and call the remainder a
+  // name — `tdd.md/xx?` following as `tdd.md`, the defect this whole function was rewritten to close.
+  const trailingProseOnly = /^[.,;:!?)\]}>"'`*]+$/;
   let m;
   while ((m = re.exec(content)) !== null) {
-    const relPath = 'gsd-core/references/' + m[0].slice('@~/.claude/gsd-core/references/'.length);
-    seen.add(relPath);
+    const raw = m[1];
+    // MINIMAL strip, same rule as the gate: shortest trailing run whose removal yields a valid name.
+    let candidate = null;
+    for (let cut = 0; cut <= raw.length; cut++) {
+      const probe = raw.slice(0, raw.length - cut);
+      if (cut > 0 && !trailingProseOnly.test(raw.slice(raw.length - cut))) break;
+      if (name.test(probe)) { candidate = probe; break; }
+    }
+    if (candidate === null) {
+      declined.set(m[0], 'does not name a reference whole — the text continues past the name, so nothing is followed');
+      continue;
+    }
+    // AMBIGUITY, mirrored from the gate. If the UNSTRIPPED token also names something, the strip would
+    // pick one of two readings — and this loop READS what it picks, so it declines rather than guess.
+    if (candidate !== raw && fs.existsSync(path.join(ROOT, 'gsd-core', 'references', raw))) {
+      declined.set(m[0], `is ambiguous — \`${raw}\` itself names something on disk, so stripping it to \`${candidate}\` would pick one of two readings; neither is followed`);
+      continue;
+    }
+    seen.add('gsd-core/references/' + candidate);
   }
-  return [...seen];
+  return { includes: [...seen], declined: [...declined].map(([pointer, reason]) => ({ pointer, reason })) };
 }
 
 function remedyFor(kind) {
@@ -158,6 +243,7 @@ function main() {
   const candidateMarkers = new Map();
   const agentTexts = new Map();
   const unclosedFenceViolations = [];
+  const includeViolations = [];
 
   // #4407: .compact.md variant siblings are an alternate rendering of their
   // canonical agent's SAME contract, not a distinct one — excluded so they
@@ -173,12 +259,41 @@ function main() {
     // Single pass over the agent's @-included references: each file is read
     // once and feeds BOTH the read-tag fold (agentTexts) and marker
     // extraction (producer/candidate attribution).
+    // #4930: every include this loop does NOT fold in is reported, never
+    // swallowed. An unfollowed include is text the marker verdict below was
+    // computed without, so a decline that leaves no trace in the output makes
+    // that verdict unexplainable. (lint-command-contract's @-ref existence rule
+    // covers commands' <execution_context> only, not agents.)
     const includeTexts = [];
-    for (const refRelPath of referenceIncludes(content)) {
+    const reportInclude = (pointer, reason) => includeViolations.push({
+      kind: 'unresolved_reference_include',
+      agent,
+      marker: null,
+      detail: `${toRepoRelative(abs)}: ${pointer} ${reason}`,
+    });
+    const { includes, declined } = referenceIncludes(content);
+    for (const { pointer, reason } of declined) reportInclude(pointer, reason);
+    for (const refRelPath of includes) {
+      // CONTAIN BEFORE READ. The name grammar refuses `.`/`..` segments, which covers the TEXTUAL
+      // half of containment and nothing else: an intermediate path component that refers outside
+      // the tree is resolved transparently on the way to the file, so a textually-clean name can
+      // still address something outside `references/`. This loop READS what it resolves and folds
+      // the text into the scanned corpus, so the real path is what has to be checked.
+      const refsDir = path.join(ROOT, 'gsd-core', 'references');
+      const contained = tryWithinRoot(refRelPath.slice('gsd-core/references/'.length), refsDir);
+      if (contained === null) {
+        reportInclude(refRelPath, 'does not resolve inside gsd-core/references/');
+        continue;
+      }
       try {
-        includeTexts.push(fs.readFileSync(path.join(ROOT, refRelPath), 'utf-8'));
-      } catch {
-        // include miss — lint-command-contract rule 4 owns @-ref existence
+        // Read the ContainedPath the predicate returned, never a re-joined path (ADR-4650).
+        if (!fs.lstatSync(contained).isFile()) {
+          reportInclude(refRelPath, 'is not a regular file');
+          continue;
+        }
+        includeTexts.push(fs.readFileSync(contained, 'utf-8'));
+      } catch (e) {
+        reportInclude(refRelPath, e && e.code === 'ENOENT' ? 'does not exist' : `could not be read (${e && e.code})`);
       }
     }
     agentTexts.set(agent, [content, ...includeTexts].join('\n'));
@@ -237,6 +352,7 @@ function main() {
   const allViolations = [
     ...parseViolations,
     ...unclosedFenceViolations,
+    ...includeViolations,
     ...contractViolationsList,
     ...readTagViolationsList,
     ...reverseViolationsList,

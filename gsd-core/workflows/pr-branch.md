@@ -25,7 +25,7 @@ Parse `$ARGUMENTS` for target branch. If no argument is supplied, detect the
 default branch via the single resolver (#1146).
 
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { set -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}" "$HOME/.gemini/antigravity-ide" "$HOME/.gemini/antigravity-cli" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}" "${CLINE_CONFIG_DIR:-$HOME/.cline}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}" "${CODEX_HOME:-$HOME/.codex}" "${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}" "${HERMES_HOME:-$HOME/.hermes}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}" "${KIMI_CONFIG_DIR:-$HOME/.config/agents}" "$HOME/.agents" "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}" "${TRAE_CONFIG_DIR:-$HOME/.trae}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}" "${ZCODE_CONFIG_DIR:-$HOME/.zcode}" "${GROK_AGENTS_HOME:-$HOME/.agents}"; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 CURRENT_BRANCH=$(git branch --show-current)
 TARGET=${1:-$(gsd_run query git.base-branch)}
 ```
@@ -238,11 +238,13 @@ Classify commits:
 git log --oneline "$TARGET".."$CURRENT_BRANCH" --no-merges
 ```
 
-**Canonical path declarations.** These two lines are the single source of truth for the
+**Canonical path declarations.** These three lines are the single source of truth for the
 whole command. `create_pr_branch` derives *which paths it removes* from them, and `verify`
-derives *which paths must not appear* from the same two lines — so the two steps cannot
+derives *which paths must not appear* from the same three lines — so the two steps cannot
 disagree about what the filter promised. Declare them exactly once; do not restate either
-list anywhere else in this file.
+list anywhere else in this file. Their literal values are drift-guarded (`npm run lint:ci`,
+`scripts/lint-pr-branch-pattern-drift.cjs`) against the canonical `src/pr-branch-patterns.cts`
+constants — change one side and update the other, or the guard fails.
 
 ```bash
 # Transient planning subdirectories — reviewer noise (PLAN.md, SUMMARY.md, CONTEXT.md,
@@ -251,8 +253,20 @@ TRANSIENT_DIRS="phases quick research threads todos debug seeds codebase ui-revi
 
 # Structural planning files — repository planning state. Preserved in default mode,
 # filtered out in strict mode. Anchored on both alternatives so `.planning/STATEX.md`
-# and `.planning/STATE.md.bak` are NOT treated as structural.
-STRUCTURAL_RE="^\.planning/(STATE|ROADMAP|MILESTONES|PROJECT|REQUIREMENTS)\.md$|^\.planning/milestones/"
+# and `.planning/STATE.md.bak` are NOT treated as structural. The milestones
+# alternative matches only FILES directly under `.planning/milestones/` (e.g.
+# `v1.0-ROADMAP.md`) — not a `<milestone>-phases/` subdirectory nested there. That
+# subdirectory is reviewer noise, not structural state (#4605); it falls through to
+# `$MILESTONE_PHASES_RE` below instead.
+STRUCTURAL_RE="^\.planning/(STATE|ROADMAP|MILESTONES|PROJECT|REQUIREMENTS)\.md$|^\.planning/milestones/[^/]+\.md$"
+
+# Milestone-scoped phase-plan directories — the same reviewer noise as
+# `$TRANSIENT_DIRS`'s `phases` entry, but nested per-milestone once a project has
+# passed at least one milestone: `.planning/milestones/<milestone>-phases/`. The
+# milestone slug (`v1.0`, `m2`, ...) varies per project, so this is declared as a
+# shape, not a literal path — a single path segment standing in for the slug,
+# anchored the same way `$STRUCTURAL_RE`'s alternatives are (#4605).
+MILESTONE_PHASES_RE="^\.planning/milestones/[^/]+-phases/"
 ```
 
 Derive the mode's two projections — `FILTER_PATHS` (what `create_pr_branch` removes from
@@ -263,11 +277,36 @@ if [ "$PR_STRICT" = "true" ]; then
   FILTER_PATHS=".planning/"
   FORBIDDEN_RE="^\.planning/"
 else
-  # Rewrapped through unquoted command substitution (gsd-core#4109): a bare
-  # `$VAR` word-splits under bash but not zsh, collapsing every element onto
-  # one iteration there.
-  FILTER_PATHS=$(for d in $(printf '%s' "$TRANSIENT_DIRS"); do printf '.planning/%s/ ' "$d"; done)
-  FORBIDDEN_RE="^\.planning/($(echo "$TRANSIENT_DIRS" | tr ' ' '|'))/"
+  # One path per LINE, not per space (#4605) — see create_pr_branch's consumption
+  # loop: a discovered `<milestone>-phases/` directory can contain a space, so
+  # whitespace cannot be the delimiter. Rewrapped through unquoted command
+  # substitution (gsd-core#4109): a bare `$VAR` word-splits under bash but not
+  # zsh, collapsing every element onto one iteration there.
+  FILTER_PATHS=$(for d in $(printf '%s' "$TRANSIENT_DIRS"); do printf '.planning/%s/\n' "$d"; done)
+  FORBIDDEN_RE="^\.planning/($(echo "$TRANSIENT_DIRS" | tr ' ' '|'))/|$MILESTONE_PHASES_RE"
+
+  # $MILESTONE_PHASES_RE is a shape, not a path — create_pr_branch's filter loop
+  # needs concrete paths to `git rm`, so resolve which `<milestone>-phases/`
+  # directories actually exist in this worktree (#4605). A project with no
+  # milestones yet (`.planning/milestones/` absent) yields nothing here, same as
+  # any other empty FILTER_PATHS entry. `-exec printf ... \;` rather than
+  # `for D in $(find ...)`: a `for` over unquoted `find` output word-splits a
+  # milestone slug containing a space into two spurious entries (ShellCheck
+  # SC2044) — the exact class of bug #4109 already fixed once in this file.
+  # `2>/dev/null` also swallows a genuine `find` failure (e.g. an unreadable
+  # `.planning/milestones/`), not just the expected-absent case — the unsafe
+  # direction, since a real failure then silently leaves those paths
+  # unfiltered rather than aborting. Accepted here because `$FORBIDDEN_RE`
+  # still asserts their absence downstream in `verify`, catching what this
+  # step misses.
+  MILESTONE_PHASE_DIRS=$(find .planning/milestones -mindepth 1 -maxdepth 1 -type d -name '*-phases' -exec printf '%s/\n' {} \; 2>/dev/null)
+  # Appended as its own LINE, and only when non-empty so no blank entry is
+  # introduced. The separator is a literal newline inside the quotes — `$(...)`
+  # has already stripped the trailing one off each side.
+  if [ -n "$MILESTONE_PHASE_DIRS" ]; then
+    FILTER_PATHS="${FILTER_PATHS}
+${MILESTONE_PHASE_DIRS}"
+  fi
 fi
 ```
 
@@ -347,10 +386,71 @@ for HASH in $(printf '%s' "$INCLUDED_COMMITS"); do
   # filtered path is absent from HEAD by construction. Do not treat it as a failure here.
   git cherry-pick --no-commit "$HASH" || true
 
-  for P in $(printf '%s' "$FILTER_PATHS"); do
+  # One path per LINE, not per space (#4605) — a discovered `<milestone>-phases/`
+  # directory can contain a space, so `for P in $(printf ...)` would word-split it
+  # into spurious entries. `while IFS= read -r` reads $FILTER_PATHS one line at a
+  # time instead, matching the newline-safe pattern used to build $FILTER_PATHS above.
+  while IFS= read -r P; do
+    [ -n "$P" ] || continue
     git rm -r -f -q --ignore-unmatch -- "$P" 2>/dev/null || true
     git checkout HEAD -- "$P" 2>/dev/null || true
-  done
+  done <<FILTER_PATHS_EOF
+$FILTER_PATHS
+FILTER_PATHS_EOF
+
+  # #4606: a conflict on a "third bucket" path (`.planning/` — not `$FORBIDDEN_RE`
+  # transient, not `$STRUCTURAL_RE` structural — the same bucket `verify`'s
+  # `$OTHER` reports) is not a real conflict either, and needs its own
+  # resolution distinct from the filter loop above. Such a path is never
+  # per-commit replayed by classification — a commit touching ONLY a
+  # third-bucket path is EXCLUDEd — so when a LATER included commit (structural
+  # or code + that same path) reuses it, the diff's context can predate
+  # whatever the PR branch actually has, and cherry-pick reports a genuine
+  # content conflict on a path this command was never asked to filter.
+  # `git checkout --theirs` resolves it correctly by construction: in a
+  # cherry-pick's 3-way merge, "theirs" IS $HASH's own content for that path —
+  # exactly the chained final value the path is owed, the same guarantee
+  # `create_pr_branch` already gives structural files. A path $HASH deletes has
+  # no "theirs" blob to check out, so fall back to accepting the deletion (the
+  # `verify` step's `$PLANNING_DELETIONS` gate independently catches this if
+  # `$TARGET` ever legitimately tracked that path).
+  #
+  # The deleted-by-$HASH case is checked explicitly with `git cat-file -e`
+  # rather than inferred from `checkout --theirs` failing, so an unrelated
+  # checkout failure (I/O, permissions, a stale index lock) can't be
+  # misread as a deletion and silently `git rm`-ed — it falls through to the
+  # unmerged-path halt below instead.
+  #
+  # The `git add` below restages a path already committed to $CURRENT_BRANCH's
+  # own history onto the disposable $PR_BRANCH; not a commit_docs bypass
+  # (#1783/#3585), which guards against staging .planning/ content that was
+  # never committed at all.
+  #
+  # The unmerged list is snapshotted, then read one path PER LINE. `for P in
+  # $(git diff --name-only --diff-filter=U)` would split it on IFS instead: a
+  # third-bucket path containing a space (`.planning/My Notes.md`) becomes the
+  # fragments `.planning/My` and `Notes.md`, neither of which names the real
+  # conflicted file, so nothing is resolved and the run aborts with exactly the
+  # #4606 failure this block exists to prevent. Same word-split class as #4109.
+  # Snapshot-then-iterate (rather than piping) both keeps the list stable while
+  # the body restages paths and keeps the body in THIS shell, not a subshell.
+  UNMERGED_PATHS=$(git diff --name-only --diff-filter=U)
+  while IFS= read -r P; do
+    [ -n "$P" ] || continue
+    case "$P" in
+      .planning/*) ;;
+      *) continue ;;
+    esac
+    if echo "$P" | grep -Eq "$FORBIDDEN_RE"; then continue; fi
+    if echo "$P" | grep -Eq "$STRUCTURAL_RE"; then continue; fi
+    if git cat-file -e "$HASH:$P" 2>/dev/null; then
+      git checkout --theirs -- "$P" && git add -- "$P" # gsd-scan-ignore: #4606 -- see block comment above
+    else
+      git rm -f -q -- "$P" 2>/dev/null || true
+    fi
+  done <<UNMERGED_PATHS_EOF
+$UNMERGED_PATHS
+UNMERGED_PATHS_EOF
 
   # Anything still unmerged is a REAL conflict, outside the filter. Halt — do not
   # improvise a resolution and do not continue, which would drop the rest of the queue.

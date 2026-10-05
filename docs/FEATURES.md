@@ -211,6 +211,8 @@
   - [Reachable Lint Rules and a Non-Destructive Quick-Task Append](#3951-reachable-lint-rules-and-a-non-destructive-quick-task-append)
   - [Per-Task External-Tracker Content-Resolution Seam](#3970-per-task-external-tracker-content-resolution-seam)
   - [Unreadable-Directory Scope Signal](#4014-unreadable-directory-scope-signal)
+  - [Graphify CLI Preferred for Planner and Researcher Graph Queries](#4836-graphify-cli-preferred-for-planner-and-researcher-graph-queries)
+  - [Gate Evidence and Verdict-Driven Exit Status](#5170-gate-evidence-and-verdict-driven-exit-status)
 
 ---
 
@@ -989,6 +991,12 @@ only the subtrees the phase actually changed. Each produced document carries
 `last_mapped_commit` in its YAML frontmatter so drift can be measured
 against the mapping point, not HEAD.
 
+**Staleness is measured against all seven documents (#5134):** the drift gate
+treats a directory as mapped when its path appears in any of the seven
+documents, flags modified and deleted files inside mapped directories as well
+as new structure outside them, and withholds paths that are unsafe to pass to
+the mapper. See [Post-Execute Codebase Drift Detection](post-execute-codebase-drift-detection.md).
+
 ---
 
 ### 27b. Existing Codebase Onboarding
@@ -1025,18 +1033,46 @@ against the mapping point, not HEAD.
   warn-only or spawn `gsd-codebase-mapper` with `--paths` scoped to
   affected subtrees.
 
-**What counts as drift:**
-- New directory outside mapped paths
-- New barrel export at `(packages|apps)/*/src/index.*`
-- New migration file (supabase/prisma/drizzle/src/migrations/…)
-- New route module under `routes/` or `api/`
+**What counts as drift:** additions are drift outside mapped territory;
+modifications and deletions are drift inside it.
+- New directory outside mapped paths (`new_dir`)
+- New barrel export at `(packages|apps)/*/src/index.*` (`barrel`)
+- New migration file (supabase/prisma/drizzle/src/migrations/…) (`migration`)
+- New route module under `routes/` or `api/` (`route`)
+- Modified file inside a mapped directory (`modified`; a typechange counts here)
+- Deleted file inside a mapped directory (`deleted`; a rename's old path counts here, its new path as an addition)
+
+**Why the rule is inverted.** A new directory is by definition outside what
+the map describes, so an addition is drift where the map is silent. An edit or
+deletion can only matter where the map does speak: a map that names a
+directory describes its contents, and changing or removing them makes the
+description stale. Counting modifications outside mapped territory would flag
+every ordinary edit; counting only additions, as the gate did before #5134,
+never flagged a map that went stale through edits or deletions.
+
+**Mapped territory is the whole map.** The gate reads all seven
+`.planning/codebase/*.md` documents, not only `STRUCTURE.md`. A directory is
+mapped when its path appears, at a path-component boundary, in any of them.
+`STRUCTURE.md` remains required. A document that is not a regular file or is
+larger than 1 MiB is unreadable and is reported in `documents_unreadable`
+(for `STRUCTURE.md`, the gate skips with `cannot-read-structure-md`).
+
+**Unsafe paths are withheld, not printed.** `affected_paths`, the `--paths`
+argument and the paths listed in the message pass only through the path
+allowlist (ASCII letters, digits, `_ . -`, `/`-separated, no `..`, not
+absolute). A path that fails is never interpolated into the message or the
+mapper prompt; the message states how many were withheld and
+`withheld_paths` / `withheld_count` carry them for inspection. A directory with
+a non-ASCII or space-containing name is withheld and counted rather than
+dropped silently. If no safe path remains, `auto-remap` does not spawn the
+mapper. See [`verify codebase-drift`](../CLI-TOOLS.md#verify-codebase-drift-structural-drift-of-the-codebase-map-2003-5134).
 
 **Non-blocking guarantee:** any internal failure (missing STRUCTURE.md,
 git errors, mapper spawn failure) logs a single line and the phase
 continues. Drift detection cannot fail verification.
 
 **Requirements:**
-- REQ-DRIFT-01: System MUST detect the four drift categories from `git diff
+- REQ-DRIFT-01: System MUST detect the six drift categories from `git diff
   --name-status last_mapped_commit..HEAD`
 - REQ-DRIFT-02: Action fires only when element count ≥ `workflow.drift_threshold`
 - REQ-DRIFT-03: `warn` action MUST NOT spawn any agent
@@ -2381,6 +2417,8 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 - REQ-REVIEW-06: `--auto` flag MUST enable fix + re-review iteration loop, capped at 3 iterations
 - REQ-REVIEW-07: Feature MUST be gated by `workflow.code_review` config flag
 - REQ-REVIEW-08: `workflow.code_review_point` MUST select which loop point the automatic review step registers at (`execute:post` default, or `execute:wave:post`), independent of the `workflow.code_review` on/off gate and of manual `/gsd-code-review` invocation (#3661)
+- REQ-REVIEW-09: The in-phase `code_review_gate` MUST report the per-severity counts it parses from REVIEW.md, so a review with one `info` finding is distinguishable from a review with a Critical
+- REQ-REVIEW-10: Each finding MUST carry a recorded disposition, so a triaged finding is distinguishable from a forgotten one
 
 **Config:**
 | Setting | Type | Default | Description |
@@ -2414,6 +2452,143 @@ Escalation is **whole-review, not per-file**: depth is a single scalar handed to
 v1 supports **directory-prefix matching only, not glob syntax**: no glob engine (`minimatch`, `picomatch`, `fast-glob`) exists in this project and none was added for this feature. A path containing `*` or `?` (e.g. `src/auth/**`) is a configuration error rather than a silent near-miss, because accepting it as sugar for a prefix would make unsupported patterns look armed when they match nothing. Every use case in the issue is expressible as a directory prefix. See [Scope code review depth by path](how-to/scope-code-review-depth-by-path.md) for the resolution order, error table, and a worked example.
 
 **Optional external reviewer lanes (#4209):** `/gsd-code-review` accepts the same reviewer-lane flags as `/gsd-review` — any flag the roster declares (run `gsd_run review-lane flags` to list them for your installation, e.g. `--codex`, `--agy`). No reviewer-lane flag is the default and is byte-for-byte unchanged from before #4209: zero lane selection, plan, or invoke calls, and only the internal `gsd-code-reviewer` agent runs. Passing one or more flags asks those lanes to independently review the same already-resolved file scope alongside the internal agent, through the same shared capability-trait interpreter and `review-lane plan`/`invoke` machinery `/gsd-review` uses — no second implementation. Each lane's prompt carries only the repository root, canonical file paths, review depth, and base SHA, never source file contents, under four fixed prohibitions (no source mutation, no test execution, no background processes, no polling). External findings are unverified corroborating evidence: `gsd-code-reviewer` independently re-verifies every claim against the actual source before writing it to `REVIEW.md`, so there remains exactly one `REVIEW.md` schema regardless of how many lanes ran. An explicitly requested lane that is unavailable or fails is reported as a warning, never silently dropped and never a raw-CLI fallback. This is separate from `/gsd-review`, which reviews `PLAN.md` files before execution, not source code.
+**In-phase review reporting and disposition**
+
+`/gsd-execute-phase`'s `code_review_gate` runs code review, then reports what it found:
+
+```
+Code review: 23 findings — 1 critical, 9 warning, 8 info.
+Consider running: /gsd-code-review 1 --fix
+```
+
+Both `critical:` and its documented tier-equivalent `blocker:` are accepted. A REVIEW.md written
+without a `findings:` block has no counts to report, and the gate falls back to the countless form
+rather than printing a half-filled line.
+
+The gate then writes `<NN>-REVIEW-DISPOSITION.md` beside the review — one row per finding ID,
+defaulting to `open`:
+
+| Finding | Severity | Disposition | Source |
+|---------|----------|-------------|--------|
+| CR-01 | critical | open | - |
+| WR-01 | warning | fixed | 01-REVIEW-FIX.md |
+
+`open` means recorded but not yet triaged, and it is the only value the gate assigns on its own.
+
+**Where the reconciliation happens, which is not where you might expect.** The in-phase gate runs
+immediately after review, and at that moment `<NN>-REVIEW-FIX.md` does not exist — the gate invokes
+review with neither `--fix` nor `--auto` — so every row it writes is `open`. The `fixed` and
+`skipped` outcomes are reconciled by `/gsd-code-review <N> --fix`, which records them once the fix
+report is on disk. Running the gate alone therefore tells you what was found; running `--fix` is
+what records what happened to it.
+
+**`--auto`'s iterations are reconciled too, and that takes reading more than the final report.**
+The loop overwrites `REVIEW-FIX.md` on every pass and the re-review stops reporting a finding once
+it is fixed, so a finding closed in iteration 1 appears in neither final artifact. The gate
+therefore also reads the per-iteration backups the loop writes (`<NN>-REVIEW-FIX.iterN.md`), newest
+first, so the most recent statement about an ID wins; the backups are removed after the ledger has
+read them, not before. Without this a fully successful multi-iteration run recorded its early fixes
+as `open (not in the current review)` — indistinguishable from a finding that vanished for an
+unrelated reason, which is the one distinction this ledger exists to make. A finding a fix report
+decided but the current review no longer reports gets a row of its own, carrying that decision and
+marked *(not in the current review)*.
+
+A converged `--auto` run also reaches the gate with a clean review and, on a direct
+`/gsd-code-review` invocation, no ledger from the in-phase gate. A fix report on disk is reason
+enough to record: without that, a run in which every finding was fixed and committed produced no
+disposition record at all.
+
+**A decision belongs to a finding, not to an ID.** IDs are reused across re-reviews — `--auto`
+renumbers — so the ledger records each finding's title alongside its disposition, and a recorded
+decision is carried forward only while the ID still names the same finding. Without that, a prior
+`CR-01 fixed` would be inherited by a brand-new `CR-01`, which is a false decision in the one
+artifact whose purpose is telling triaged from forgotten.
+
+**The limitation that follows, stated rather than hidden.** When an ID *is* reused, the new finding
+is recorded `open` (nobody decided anything about it) and the earlier decision **loses its row** —
+the ledger keys rows on the finding ID, and two rows under one ID is an ambiguity, not a record. The
+drop is reported on the console, naming the ID and what had been decided — for a *recorded* decision.
+A prior row still sitting at `open` is replaced silently, and deliberately: `open` means nobody had
+decided anything, so there is no decision to lose. Preserving a recorded decision in the file
+was tried and withdrawn: it needed a second identity scheme and produced a fresh defect on each of
+three review passes. Recovery is the ledger's own git history where `commit_docs` is on — which is
+why the console reports the drop rather than pointing at a commit that may not exist.
+
+**Two residuals, since (ID, title) is not proof of identity.** A ledger written before titles were
+recorded carries none, so its decisions are inherited on the ID alone — refusing there would reset
+every decision in every existing ledger, which is the loss the guard exists to prevent. And two
+genuinely distinct findings that share both an ID and a title are indistinguishable to this key.
+Separating them needs a second identity scheme, which is the thing that was just withdrawn.
+
+Reconciliation applies an outcome only when the fix report names the **same** finding, because
+finding IDs are reused across re-reviews and a stale report would otherwise declare a brand-new
+`CR-01` already fixed. Titles are compared with runs of whitespace collapsed, so a fixer that
+re-spaces a title still reconciles. A title that differs otherwise — including one **wrapped across
+lines**, since a `###` heading is one line and the continuation is a separate paragraph — leaves the
+row `open` and is reported, naming the ids it could not reconcile, rather than passing silently. The report does not claim to
+know whether such a report is stale or merely re-titled, because it cannot tell.
+
+The disposition column is a closed vocabulary — `open`, `fixed`, `skipped`, `deferred`. A
+hand-edited value outside it is not treated as a decision: the row falls back to `open`, so a
+typo cannot quietly mark a phase as triaged.
+
+Severity comes from the section a finding sits under (`## Critical Issues`, `## Warnings`,
+`## Info`) when the review uses those headings, and from the ID prefix otherwise. The section is
+the reviewer's own statement of severity, so a Critical filed under `## Critical Issues` is
+recorded critical even if its ID was mis-numbered `WR-04`. That severity is then **remembered**:
+a row the current review no longer reports, or reports under no recognized heading, keeps the
+severity the ledger recorded rather than having it re-inferred from the ID prefix — so the
+mis-numbered `WR-04` above stays `critical` on the second run, deferred or not. The precedence is
+the current review's section, then the recorded value, then the prefix; the recorded value is
+inherited only while the ID still names the same finding, by the same title check the disposition
+uses, so a reused ID starts from its own review. That check has the same compatibility arm the
+disposition has: a ledger written before titles were recorded carries no title to compare, so its
+severities — like its decisions — inherit on the ID alone.
+
+If the review's `total:` exceeds the number of findings whose headings the gate could parse, the
+shortfall is stated — on the console and as an `unparsed:` key in the ledger's frontmatter. A
+finding the gate cannot record is the one a human most needs to see, so it is never dropped
+silently. The one input that produces no shortfall is a `findings:` block that disagrees with
+itself: where `critical` (or `blocker`), `warning` and `info` are all present, numeric and do not
+sum to `total`, the gate has no trustworthy number to reconcile against and withholds the key
+rather than reporting a figure derived from one — the same input on which the console line
+already withholds the severity breakdown. Counts that are merely absent, partial or non-numeric
+are not a disagreement, and the shortfall is still reported from `total` alone. `deferred` is the one disposition the gate never writes: it is recorded by hand, and the
+reason recorded beside it in the Source cell is preserved across re-runs, a literal `|` included
+once escaped. One exception, because it cannot be resolved: a reason ending in the literal phrase
+*(not in the current review)* loses that trailing phrase, since it is indistinguishable from the
+carried marker the gate appends. The alternative is worse — a stored marker never leaves, so a
+carried finding that later reappears would keep claiming it is absent from the review reporting it.
+
+Re-running the gate keeps every row it can, so a decision recorded here is not
+overwritten by a later pass. A finding the current review no longer reports — `--auto` re-reviews
+and rewrites REVIEW.md, so this happens routinely — is **carried** rather than dropped, marked
+*(not in the current review)*. That holds whether or not it was triaged: losing a decided row would
+erase the record that the finding was seen, and losing an *untriaged* one would erase the record
+that it was never answered, which is the trace this ledger exists to keep. The cost is that a
+renumbered finding shows under both IDs until the old row is decided; the marker makes that legible.
+A run that changes nothing rewrites nothing, so a re-executed phase does not produce a docs commit
+with no content.
+
+One residual is concurrency: the ledger is read, rebuilt and written whole, with no lock. Two
+dispatchers can run this step (`code_review_gate` and `code-review-fix`'s `record_disposition`) and
+a human is invited to hand-edit the file, so two writers overlapping would lose one's update. This is
+the shape #3780 reported for `WINDOWS.md` under parallel executors, closed there by a cross-process
+lock (#4681); the disposition step does not take that lock. No lost update has been reproduced; the
+window is stated so it is not mistaken for a guarantee.
+
+Not to be confused with the **Review Dispositions Ledger** of reviews-mode planning
+([ADR-3806](../adr/3806-review-dispositions-ledger.md), `docs/features/review-dispositions-ledger.md`):
+that one is a `## Review Dispositions Ledger` section inside `PLAN.md`, append-only per round, over
+`REVIEWS.md` findings. This artifact is a sibling file beside `REVIEW.md`, rewritten idempotently
+with rows carried. Same word, different inputs, writers, files and durability rules; neither governs
+the other.
+
+The record is a sibling artifact rather than a section inside REVIEW.md because `--auto`'s
+re-review loop rewrites REVIEW.md on every iteration — a ledger kept inside it would not survive
+the next pass — and because REVIEW.md has a single writer (`gsd-code-reviewer`) that the gate is
+not. The gate remains advisory throughout: it reports and records, and never blocks phase
+completion.
 
 ---
 
@@ -2789,6 +2964,37 @@ With `features.global_learnings: true`, phase completion runs the extraction for
 **Configuration:** `workflow.tdd_mode`
 **Reference files:** `tdd.md`, `checkpoints.md`
 
+#### RED evidence formats
+
+`check tdd-red-evidence` selects a parser by the captured report format. Node's
+built-in runner and Vitest (`tap` and `tap-flat`) share the TAP adapter; Maven
+Surefire and Failsafe share the JUnit XML adapter; `swift test` (swift-testing)
+and Python `unittest` text output have their own adapters. The command name does not
+select or bypass validation. Reports from other producers can use these same
+formats. Unsupported or malformed reports return `INVALID_RED` with
+`evidence.report_errors`; configure a supported reporter before proceeding.
+
+`src/report-parser.cts` owns the adapters and their common result contract:
+individual test identities, optional class groups, pass/fail/skip/TODO statuses,
+and report validity. A new format needs an adapter and regression evidence;
+the RED policy in `src/tdd-red-evidence.cts` stays independent of the format.
+No runner-specific TAP summary counters are required.
+
+The gate rejects incomplete plans/documents, bailouts, skipped/TODO/cancelled targets,
+and ambiguous names. Qualify repeated TAP names with their suite path, and
+repeated JUnit class names with their package, and repeated `unittest` methods
+with their `module.Class.method` id. A swift-testing target is its display name
+or its function name; repeated swift-testing names cannot be qualified and
+block GREEN. Evidence counts are individual
+tests, excluding suite-closing TAP points; a `unittest` method with failing
+subTests or a parameterized swift-testing test counts once. `evidence.matched_test` and the
+persisted `failing_test` identify the target failure rather than an unrelated
+first failure. Report freshness and whether the assertion tests the intended
+behavior still require executor inspection; the parser cannot establish them.
+
+The upstream parsers (`tap-parser` and `saxes`) ship as reproducible bundles,
+including license notices, so installed runtimes need no `node_modules`.
+
 
 ---
 
@@ -2883,6 +3089,7 @@ With `features.global_learnings: true`, phase completion runs the extraction for
 - REQ-GRAPH-04: `graphify.cjs` falls back to `graph.links` when `graph.edges` is absent so older graph artifacts keep rendering.
 - REQ-GRAPH-05: Graphify is invoked through `gsd-tools.cjs graphify ...` command handlers.
 - REQ-GRAPH-06: The knowledge-graph location is configurable via `graphify.graph_path` (issue #1825) so one umbrella-level cross-repo graph can serve multiple sibling projects; `query`/`status`/`diff` read the configured graph (relative to project root), with a byte-identical `.planning/graphs/` default when unset.
+- REQ-GRAPH-07: `status` reports the resolved graph location as `graph_path` — the same absolute path `query`/`diff` read, after the `graphify.graph_path` override is applied — so a caller shelling out to the `graphify` CLI passes it as `--graph` instead of re-deriving the default location (issue #4836).
 
 **Configuration:** `graphify.enabled`, `graphify.build_timeout`, `graphify.graph_path`
 **Reference files:** `commands/gsd/graphify.md`, `bin/lib/graphify.cjs`
@@ -3641,7 +3848,7 @@ See [Archiving quick tasks](how-to/handle-quick-and-fast-tasks.md#archiving-quic
 **Behavior:** A planner authoring a per-task `<automated>` verify command has no line of sight to whether the path it just wrote actually resolves, and `gsd-plan-checker` had no deterministic way to check — so it hand-reasoned the filesystem and, in the motivating case, prescribed two successively-wrong replacement paths (the second citing a `package.json` that did not exist). Two changes close that:
 
 1. **Prior-command inheritance.** The nearest prior phase's `<automated>` commands are surfaced to the planner as `prior_verify_commands`, **at every context window**. Cross-phase enrichment was previously gated on `context_window >= 500000`; at 200k the planner re-invented the command and got it wrong. This payload is a handful of one-liners, so it is never gated.
-2. **A deterministic probe.** `gsd-tools check verify-command-paths <N>` resolves each `<automated>` command's target directory and reports whether it exists and holds the manifest the command needs. `/gsd-plan-phase` runs it before the plan-check pass and hands the JSON to the checker, which acts on `severity` instead of guessing.
+2. **A deterministic probe.** `gsd-tools check verify-command-paths <N>` resolves each `<automated>` command's target directory and reports whether it exists and holds the manifest the command needs. `/gsd-plan-phase` runs it before the plan-check pass and hands the JSON to the checker, which acts on `severity` instead of guessing. `/gsd-quick --validate` runs the same probe over its own plan directory via `--dir` (#4767).
 
 **It never executes command text.** PLAN.md is model-authored, so running it from the checker would be arbitrary code execution — and would trigger the real lint/build as a side effect. The probe only resolves paths and stats directories; a `package.json` it finds is read for script names only.
 
@@ -3653,7 +3860,7 @@ See [Archiving quick tasks](how-to/handle-quick-and-fast-tasks.md#archiving-quic
 
 **Known limits:**
 - Only `cd <literal>` and `npm --prefix <literal>` are recognized. `pushd`, `make -C`, `yarn --cwd`, `pnpm -C`, and `cargo --manifest-path` report `unresolvable`.
-- Verdicts are relative to the *checker's* project root. Under parallel worktree execution the executor's root differs, so a bare ancestor climb (`cd ../..`) is reported `outside_root` as a warning rather than asserted about.
+- Verdicts are relative to the *checker's* project root. Under parallel worktree execution the executor's root differs, so a bare ancestor climb (`cd ../..`) and an absolute target outside that root (#4767) are both reported `outside_root` as a warning rather than asserted about — an absolute target is pinned to one checkout, so its existence proves nothing. An absolute path *inside* the checker's root still passes the probe and still misfires under isolation; the planner's root-relative authoring rule and the executor's pre-`<automated>` containment guard cover that case.
 - `script_missing` is advisory only — this phase may be adding the script — so a genuinely mistyped npm script still reaches the executor.
 
 See [Resolve verify-command path findings](how-to/resolve-verify-command-path-findings.md) and [`gsd-tools check verify-command-paths`](COMMANDS.md#gsd-tools-check-verify-command-paths).
@@ -3770,7 +3977,7 @@ See [Resolve verify-command path findings](how-to/resolve-verify-command-path-fi
 
 **It costs up to three bounded git calls per boundary.** Deriving `next` from the smart-entry classifier means inheriting its git signals — `git status --porcelain`, and `git log @{u}..HEAD`. Each is timeout-bounded and swallows every error, so nothing can hang or fail because of it, but a command like `phase add` did not previously touch git at all. "Invisible to the parent command" is exact about exit code and output; it is not a claim about latency.
 
-**Known limits:** an empty `phases: []` cannot be told apart from "no `ROADMAP.md`" or "roadmap unreadable" — the `1.0` schema carries no diagnostic channel, and `planning inspect` is the surface that does. A roadmap phase marked `Deferred` is reported as `pending`, because the roadmap vocabulary has four values and this contract has three; inventing a fourth wire value would break every existing reader. `phases[]` is not milestone-scoped, so a long-running project lists every phase it has ever had.
+**Known limits:** an empty `phases: []` cannot be told apart from "no `ROADMAP.md`" or "roadmap unreadable" — the `1.0` schema carries no diagnostic channel, and `planning inspect` is the surface that does. `status` is read from the roadmap's Progress-table Status cell by its leading word (prose after it is ignored): `Complete` → `complete`, `In Progress` / `Planned` → `in_progress`, and `Not started`, `Deferred` or no recognized word → `pending`. A roadmap phase marked `Deferred` is reported as `pending`, because the roadmap vocabulary has five words and this contract has three values; inventing a fourth wire value would break every existing reader. `phases[]` is not milestone-scoped, so a long-running project lists every phase it has ever had.
 
 **Reference:** [Consume the state contract](how-to/consume-the-state-contract.md) · [Consume the planning snapshot](how-to/consume-the-planning-snapshot.md)
 
@@ -4394,6 +4601,85 @@ phase directory.
   path for the rest of their output — an intentional, additive-only choice
   to avoid altering already-complex failure control-flow at those sites,
   not a performance optimization.
+
+---
+
+### 4836. Graphify CLI Preferred for Planner and Researcher Graph Queries
+
+**Purpose:** `gsd-planner` gets **one** knowledge-graph query per phase and
+`gsd-phase-researcher` gets two or three. That single shot decides which modules
+the plan treats as related, and therefore how tasks are ordered into waves. It
+was spent on the built-in reader, which seeds by case-insensitive **substring**
+match over a node's label and description and then expands a hardcoded two hops
+— so the phase "User Authentication" seeds on `author`, `authoring`, and
+`unauthorized` with exactly the same weight as `authenticate`, and when the
+inflated result exceeds `--budget` the trimmer drops edges by confidence tier.
+The `graphify` CLI, already a hard dependency of `/gsd-graphify build`, ranks
+seeds (IDF weighting, trigram fuzzy matching) and applies context filters before
+traversal.
+
+**Both prompts now prefer the CLI and fall back to the built-in reader.** The
+branch is `command -v graphify`, the same degradation shape the repo already
+uses for Context7 → `ctx7` in `references/research-documentation-lookup.md`. No
+new config key: a `graph.json` can only exist if `graphify update .` ran, which
+requires the binary, so binary presence is a self-satisfying gate. The fallback
+covers edge cases — a CI checkout with a committed graph, a binary since removed
+— not the common path. No new tool grant either: both agents already have
+`Bash`.
+
+**The planner additionally runs `graphify affected`.** The reference states its
+own goal as "which subsystems may be affected by changes in this phase", which is
+literally reverse traversal by relation. The built-in reader only approximates it
+with undirected two-hop expansion, and has no equivalent verb, so `affected` is
+skipped on the fallback path.
+
+**`gsd-tools graphify status` now returns `graph_path`.** The CLI takes the graph
+location as `--graph`, and the prompts must not re-derive
+`.planning/graphs/graph.json` for it — that would point the CLI at a
+non-existent local mirror in exactly the umbrella multi-repo setup
+`graphify.graph_path` (#1825) exists to serve. `status` already resolves the
+override, so it now reports the absolute path it resolved, on both the
+graph-present and the graph-missing branch. For the same reason the presence gate
+in both prompts is now the `status` call itself rather than a bare `ls` of the
+default location.
+
+**Known limits:**
+- **The two paths return different shapes.** `graphify query` emits prose and has
+  no `--json` flag; `gsd-tools graphify query` emits JSON with per-edge
+  confidence tiers and `budget_met`/`budget_estimate`. Both are consumed by a
+  model, and nothing machine-parses this block, but the prompts now say so
+  explicitly instead of implying a stable shape.
+- **`--budget` means different things on the two paths** — rendered output on the
+  CLI, estimated payload bytes in the built-in reader (#2738). Same flag name,
+  different unit.
+- With `graphify` absent from `PATH` the fallback runs and the injected graph
+  context is byte-identical to before.
+
+---
+
+### 5170. Gate Evidence and Verdict-Driven Exit Status
+
+**Purpose:** A gate that could not read its evidence used to behave exactly like a gate that read it and found nothing. A phase directory that failed to list, a plan that was a directory, an unreadable `COVERAGE.md` or a nested `plans/` that errored all collapsed to an empty string, an empty list or `false`, and the gate passed over content it never saw. Separately, the exit code was chosen verb by verb: `phase uat-passed` and `verify artifacts` printed a failing verdict and exited `0`, so a script that branched on `$?` shipped a failed phase (#4686). This is the third and fourth bullet of [ADR-5057](adr/5057-one-owner-per-workflow-verdict.md) §4 (epic #5056, #5170).
+
+**Behavior:**
+
+- **Unreadable is a distinct state from none.** A gate reads evidence as `found` (a value; an empty file is `found ''`), `none` (the thing authoritatively does not exist: `ENOENT`, or `ENOTDIR` because a parent is a file) or `unreadable` (it exists or may exist and could not be read: `EISDIR`, `EACCES`, `EIO`, an encoding failure, an unresolvable phase, a plan scan that did not see every plan). `none` is a legitimate answer and each gate keeps its documented policy for it; `unreadable` is never coerced to `''`, `false` or an empty list. The verdict builder for the `unreadable` arm returns a verdict typed `outcome: 'unreadable'`, so a passing verdict from that arm does not type-check. A drift guard (`lint-gate-evidence-drift`) rejects the remaining shapes the type cannot see: an empty `catch` in a gate, a tolerant reader that returns `''`, a verdict arm that passes from `unreadable`, and a gate verb that sets its own exit code.
+- **The exit code is a function of the verdict.** One total function maps the outcome to a registered code: positive verdicts `0`; a negative verdict `1` in status mode; a read-and-genuinely-empty scope `66` (`NO_INPUT`); `unreadable` `69` (`UNAVAILABLE`) in both modes. No verb picks a code. The gate's own `block` decision is untouched: policy did not change, only the outcome and the exit for the unreadable arms.
+- **Status mode and payload mode.** `phase uat-passed` and the `verify` verbs that shell callers branch on (`artifacts`, `plan-structure`, `phase-completeness`, `references`, `commits`, `key-links`) are status mode: exit `1` is a negative verdict and the JSON on stdout is still the verdict. The gates that are routed as `check <verb>`, and the three drift verbs, are payload mode.
+- **Why `check` verbs stay payload mode.** The gate dispatch (`execute-phase/steps/wave-post-gate-hooks.md` step 1, `references/loop-hook-dispatch.md`) reads `.block` from stdout and treats a non-zero exit as a command failure routed by the capability's `onError`. `capabilities/drift` declares schema-drift `blocking: true, onError: skip`; exit `1` for "blocked" would be dropped as a skippable failure. A blocking verdict is therefore a delivered answer and exits `0`; only "could not look" exits `69`, which the dispatch routes as a step-1 command failure.
+- **Callers are migrated.** The workflow and agent shell blocks that consume these verbs capture the status (`… && X_EXIT=0 || X_EXIT=$?`, safe under `set -e`), read the JSON for `0`, `1` and `66`, and treat `69` or anything else as "could not run". Fail-closed consumers (the safe-resume and TDD gates) halt with a message that is not "missing RED commit".
+
+**Declared behavior changes:**
+
+- `verify schema-drift` reads `files_modified` through the Frontmatter Module: a YAML block sequence and CRLF files now yield their files (#4562); before, only the inline array was seen and such a plan reported no drift.
+- `verify plan-structure` flags a `! grep -q 'LIT' f` negative gate whose literal also appears in the same task `<action>` (#4541).
+- A plan that exists but is empty is read: `verify artifacts` / `verify key-links` exit `66` instead of `File not found`; `verify plan-structure` reports it invalid (`1`).
+- `verify commits` outside a git work tree answers `{"error":"Not a git repository"}` with `69` instead of listing every hash as invalid.
+- `scripts/run-tests.cjs` fails a chunk whose registered tests exceed its reported results, or whose accounting inputs are missing; it no longer drops executed tests under `--test-force-exit` (#4031).
+
+**Known limits:** `checkUiPresence` is a vocabulary check over prose and reads nothing; it stays outside the evidence type. Gates whose accepted-evidence model is narrower than GSD's producers (#4692, #4867, #4957) are out of scope.
+
+**Reference:** [Gate verb exit statuses](CLI-TOOLS.md#gate-verb-exit-statuses-5170) · [Exit code reference](reference/exit-codes.md) · [Handle gate verb exit statuses](how-to/handle-gate-verb-exit-statuses.md)
 
 ---
 

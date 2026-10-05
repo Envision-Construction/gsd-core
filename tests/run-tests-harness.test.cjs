@@ -439,6 +439,39 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       );
     });
 
+    test('the unmeasured-file cap has no effect when no timings table loads at all', () => {
+      // Same 7-file seed and file-count-chunking env as the sibling test above,
+      // but with RUN_TESTS_MAX_UNMEASURED_PER_CHUNK set to 1 — lower than any
+      // chunk's file count under plain {3,2,2} file-count chunking. If the
+      // unmeasured cap wrongly applied when no table loads (main() deriving it
+      // unconditionally instead of gating on loadedTimings()), a cap of 1 would
+      // force 7 single-file chunks instead of 3. Proves the cap genuinely has
+      // NO effect in the no-table case, not just that it happens not to bind.
+      const names = Array.from({ length: 7 }, (_, i) => `tiny-${String(i).padStart(2, '0')}.test.cjs`);
+      seed(tmpDir, names);
+      const r = runHarness(tmpDir, [], {
+        RUN_TESTS_MAX_CMDLINE_CHARS: '100000',
+        RUN_TESTS_MAX_FILES_PER_CHUNK: '3',
+        RUN_TESTS_MAX_UNMEASURED_PER_CHUNK: '1',
+        RUN_TESTS_TIMINGS_FILE: path.join(tmpDir, 'no-such-timings-4434.json'),
+      });
+      assert.strictEqual(
+        r.status,
+        0,
+        `expected zero exit; got status=${r.status} signal=${r.signal}\nSTDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 1\/3 — 3 files/,
+        `expected file-count chunking marker (unaffected by unmeasured cap) in stderr; STDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 3\/3 — 2 files/,
+        `expected final file-count chunking marker (unaffected by unmeasured cap) in stderr; STDERR:\n${r.stderr}`,
+      );
+    });
+
     // #2088: expensive files must never all land in one chunk — otherwise the
     // unsharded targeted lane packs the whole install surface into a single chunk
     // that blows the 600s per-chunk backstop on the slow Windows runner. #2088
@@ -2307,6 +2340,7 @@ const {
   loadTestTimings,
   positiveNumberEnv,
   DEFAULT_TIMINGS_PATH,
+  defaultMaxUnmeasuredPerChunk,
 } = require('../scripts/run-tests.cjs');
 
 describe('chunk packing weights measured cost (#2456)', () => {
@@ -2912,6 +2946,191 @@ describe('chunk packing weights measured cost (#2456)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// packChunks unmeasured-file cap — red `next` @ccfed6335 (2026-09-20, shard
+// 3/3 chunk 6/8) and @af822a80 (2026-09-23, shard 2/3 chunk 7/9). Both chunks
+// were killed at 600000ms+ with zero failing tests, each holding 5-6 files
+// absent from tests/test-timings.json (new conformance-tier files, never
+// profiled) packed alongside the chunk's measured files: each unmeasured
+// file's GUESSED weight looked affordable alone, the chunk's total weight
+// still cleared the existing budget, and the chunk still blew the 600s
+// backstop because several guesses compounded. See packChunks'
+// isMeasured/maxUnmeasuredPerChunk comment for the fix rationale.
+// ---------------------------------------------------------------------------
+
+describe('packChunks unmeasured-file cap (red next @ccfed6335, @af822a80, 2026-09-20/23)', () => {
+  const UC_FIXED_OVERHEAD = 120;
+  const UC_ROOMY_CHARS = 100000;
+
+  // Trivial, uniform weight model — this suite is about the COUNT cap, not
+  // weight — so any weight-driven splitting is ruled out by a generous
+  // maxWeight.
+  const weightOf = () => 1;
+  const isNewFile = (file) => /^new-\d+\.test\.cjs$/.test(file);
+
+  const countUnmeasured = (chunk) => chunk.filter((f) => isNewFile(f)).length;
+
+  test('reproduces the incident shape and proves the fix', () => {
+    const unmeasured = Array.from({ length: 6 }, (_, i) => `new-${i}.test.cjs`);
+    const measured = ['heavy-a.test.cjs', 'heavy-b.test.cjs'];
+    const files = [...unmeasured, ...measured];
+
+    const capped = packChunks(files, {
+      weightOf,
+      maxWeight: 100, // roomy — weight alone would never force a split
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      isMeasured: (f) => !isNewFile(f),
+      maxUnmeasuredPerChunk: 2,
+    });
+    assert.ok(capped.length >= 3, `expected at least 3 chunks with the cap applied, got ${capped.length}`);
+    for (const [i, chunk] of capped.entries()) {
+      assert.ok(countUnmeasured(chunk) <= 2, `chunk ${i} holds ${countUnmeasured(chunk)} unmeasured files, cap is 2`);
+    }
+    assert.strictEqual(capped.flat().length, files.length, 'no file may be dropped or duplicated');
+
+    // Without the cap (omitted), all 8 files pack into a single chunk — this
+    // is the pre-fix behavior the cap must change.
+    const uncapped = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      isMeasured: (f) => !isNewFile(f),
+      // maxUnmeasuredPerChunk intentionally omitted
+    });
+    assert.strictEqual(uncapped.length, 1, 'without a cap, weight/chars alone keep all 8 files in one chunk');
+  });
+
+  describe('boundary (cap-1 / cap / cap+1)', () => {
+    const CAP = 3;
+
+    test('cap-1 unmeasured files fit one chunk', () => {
+      const files = Array.from({ length: CAP - 1 }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 1, `${CAP - 1} unmeasured files under cap ${CAP} must fit one chunk`);
+    });
+
+    test('exactly cap unmeasured files fit one chunk', () => {
+      const files = Array.from({ length: CAP }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 1, `${CAP} unmeasured files at cap ${CAP} must fit one chunk`);
+    });
+
+    test('cap+1 unmeasured files require a second chunk', () => {
+      const files = Array.from({ length: CAP + 1 }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 2, `${CAP + 1} unmeasured files over cap ${CAP} must split into 2 chunks`);
+      for (const [i, chunk] of chunks.entries()) {
+        assert.ok(countUnmeasured(chunk) <= CAP, `chunk ${i} holds ${countUnmeasured(chunk)} unmeasured, cap is ${CAP}`);
+      }
+    });
+  });
+
+  test('backward compatible: isMeasured omitted treats every file as measured, cap is a no-op', () => {
+    const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+    const withoutIsMeasured = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      maxUnmeasuredPerChunk: 2, // has no effect: nothing is "unmeasured" without isMeasured
+    });
+    const noCapAtAll = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+    });
+    assert.deepStrictEqual(withoutIsMeasured, noCapAtAll, 'omitting isMeasured must reproduce the no-cap packing exactly');
+    assert.strictEqual(withoutIsMeasured.length, 1, 'all 8 files land in one chunk, matching pre-fix behavior');
+  });
+
+  describe('maxUnmeasuredPerChunk degrades safely', () => {
+    test('no-op when zero files are unmeasured', () => {
+      const files = ['measured-a.test.cjs', 'measured-b.test.cjs', 'measured-c.test.cjs'];
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: () => true,
+        maxUnmeasuredPerChunk: 2,
+      });
+      assert.strictEqual(chunks.length, 1, 'a cap with nothing unmeasured must not affect packing');
+    });
+
+    test('a NaN override degrades to no cap rather than throwing', () => {
+      const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+      assert.doesNotThrow(() => {
+        const chunks = packChunks(files, {
+          weightOf,
+          maxWeight: 100,
+          maxChars: UC_ROOMY_CHARS,
+          fixedOverhead: UC_FIXED_OVERHEAD,
+          isMeasured: (f) => !isNewFile(f),
+          maxUnmeasuredPerChunk: NaN,
+        });
+        assert.strictEqual(chunks.length, 1, 'NaN cap must degrade to unbounded, all 8 files in one chunk');
+      });
+    });
+
+    test('a negative override degrades to no cap rather than throwing', () => {
+      const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+      assert.doesNotThrow(() => {
+        const chunks = packChunks(files, {
+          weightOf,
+          maxWeight: 100,
+          maxChars: UC_ROOMY_CHARS,
+          fixedOverhead: UC_FIXED_OVERHEAD,
+          isMeasured: (f) => !isNewFile(f),
+          maxUnmeasuredPerChunk: -1,
+        });
+        assert.strictEqual(chunks.length, 1, 'negative cap must degrade to unbounded, all 8 files in one chunk');
+      });
+    });
+  });
+
+  describe('defaultMaxUnmeasuredPerChunk platform behavior', () => {
+    test('win32 default is 2', () => {
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('win32'), 2);
+    });
+
+    test('linux and darwin defaults are Infinity (unbounded)', () => {
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('linux'), Infinity);
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('darwin'), Infinity);
+    });
+
+    test('the default is still overridable by RUN_TESTS_MAX_UNMEASURED_PER_CHUNK', () => {
+      const def = defaultMaxUnmeasuredPerChunk('win32');
+      const override = positiveNumberEnv('7', def);
+      assert.strictEqual(override, 7);
+      assert.notStrictEqual(override, def);
+    });
+  });
+});
+
 // ─── analyzeChunkEvents (#3889 durability fix) ──────────────────────────────
 //
 // scripts/lib/ndjson-reporter.cjs now writes durably (fs.appendFileSync to a
@@ -3462,5 +3681,694 @@ describe('the win32 per-chunk cap must not permit a chunk that exceeds the 600s 
     const override = positiveNumberEnv('99', cap);
     assert.strictEqual(override, 99);
     assert.notStrictEqual(override, cap);
+  });
+});
+
+// #4936: the per-chunk watchdog. The chunk used to run under
+// execFileSync({ timeout }), whose diagnostic lived in a catch arm reachable
+// only once the child's exit was OBSERVED — so on a Windows run where that
+// observation never came, a chunk sat 37 minutes past its 600000ms bound with
+// no kill line and no in-flight-file report. A real "kill sent, exit never
+// reported" Windows process cannot be produced on demand, so these tests drive
+// runChunk through its injected seams (a fake child that never emits 'exit',
+// a recording spawnSync, a forced platform), plus one real child that ignores
+// its first kill signal.
+const { runChunk, killChunkTree } = require('../scripts/run-tests.cjs');
+const { EventEmitter } = require('node:events');
+
+// Watchdog bounds for these tests — a distinct class from every subprocess
+// timeout in tests/helpers/timeouts.cjs. The fake-child bounds only need to
+// ORDER the timeout before the grace expiry, so they are tiny; nothing real
+// runs under them.
+const FAKE_CHUNK_TIMEOUT_MS = 20;
+const FAKE_CHUNK_GRACE_MS = 50;
+// A grace long enough that a child exiting on its first kill is always
+// observed inside it.
+const FAKE_CHUNK_LONG_GRACE_MS = 5000;
+// A bound that must never fire: the chunk under it exits on its own at once.
+const UNREACHED_CHUNK_TIMEOUT_MS = 60000;
+// The real-child test: long enough for `node -e` to install its SIGTERM trap
+// before the kill lands, so the first kill is genuinely ignored on POSIX.
+const REAL_CHILD_TIMEOUT_MS = 2000;
+const REAL_CHILD_GRACE_MS = 1000;
+
+// A stand-in ChildProcess. It never exits unless `exitOn` names the signal
+// whose delivery should make it exit.
+function fakeChunkChild({ pid = 4242, exitOn = null } = {}) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.kills = [];
+  child.unrefCalls = 0;
+  child.kill = (signal) => {
+    child.kills.push(signal);
+    if (exitOn === signal) setImmediate(() => child.emit('exit', null, signal));
+    return true;
+  };
+  child.unref = () => {
+    child.unrefCalls += 1;
+  };
+  return child;
+}
+
+// A stand-in for the spawned tree reaper. `exitCode` undefined = it never
+// exits (a wedged reaper); `emitError` = it fails to spawn asynchronously.
+function fakeReaper({ exitCode, emitError = false } = {}) {
+  const calls = [];
+  const reapers = [];
+  const impl = (command, args) => {
+    calls.push([command, args]);
+    const reaper = new EventEmitter();
+    reaper.unrefCalls = 0;
+    reaper.unref = () => {
+      reaper.unrefCalls += 1;
+    };
+    reapers.push(reaper);
+    if (emitError) setImmediate(() => reaper.emit('error', new Error('spawn taskkill ENOENT')));
+    else if (exitCode !== undefined) setImmediate(() => reaper.emit('exit', exitCode, null));
+    return reaper;
+  };
+  return { calls, reapers, impl };
+}
+
+const nextTick = () => new Promise((r) => setImmediate(r));
+
+describe('runChunk per-chunk watchdog (#4936)', () => {
+  test('a chunk that exits on its own resolves with its code and never fires the timeout', async () => {
+    let fired = 0;
+    const r = await runChunk(process.execPath, ['-e', 'process.exit(3)'], {
+      env: process.env,
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      onTimeout: () => {
+        fired += 1;
+      },
+    });
+    assert.deepStrictEqual(
+      { code: r.code, timedOut: r.timedOut, exitObserved: r.exitObserved },
+      { code: 3, timedOut: false, exitObserved: true },
+    );
+    assert.strictEqual(fired, 0, 'onTimeout must not fire for a chunk that exits inside its bound');
+  });
+
+  test('REGRESSION: a child whose exit is never observed still gets its diagnostic at the bound and a bounded return', async () => {
+    // The #4936 shape: the kill is sent and the exit is never reported back.
+    // Pre-#4936 this was an unbounded wait with the diagnostic unreachable.
+    const child = fakeChunkChild();
+    const order = [];
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => order.push('diagnostic'),
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved'],
+      'the diagnostic must fire at the bound, before (not instead of) the runner moving on');
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGTERM', 'SIGKILL'],
+      'first the ordinary kill, then one escalation once the grace window expires');
+    assert.strictEqual(child.unrefCalls, 1, 'an unconfirmed child must be unref\'d so the runner process can exit');
+  });
+
+  test('a child that exits after the kill reports a timeout with its exit observed, and is not abandoned', async () => {
+    const child = fakeChunkChild({ exitOn: 'SIGTERM' });
+    let fired = 0;
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_LONG_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => {
+        fired += 1;
+      },
+    });
+    assert.strictEqual(fired, 1);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, true);
+    assert.deepStrictEqual(child.kills, ['SIGTERM'], 'no escalation once the exit is observed');
+    assert.strictEqual(child.unrefCalls, 0);
+  });
+
+  test('a diagnostic that throws does not stop the bound from being enforced', async () => {
+    const child = fakeChunkChild();
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => {
+        throw new Error('diagnostic blew up');
+      },
+    });
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+  });
+
+  test('a spawn failure resolves as a failed, non-timed-out chunk instead of throwing', async () => {
+    const r = await runChunk('unused', [], {
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      spawnImpl: () => {
+        throw new Error('spawn EMFILE');
+      },
+    });
+    assert.strictEqual(r.timedOut, false);
+    assert.strictEqual(r.code, 1);
+    assert.match(r.error.message, /EMFILE/);
+  });
+
+  test('on win32 the first kill reaps the whole tree (#4601 shape), not just the direct child', async () => {
+    const child = fakeChunkChild({ pid: 4242 });
+    const reap = fakeReaper({ exitCode: 0 });
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
+    });
+    assert.deepStrictEqual(reap.calls, [['taskkill', ['/PID', '4242', '/T', '/F']]]);
+    assert.strictEqual(reap.reapers[0].unrefCalls, 1, 'the reaper must never keep the runner alive');
+    assert.deepStrictEqual(child.kills, ['SIGKILL'],
+      'a successful tree reap replaces the direct first kill; only the grace escalation follows');
+    assert.strictEqual(r.exitObserved, false);
+  });
+
+  test('REGRESSION: a tree reaper that never exits delays neither the diagnostic nor the bound', async () => {
+    // A synchronous reap (spawnSync) returns only once the reaper's own exit is
+    // observed, so it could re-create the #4936 stall one layer down. The
+    // reaper is spawned and never awaited.
+    const child = fakeChunkChild();
+    const reap = fakeReaper();
+    const order = [];
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
+      onTimeout: () => order.push('diagnostic'),
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGKILL']);
+  });
+
+  test('on win32 a failed tree reap falls through to the direct kill', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ exitCode: 128 });
+    assert.strictEqual(killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl }), 'tree');
+    assert.deepStrictEqual(child.kills, [], 'the direct kill waits for the reaper\'s verdict');
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+  });
+
+  test('on win32 a reaper that cannot start falls through to the direct kill, once', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ emitError: true });
+    killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl });
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+
+    const child2 = fakeChunkChild();
+    const throwing = () => {
+      throw new Error('spawn EMFILE');
+    };
+    assert.strictEqual(killChunkTree(child2, { platform: 'win32', reapSpawnImpl: throwing }), 'direct');
+    assert.deepStrictEqual(child2.kills, ['SIGTERM']);
+  });
+
+  test('off win32 the kill never spawns a tree reap', () => {
+    for (const platform of ['linux', 'darwin']) {
+      const child = fakeChunkChild();
+      const reap = fakeReaper({ exitCode: 0 });
+      assert.strictEqual(killChunkTree(child, { platform, reapSpawnImpl: reap.impl }), 'direct');
+      assert.deepStrictEqual(reap.calls, [], `${platform} must not spawn a tree reap`);
+      assert.deepStrictEqual(child.kills, ['SIGTERM']);
+    }
+  });
+
+  test('a real child that ignores its first kill signal is still bounded, and its diagnostic still fires first', async (t) => {
+    // On POSIX the child traps SIGTERM, so the first kill does nothing and
+    // only the grace escalation ends the wait — the "kill sent, no exit"
+    // state with a real process. On Windows the kill is TerminateProcess,
+    // which the child cannot trap, so only the bound and ordering are asserted
+    // there. The child writes a marker once its trap is installed; the POSIX
+    // assertion applies only when the trap was armed before the kill, so a
+    // slow child start cannot turn it into a flake.
+    const dir = createTempDir('gsd-4936-real-child-');
+    t.after(() => cleanup(dir));
+    const marker = path.join(dir, 'trap-armed');
+    const script =
+      "process.on('SIGTERM', () => {}); " +
+      "require('fs').writeFileSync(process.argv[1], 'armed'); " +
+      'setInterval(() => {}, 1000);';
+    // Reaching the assertions at all is the bound: pre-#4936 (execFileSync
+    // with a timeout) the same child blocked the runner indefinitely.
+    const order = [];
+    let trapArmedAtKill = false;
+    const r = await runChunk(process.execPath, ['-e', script, marker], {
+      env: process.env,
+      timeoutMs: REAL_CHILD_TIMEOUT_MS,
+      graceMs: REAL_CHILD_GRACE_MS,
+      onTimeout: () => {
+        trapArmedAtKill = fs.existsSync(marker);
+        order.push('diagnostic');
+      },
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    if (process.platform !== 'win32') {
+      if (trapArmedAtKill) {
+        assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
+      } else {
+        // Visible, never silent: the abandonment arm was not exercised this run.
+        t.diagnostic('child had not armed its SIGTERM trap before the kill; abandonment not asserted this run');
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #5071 — per-platform (win32) timing table.
+//
+// The win32 conformance shards were packed from Linux-measured durations
+// (tests/test-timings.json, Linux containers only) with a 2.2x guess for
+// files the table never saw. These tests pin the three halves of the fix:
+// the runner EXPORTS each chunk's per-file `test:summary` durations when
+// RUN_TESTS_TIMING_EVENTS_FILE is set (CI uploads that file per Windows
+// shard), gen-test-timings --platform turns those exports into
+// tests/test-timings.<platform>.json, and makeFileWeigher PREFERS that table
+// on its platform — calibrated into the Linux table's weight units so
+// MAX_FILES_PER_CHUNK, the isolation threshold and RUN_TESTS_SHARD_RESERVE
+// keep their meaning.
+// ---------------------------------------------------------------------------
+
+const {
+  makeMeasuredPredicate: makeMeasuredPredicate5071,
+  extractFileSummaries,
+  platformTimingsPath,
+  defaultMaxFilesPerChunk: defaultMaxFilesPerChunk5071,
+  CHUNK_WORKING_BUDGET_MS: CHUNK_WORKING_BUDGET_MS_5071,
+} = require('../scripts/run-tests.cjs');
+const genTimings5071 = require('../scripts/gen-test-timings.cjs');
+const { PROBE_TIMEOUT_MS: PROBE_TIMEOUT_MS_5071 } = require('./helpers/timeouts.cjs');
+
+describe('per-platform timing table (#5071)', () => {
+  // Written through loadTestTimings so every table below has the exact shape
+  // main() hands the weigher in production, not a hand-built stand-in.
+  function loadTable(t, timings) {
+    const dir = createTempDir('gsd-5071-timings-');
+    t.after(() => cleanup(dir));
+    const p = path.join(dir, 'timings.json');
+    fs.writeFileSync(p, JSON.stringify({ schema_version: 1, unit: 'ms', timings }), 'utf8');
+    return loadTestTimings(p);
+  }
+
+  // Linux: a 10s, b 20s, c 60s  → mean 30s, weights 1/3, 2/3, 2.
+  const LINUX = { 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 };
+  // Windows inverts a and c's ORDER — the misprediction this issue is about —
+  // and measures a file Linux never saw (w-only).
+  const WIN = { 'a.test.cjs': 90000, 'b.test.cjs': 40000, 'c.test.cjs': 50000, 'w-only.test.cjs': 30000 };
+
+  describe('makeFileWeigher with a platform table', () => {
+    test('win32: a file measured on windows is weighed by its windows duration', (t) => {
+      const weigh = makeFileWeigher(loadTable(t, LINUX), 'win32', loadTable(t, WIN));
+      // Linux ranks c heaviest; Windows measured a heaviest. The platform
+      // table must win.
+      assert.ok(weigh('a.test.cjs') > weigh('c.test.cjs'), 'windows ordering must replace linux ordering');
+      // Overlap {a,b,c}: linux weight sum = 3; windows ms sum = 180000 →
+      // scale 3/180000 per ms. a = 90000 * 3/180000 = 1.5.
+      assert.strictEqual(weigh('a.test.cjs'), 1.5);
+      assert.strictEqual(weigh('w-only.test.cjs'), 0.5);
+    });
+
+    test('win32: a file only in the linux table keeps its linux weight', (t) => {
+      const linux = loadTable(t, { ...LINUX, 'l-only.test.cjs': 30000 });
+      const withPlatform = makeFileWeigher(linux, 'win32', loadTable(t, WIN));
+      const without = makeFileWeigher(linux, 'win32');
+      assert.strictEqual(withPlatform('l-only.test.cjs'), without('l-only.test.cjs'));
+      assert.strictEqual(withPlatform('l-only.test.cjs'), 1);
+    });
+
+    test('win32: a file in neither table keeps the 2.2 fallback', (t) => {
+      const weigh = makeFileWeigher(loadTable(t, LINUX), 'win32', loadTable(t, WIN));
+      assert.strictEqual(weigh('never-measured.test.cjs'), WINDOWS_UNMEASURED_COST_MULTIPLIER);
+    });
+
+    test('calibration: total weight over the overlap is preserved', (t) => {
+      const linux = loadTable(t, LINUX);
+      const withPlatform = makeFileWeigher(linux, 'win32', loadTable(t, WIN));
+      const without = makeFileWeigher(linux, 'win32');
+      const overlap = Object.keys(LINUX);
+      const sum = (w) => overlap.reduce((s, f) => s + w(f), 0);
+      assert.ok(Math.abs(sum(withPlatform) - sum(without)) < 1e-9);
+      // …while the distribution DOES move: a weigher that ignored the platform
+      // table would preserve the total trivially.
+      // Windows ms x (3 / 180000): 90000 -> 1.5, 40000 -> 2/3, 50000 -> 5/6.
+      const expected = [1.5, 2 / 3, 5 / 6];
+      overlap.forEach((f, i) => {
+        assert.ok(Math.abs(withPlatform(f) - expected[i]) < 1e-12, `${f}: ${withPlatform(f)} vs ${expected[i]}`);
+      });
+      assert.notDeepStrictEqual(overlap.map((f) => withPlatform(f)), overlap.map((f) => without(f)));
+    });
+
+    test('property: calibration preserves the overlap total for any pair of tables', () => {
+      const fc = require('fast-check');
+      fc.assert(
+        fc.property(
+          fc.array(fc.tuple(fc.integer({ min: 1, max: 500000 }), fc.integer({ min: 1, max: 900000 })), { minLength: 1, maxLength: 25 }),
+          fc.array(fc.integer({ min: 0, max: 500000 }), { maxLength: 5 }),
+          (pairs, winOnly) => {
+            const linuxMap = {};
+            const winMap = {};
+            pairs.forEach(([l, w], i) => {
+              linuxMap[`o${i}.test.cjs`] = l;
+              winMap[`o${i}.test.cjs`] = w;
+            });
+            winOnly.forEach((w, i) => { winMap[`w${i}.test.cjs`] = w; });
+            const toTable = (m) => {
+              const vals = Object.values(m);
+              return { timings: m, mean: vals.reduce((a, b) => a + b, 0) / vals.length, medianWeight: 1 };
+            };
+            const linux = toTable(linuxMap);
+            const withPlatform = makeFileWeigher(linux, 'win32', toTable(winMap));
+            const without = makeFileWeigher(linux, 'win32');
+            const keys = Object.keys(linuxMap);
+            const a = keys.reduce((s, f) => s + withPlatform(f), 0);
+            const b = keys.reduce((s, f) => s + without(f), 0);
+            assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, b), `overlap total drifted: ${a} vs ${b}`);
+          },
+        ),
+        { numRuns: 200, seed: 50710 },
+      );
+    });
+
+    test('calibration: no overlap falls back to the platform table\'s own mean', (t) => {
+      const weigh = makeFileWeigher(
+        loadTable(t, LINUX),
+        'win32',
+        loadTable(t, { 'x.test.cjs': 10000, 'y.test.cjs': 30000 }),
+      );
+      assert.strictEqual(weigh('x.test.cjs'), 0.5);
+      assert.strictEqual(weigh('y.test.cjs'), 1.5);
+    });
+
+    test('calibration: a zero-sum overlap falls back to the platform mean', (t) => {
+      const weigh = makeFileWeigher(
+        loadTable(t, { 'z.test.cjs': 0, 'a.test.cjs': 10000 }),
+        'win32',
+        loadTable(t, { 'z.test.cjs': 20000, 'q.test.cjs': 60000 }),
+      );
+      // Overlap {z}: linux weight 0 → no usable scale. Platform mean 40000.
+      assert.strictEqual(weigh('z.test.cjs'), 0.5);
+      assert.strictEqual(weigh('q.test.cjs'), 1.5);
+    });
+
+    test('property: omitting the platform table reproduces the two-arg weigher on every platform', () => {
+      const fc = require('fast-check');
+      fc.assert(
+        fc.property(
+          fc.array(fc.integer({ min: 0, max: 500000 }), { minLength: 1, maxLength: 20 }),
+          fc.constantFrom('win32', 'linux', 'darwin'),
+          fc.constantFrom(undefined, null),
+          (mss, platform, absent) => {
+            const m = Object.fromEntries(mss.map((ms, i) => [`p${i}.test.cjs`, ms]));
+            const mean = mss.reduce((a, b) => a + b, 0) / mss.length || 1;
+            const table = { timings: m, mean, medianWeight: 1 };
+            const two = makeFileWeigher(table, platform);
+            const three = makeFileWeigher(table, platform, absent);
+            for (const f of [...Object.keys(m), 'absent.test.cjs']) {
+              assert.strictEqual(three(f), two(f));
+            }
+          },
+        ),
+        { numRuns: 200, seed: 50711 },
+      );
+    });
+
+    test('a missing linux table still degrades to uniform weight 1 even with a platform table', (t) => {
+      const weigh = makeFileWeigher(null, 'win32', loadTable(t, WIN));
+      assert.strictEqual(weigh('a.test.cjs'), 1);
+      assert.strictEqual(weigh('never-measured.test.cjs'), 1);
+    });
+
+    test('a non-numeric platform entry falls back to the linux weight', (t) => {
+      const linux = loadTable(t, LINUX);
+      const platform = { timings: { 'a.test.cjs': 'slow', 'b.test.cjs': -5, 'c.test.cjs': Number.NaN }, mean: 1, medianWeight: 1 };
+      const weigh = makeFileWeigher(linux, 'win32', platform);
+      const base = makeFileWeigher(linux, 'win32');
+      for (const f of Object.keys(LINUX)) assert.strictEqual(weigh(f), base(f), f);
+    });
+
+    test('own-property lookup: prototype keys are never treated as measured', (t) => {
+      const weigh = makeFileWeigher(loadTable(t, LINUX), 'win32', loadTable(t, WIN));
+      const measured = makeMeasuredPredicate5071(loadTable(t, LINUX), loadTable(t, WIN));
+      for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        assert.strictEqual(weigh(name), WINDOWS_UNMEASURED_COST_MULTIPLIER, name);
+        assert.strictEqual(measured(name), false, name);
+      }
+    });
+  });
+
+  test('makeMeasuredPredicate counts a file measured in either table', (t) => {
+    const linux = loadTable(t, LINUX);
+    const measured = makeMeasuredPredicate5071(linux, loadTable(t, WIN));
+    assert.strictEqual(measured('w-only.test.cjs'), true);
+    assert.strictEqual(measured('a.test.cjs'), true);
+    assert.strictEqual(measured('never-measured.test.cjs'), false);
+    assert.strictEqual(makeMeasuredPredicate5071(linux)('w-only.test.cjs'), false);
+    assert.strictEqual(makeMeasuredPredicate5071(null, loadTable(t, WIN))('w-only.test.cjs'), false);
+  });
+
+  test('platformTimingsPath names tests/test-timings.<platform>.json', () => {
+    const p = platformTimingsPath('win32');
+    assert.strictEqual(path.basename(p), 'test-timings.win32.json');
+    assert.strictEqual(path.dirname(p), path.dirname(DEFAULT_TIMINGS_PATH));
+  });
+
+  describe('extractFileSummaries', () => {
+    test('keeps only per-file summaries with a finite, non-negative duration', () => {
+      const text = [
+        JSON.stringify({ type: 'reporter:init', ts: 1 }),
+        JSON.stringify({ type: 'test:summary', file: 'C:\\w\\tests\\a.test.cjs', duration_ms: 12.5, ts: 2 }),
+        JSON.stringify({ type: 'test:summary', file: '/w/tests/b.test.cjs', duration_ms: 0, ts: 3 }),
+      ].join('\n');
+      assert.deepStrictEqual(extractFileSummaries(text), [
+        { file: 'C:\\w\\tests\\a.test.cjs', duration_ms: 12.5 },
+        { file: '/w/tests/b.test.cjs', duration_ms: 0 },
+      ]);
+    });
+
+    test('skips non-file, malformed, and hostile lines without throwing', () => {
+      const text = [
+        JSON.stringify({ type: 'test:summary', duration_ms: 99 }), // run-level total: no file
+        JSON.stringify({ type: 'test:pass', file: '/w/a.test.cjs', nesting: 0, duration_ms: 5 }),
+        JSON.stringify({ type: 'test:summary', file: '/w/n.test.cjs', duration_ms: -1 }),
+        JSON.stringify({ type: 'test:summary', file: '/w/s.test.cjs', duration_ms: '7' }),
+        JSON.stringify({ type: 'test:summary', file: 42, duration_ms: 7 }),
+        '0', '"str"', '[]', 'null', 'true', '',
+        '{"type":"test:summary","file":"/w/ok.test.cjs","duration_ms":3}\r',
+        '{"type":"test:summary","file":"/w/trunc',
+      ].join('\n');
+      assert.deepStrictEqual(extractFileSummaries(text), [{ file: '/w/ok.test.cjs', duration_ms: 3 }]);
+      assert.deepStrictEqual(extractFileSummaries(''), []);
+    });
+  });
+
+  test('the ndjson reporter records per-file test:summary with duration_ms', async (t) => {
+    const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+    const dir = createTempDir('gsd-5071-reporter-');
+    t.after(() => cleanup(dir));
+    const eventsFile = path.join(dir, 'events.ndjson');
+    const saved = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+    process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+    t.after(() => {
+      if (saved === undefined) delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      else process.env.GSD_RUN_TESTS_EVENTS_FILE = saved;
+    });
+    async function* fakeEvents() {
+      yield { type: 'test:summary', data: { file: '/w/a.test.cjs', duration_ms: 41.5, success: true, counts: {} } };
+      yield { type: 'test:summary', data: { duration_ms: 50, success: true, counts: {} } };
+    }
+    await reporter(fakeEvents());
+    assert.deepStrictEqual(extractFileSummaries(fs.readFileSync(eventsFile, 'utf8')), [
+      { file: '/w/a.test.cjs', duration_ms: 41.5 },
+    ]);
+  });
+
+  describe('RUN_TESTS_TIMING_EVENTS_FILE export (end to end)', () => {
+    let dir;
+    beforeEach(() => { dir = createTempDir('gsd-5071-export-'); });
+    afterEach(() => { cleanup(dir); });
+
+    const ENV_PROBE_BODY = `'use strict';
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+test('export env var is not inherited by chunk children', () => {
+  assert.strictEqual(process.env.RUN_TESTS_TIMING_EVENTS_FILE, undefined);
+});
+`;
+    const FAIL_BODY = `'use strict';
+const { test } = require('node:test');
+test('boom', () => { throw new Error('intentional'); });
+`;
+
+    function readExport(p) {
+      return splitLines(fs.readFileSync(p, 'utf8')).filter((l) => l.trim() !== '').map((l) => JSON.parse(l));
+    }
+
+    test('exports one test:summary per file, across chunks, in the reporter-stream shape', () => {
+      const tests = path.join(dir, 'tests');
+      seed(tests, ['one.test.cjs']);
+      fs.writeFileSync(path.join(tests, 'probe.test.cjs'), ENV_PROBE_BODY, 'utf8');
+      const out = path.join(dir, 'timing-events.jsonl');
+      const r = runHarness(tests, [], { RUN_TESTS_TIMING_EVENTS_FILE: out, RUN_TESTS_MAX_FILES_PER_CHUNK: '1' });
+      assert.strictEqual(r.status, 0, `harness must pass (the probe asserts the env var is not inherited):\n${r.stderr}`);
+      const events = readExport(out);
+      assert.deepStrictEqual(
+        events.map((e) => path.basename(e.data.file.replace(/\\/g, '/'))).sort(),
+        ['one.test.cjs', 'probe.test.cjs'],
+      );
+      for (const e of events) {
+        assert.strictEqual(e.type, 'test:summary');
+        assert.ok(Number.isFinite(e.data.duration_ms) && e.data.duration_ms >= 0);
+      }
+      // The export must be exactly what gen-test-timings consumes.
+      const acc = new Map();
+      const folded = genTimings5071.foldStream(fs.readFileSync(out, 'utf8'), acc);
+      assert.strictEqual(folded.files, 2);
+      assert.deepStrictEqual([...acc.keys()].sort(), ['one.test.cjs', 'probe.test.cjs']);
+    });
+
+    test('a failing chunk still exports its measured files', () => {
+      const tests = path.join(dir, 'tests');
+      seed(tests, ['ok.test.cjs']);
+      fs.writeFileSync(path.join(tests, 'bad.test.cjs'), FAIL_BODY, 'utf8');
+      const out = path.join(dir, 'timing-events.jsonl');
+      const r = runHarness(tests, [], { RUN_TESTS_TIMING_EVENTS_FILE: out, RUN_TESTS_MAX_FILES_PER_CHUNK: '1' });
+      assert.notStrictEqual(r.status, 0, 'the failing fixture must fail the run');
+      assert.deepStrictEqual(
+        readExport(out).map((e) => path.basename(e.data.file.replace(/\\/g, '/'))).sort(),
+        ['bad.test.cjs', 'ok.test.cjs'],
+      );
+    });
+
+    test('no export file is created when RUN_TESTS_TIMING_EVENTS_FILE is unset', () => {
+      const tests = path.join(dir, 'tests');
+      seed(tests, ['one.test.cjs']);
+      const r = runHarness(tests, [], { RUN_TESTS_TIMING_EVENTS_FILE: '' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['tests']);
+    });
+
+    test('an unwritable export path never changes the run\'s exit code', () => {
+      const tests = path.join(dir, 'tests');
+      seed(tests, ['one.test.cjs']);
+      const out = path.join(dir, 'no-such-dir', 'timing-events.jsonl');
+      const r = runHarness(tests, [], { RUN_TESTS_TIMING_EVENTS_FILE: out });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(fs.existsSync(out), false);
+    });
+  });
+
+  describe('gen-test-timings --platform', () => {
+    test('selects the per-platform table and records the platform', () => {
+      const parsed = genTimings5071.parseArgs(['--platform', 'win32', 'events.jsonl']);
+      assert.strictEqual(parsed.error, undefined);
+      assert.strictEqual(parsed.platform, 'win32');
+      assert.strictEqual(parsed.out, platformTimingsPath('win32'));
+      const eq = genTimings5071.parseArgs(['--platform=win32', 'events.jsonl']);
+      assert.strictEqual(eq.platform, 'win32');
+      const withOut = genTimings5071.parseArgs(['--platform', 'win32', '--out', 'x.json', 'events.jsonl']);
+      assert.strictEqual(withOut.out, 'x.json');
+      assert.strictEqual(withOut.platform, 'win32');
+      const outFirst = genTimings5071.parseArgs(['--out', 'x.json', '--platform', 'win32', 'events.jsonl']);
+      assert.strictEqual(outFirst.out, 'x.json');
+      const none = genTimings5071.parseArgs(['events.jsonl']);
+      assert.strictEqual(none.platform, null);
+      assert.strictEqual(none.out, DEFAULT_TIMINGS_PATH);
+    });
+
+    test('rejects missing, empty, unknown, flag-looking and duplicate values', () => {
+      for (const argv of [
+        ['--platform'],
+        ['--platform', '--out', 'x.json', 'e.jsonl'],
+        ['--platform=', 'e.jsonl'],
+        ['--platform', 'solaris', 'e.jsonl'],
+        ['--platform', 'WIN32', 'e.jsonl'],
+        ['--platform', '../../x', 'e.jsonl'],
+        ['--platform', 'win32', '--platform', 'darwin', 'e.jsonl'],
+      ]) {
+        assert.ok(genTimings5071.parseArgs(argv).error, `expected an error for ${JSON.stringify(argv)}`);
+      }
+    });
+
+    test('builds a win32 table from an exported stream with windows paths', (t) => {
+      const dir = createTempDir('gsd-5071-gen-');
+      t.after(() => cleanup(dir));
+      const events = path.join(dir, 'test-timings-windows-shard1.jsonl');
+      fs.writeFileSync(events, [
+        JSON.stringify({ type: 'test:summary', data: { file: 'D:\\a\\gsd\\tests\\a.test.cjs', duration_ms: 1500.4 } }),
+        JSON.stringify({ type: 'test:summary', data: { file: 'D:\\a\\gsd\\tests\\installer-migrations\\m.test.cjs', duration_ms: 20 } }),
+      ].join('\n'), 'utf8');
+      const out = path.join(dir, 'test-timings.win32.json');
+      const r = runNode([path.join(__dirname, '..', 'scripts', 'gen-test-timings.cjs'), '--platform', 'win32', '--out', out, events], {
+        cwd: path.join(__dirname, '..'),
+        timeoutMs: PROBE_TIMEOUT_MS_5071,
+      });
+      assert.strictEqual(r.exitCode, 0, r.stderr);
+      const written = JSON.parse(fs.readFileSync(out, 'utf8'));
+      assert.strictEqual(written.platform, 'win32');
+      assert.strictEqual(written.schema_version, 1);
+      assert.deepStrictEqual(written.timings, { 'a.test.cjs': 1500, 'm.test.cjs': 20 });
+      assert.ok(loadTestTimings(out) !== null, 'the generated table must load through the runner\'s own loader');
+    });
+  });
+
+  describe('the checked-in win32 timing table', () => {
+    test('loads, records its platform, and keys only real test files', () => {
+      const p = platformTimingsPath('win32');
+      const table = loadTestTimings(p);
+      assert.ok(table !== null, `${p} must parse into a usable timing table`);
+      assert.strictEqual(JSON.parse(fs.readFileSync(p, 'utf8')).platform, 'win32');
+      const onDisk = new Set();
+      (function walk(d) {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          if (e.isDirectory()) { if (e.name !== 'node_modules') walk(path.join(d, e.name)); } else if (e.name.endsWith('.test.cjs')) onDisk.add(e.name);
+        }
+      })(path.dirname(DEFAULT_TIMINGS_PATH));
+      const invalid = Object.entries(table.timings)
+        .filter(([f, v]) => !onDisk.has(f) || typeof v !== 'number' || !Number.isFinite(v) || v < 0)
+        .map(([f, v]) => `${f}=${v}`);
+      assert.deepStrictEqual(invalid, [], 'every win32 entry must name an existing test file with a finite non-negative cost');
+    });
+
+    // Spec-review finding on #5071: calibration preserves the pool's TOTAL
+    // weight but changes which files share a chunk, so the win32 weight
+    // budget (defaultMaxFilesPerChunk) must still be affordable when priced in
+    // real Windows cost. One weight unit is worth (win32 ms / weight) for any
+    // win32-measured file; a full chunk budget of summed in-child Windows time
+    // must fit CHUNK_WORKING_BUDGET_MS. Deliberately conservative: it ignores
+    // --test-concurrency=2, which roughly halves wall-clock, as headroom for
+    // the per-file spawn cost no table measures (~0.95s/file, fitted from the
+    // #5071 measurement run). Regenerating the table re-checks this.
+    test('the win32 chunk budget, priced by the committed win32 table, fits the working budget', () => {
+      const base = loadTestTimings(DEFAULT_TIMINGS_PATH);
+      const win = loadTestTimings(platformTimingsPath('win32'));
+      const weigh = makeFileWeigher(base, 'win32', win);
+      const probe = Object.keys(win.timings).find((f) => win.timings[f] > 0);
+      const msPerWeight = win.timings[probe] / weigh(probe);
+      const budgetMs = defaultMaxFilesPerChunk5071('win32') * msPerWeight;
+      assert.ok(
+        budgetMs <= CHUNK_WORKING_BUDGET_MS_5071,
+        `win32 chunk budget ${defaultMaxFilesPerChunk5071('win32')} x ${msPerWeight.toFixed(0)}ms/weight = ` +
+          `${budgetMs.toFixed(0)}ms exceeds CHUNK_WORKING_BUDGET_MS=${CHUNK_WORKING_BUDGET_MS_5071}`,
+      );
+    });
   });
 });

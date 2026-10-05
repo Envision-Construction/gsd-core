@@ -571,6 +571,48 @@ describe('CLI: quick-tasks-append (#3356)', () => {
     assert.ok(stateContent.includes('| 260811-gfl | Fix thing |'), 'STATE.md itself must carry the same canonical row');
   });
 
+  /** STATE.md variant whose Quick Tasks table already has a Status column. */
+  function writeStateWithStatus(tmpDir, totalPhases) {
+    fs.mkdirSync(path.join(tmpDir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), [
+      '---',
+      'progress:',
+      `  total_phases: ${totalPhases}`,
+      '  completed_phases: 3',
+      '  total_plans: ' + totalPhases,
+      '  completed_plans: 3',
+      '  percent: 12',
+      '---',
+      '',
+      '### Blockers/Concerns',
+      '',
+      '### Quick Tasks Completed',
+      '',
+      '| # | Description | Date | Commit | Status | Directory |',
+      '|---|-------------|------|--------|--------|-----------|',
+      '',
+    ].join('\n'));
+  }
+
+  test('#4906 Phase 3 (#4958): --status writes the Status column for quick.md VALIDATE_MODE rows', (t) => {
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    writeStateWithStatus(tmpDir, 25);
+
+    const r = runGsdTools(
+      ['quick-tasks-append', '--task', 'Fix thing', '--quick-id', '260811-gfl', '--slug', 'fix-thing', '--status', 'PASS'],
+      tmpDir,
+    );
+    assert.ok(r.success, `quick-tasks-append should succeed: ${r.error}`);
+    const out = JSON.parse(r.output);
+
+    assert.ok(out.row.includes('| PASS |'), `expected the Status cell to carry PASS, got: ${out.row}`);
+    assert.ok(out.row.startsWith('| 260811-gfl | Fix thing |'), `expected the '#' cell to carry the quick id, got: ${out.row}`);
+
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf8');
+    assert.ok(stateContent.includes('| PASS |'), 'STATE.md itself must carry the Status cell');
+  });
+
   test('bare --task (no id) keeps the fast.md-compatible ordinal + \'—\' row, unchanged', (t) => {
     const tmpDir = createTempProject();
     t.after(() => cleanup(tmpDir));
@@ -581,6 +623,32 @@ describe('CLI: quick-tasks-append (#3356)', () => {
     const out = JSON.parse(r.output);
     assert.ok(/^\| 1 \| Fix thing \| .* \| — \|$/.test(out.row), `expected the ordinal + em-dash fallback, got: ${out.row}`);
   });
+
+  // #4905: none of these days is the real day. The first two put the local and
+  // UTC calendar days on different dates, one zone behind UTC and one ahead of
+  // it. The last two straddle local midnight in Copenhagen
+  // (2026-06-30T22:00:00.000Z).
+  const LOCAL_DAY_PINS = [
+    { label: 'behind UTC: 2020-06-15T02:00Z is 21:00 the day before in Chicago', TZ: 'America/Chicago', nowMs: 1592186400000, day: '2020-06-14' },
+    { label: 'ahead of UTC (the issue repro): 2026-06-30T22:30Z is 00:30 on 1 July in Copenhagen', TZ: 'Europe/Copenhagen', nowMs: 1782858600000, day: '2026-07-01' },
+    { label: 'the last millisecond of the Copenhagen day', TZ: 'Europe/Copenhagen', nowMs: 1782856799999, day: '2026-06-30' },
+    { label: 'the first millisecond of the next Copenhagen day', TZ: 'Europe/Copenhagen', nowMs: 1782856800000, day: '2026-07-01' },
+  ];
+
+  for (const pin of LOCAL_DAY_PINS) {
+    test(`#4905: the Date column is the pinned local day — ${pin.label}`, (t) => {
+      const tmpDir = createTempProject();
+      t.after(() => cleanup(tmpDir));
+      writeState(tmpDir, 25);
+
+      const r = runGsdTools(['quick-tasks-append', '--task', 'Fix thing'], tmpDir, {
+        GSD_TEST_MODE: '1', GSD_NOW_MS: String(pin.nowMs), TZ: pin.TZ,
+      });
+      assert.ok(r.success, `quick-tasks-append should succeed: ${r.error}`);
+      const { row } = JSON.parse(r.output);
+      assert.ok(row.startsWith(`| 1 | Fix thing | ${pin.day} |`), `expected the pinned local day ${pin.day}, got: ${row}`);
+    });
+  }
 
   test('defect 2: a body-only append does not force a full progress re-derive — a curated total_phases divergent from disk survives', (t) => {
     const tmpDir = createTempProject();

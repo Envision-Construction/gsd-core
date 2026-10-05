@@ -190,16 +190,16 @@ Every task has four required fields:
 
 **Nyquist Rule:** Every `<verify>` includes `<automated>`. If no test exists, set `<automated>MISSING — Wave 0 must create {test_file} first</automated>` and create that scaffold.
 
-**Inherit the command that already worked (#2401):** reuse `prior_verify_commands` verbatim, prefer `npm --prefix <dir> run <script>`, ground every path you author. @gsd-core/references/planner-verify-command-grounding.md
+**Inherit the command that already worked (#2401):** reuse `prior_verify_commands` verbatim, prefer `npm --prefix <dir> run <script>`, ground every path you author. @~/.claude/gsd-core/references/planner-verify-command-grounding.md
 
 **Grep gate hygiene:** `grep -c` counts comments, so header prose can be self-invalidating. Use `grep -v '^#' | grep -c token`. Bare `== 0` gates on unfiltered files are forbidden.
 
 <comment_text_discipline>
-**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Full rules + `<!-- planner-discipline-allow: LIT -->` allowlist + worked examples: @gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
+**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Rules + `<!-- planner-discipline-allow: LIT -->` allowlist + examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
 </comment_text_discipline>
 
 <region_scoped_negative_gate>
-**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @gsd-core/references/planner-antipatterns.md.
+**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @~/.claude/gsd-core/references/planner-antipatterns.md.
 </region_scoped_negative_gate>
 
 **<done>:** Acceptance criteria - measurable state of completion.
@@ -274,7 +274,7 @@ Exceptions where `tdd="true"` is not needed: `type="checkpoint:*"` tasks, config
 
 **`--no-tracer` (`TRACER_MODE=false`):** opt out of tracer-first and decompose into horizontal layers (the legacy default). Use only when the architecture is already proven and a thin slice would add no information. Do not mix a tracer-first plan with horizontal-layer tasks — one shape per phase.
 
-**MVP enrichment (`MVP_MODE=true`):** layered on top of the tracer-first ordering above (MVP no longer *turns on* vertical slices — that is now the default). It adds: (1) frame the phase goal as a user story at the top of `PLAN.md`, sourced from the ROADMAP `**Goal:**` line, bolding `**As a**` / `**I want to**` / `**so that**` (Read `~/.claude/gsd-core/references/user-story-template.md`; if the Goal line is not in user-story format, surface it and ask the user to run `/gsd mvp-phase ${PHASE}` first — do not invent a story); and (2) **Walking Skeleton mode** (`WALKING_SKELETON=true`, Phase 1 of a new project) — emit `SKELETON.md` from `~/.claude/gsd-core/references/skeleton-template.md` alongside `PLAN.md`. The Walking Skeleton is the Phase-1 special case of the tracer, recording architectural decisions (framework, DB, auth, deployment, layout) later phases build on.
+**MVP enrichment (`MVP_MODE=true`):** layered on top of the tracer-first ordering above (MVP no longer *turns on* vertical slices — that is now the default). It adds: (1) frame the phase goal as a user story at the top of `PLAN.md`, sourced from the ROADMAP `**Goal:**` line, bolding `**As a**` / `**I want to**` / `**so that**` (Read `~/.claude/gsd-core/references/user-story-template.md`; if the Goal line is not in user-story format, surface it and ask the user to run `/gsd:mvp-phase ${PHASE}` first — do not invent a story); and (2) **Walking Skeleton mode** (`WALKING_SKELETON=true`, Phase 1 of a new project) — emit `SKELETON.md` from `~/.claude/gsd-core/references/skeleton-template.md` alongside `PLAN.md`. The Walking Skeleton is the Phase-1 special case of the tracer, recording architectural decisions (framework, DB, auth, deployment, layout) later phases build on.
 
 **TDD composition (`workflow.tdd_mode=true`):** the leading tracer task is `type="tracer"` and starts red — its first move is a failing end-to-end test for the happy path — and every behavior-adding expansion task uses `tdd="true"` with a `<behavior>` block.
 
@@ -620,9 +620,10 @@ If exists, load relevant documents by phase type:
 
 <step name="load_graph_context">
 Read `gsd-core/references/planner-load-graph-context.md` and execute it. It checks for a
-knowledge graph and, if `.planning/graphs/graph.json` exists, reads freshness and
-phase-relevant dependency context via the `gsd_run` launcher and incorporates the results
-into planning. If the graph is absent, skip and continue without graph context.
+knowledge graph and, if one exists, reads freshness and phase-relevant dependency context
+— through the `graphify` CLI when it is on PATH, otherwise through the `gsd_run` launcher
+— and incorporates the results into planning. If the graph is absent, skip and continue
+without graph context.
 </step>
 
 <step name="identify_phase">
@@ -759,7 +760,7 @@ for each plan B in plan_order:
 
 **Rule:** Same-wave plans must have zero `files_modified`/`files_deleted` overlap. After assigning waves, scan each wave; if any file appears in 2+ plans, bump the later plan to the next wave and repeat.
 
-**External review ordering:** When a PR opening has known automatic external review (for example a GitHub App reviewer such as CodeRabbit, configured via `.coderabbit.yaml`, which reviews automatically on PR open) and the plan includes internal review lanes, run internal review and apply the accepted internal-review fixes before the final open. If an open-time property exists (for example a not-behind-base check that must legitimately be measured at PR-open instant), re-check it immediately before opening, with nothing intervening; post-open CI, review, and tracking may follow. Examples: @gsd-core/references/planner-antipatterns.md ("External Review Before PR Open (#4107)").
+**External review ordering:** When a PR opening has known automatic external review (for example a GitHub App reviewer such as CodeRabbit via `.coderabbit.yaml`) and the plan includes internal review lanes, run internal review and apply the accepted internal-review fixes before the final open. If an open-time property exists (for example a not-behind-base check that must be measured at PR-open instant), re-check it immediately before opening, with nothing intervening; post-open CI, review, and tracking may follow. Examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("External Review Before PR Open (#4107)").
 
 Non-file coupling: @~/.claude/gsd-core/references/planner-coupling.md
 </step>
@@ -856,10 +857,10 @@ Returns JSON: `{ valid, missing, present, invalidValue, schema }`
 Also validate plan structure:
 
 ```bash
-STRUCTURE=$(gsd_run query verify.plan-structure "$PLAN_PATH")
+STRUCTURE=$(gsd_run query verify.plan-structure "$PLAN_PATH") && STRUCTURE_EXIT=0 || STRUCTURE_EXIT=$?
 ```
 
-Returns JSON: `{ valid, errors, warnings, task_count, tasks }`
+Returns JSON: `{ valid, errors, warnings, task_count, tasks }`. The exit status follows the verdict (#5170): `0` = `valid: true`, `1` = `valid: false` (read `errors` from the JSON); any other status (`69`: the plan file is missing or unreadable) means the structure was not evaluated — do not commit the plan as validated.
 
 **If errors exist:** Fix before committing:
 - Missing `<name>` in task → add name element

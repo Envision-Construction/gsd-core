@@ -409,8 +409,8 @@ The reference is the single source; do not improvise a variant.
 ## Plan-Level TDD Gate Enforcement (type: tdd plans, #4269: stated ONCE)
 
 When the plan frontmatter has `type: tdd`, the mandatory RED/GREEN/REFACTOR gate sequence,
-its fail-fast rules (including the #3770 INVALID_RED / intentional-RED-evidence requirement
-enforced via `gsd_run check tdd-red-evidence`), and the `## TDD Gate Compliance` SUMMARY.md contract are
+its format-based RED evidence rules (#3770 INVALID_RED: `gsd_run check tdd-red-evidence`
+plus semantic inspection), and the `## TDD Gate Compliance` SUMMARY.md contract are
 specified in the canonical `gsd-core/references/tdd.md` "Gate Enforcement Rules" section
 (embedded when TDD applies). The reference is the single source; do not improvise a variant.
 </tdd_execution>
@@ -476,9 +476,9 @@ if [[ "$ABS_PATH" != "$WT_ROOT" && "$ABS_PATH" != "$WT_ROOT/"* ]]; then
   exit 1
 fi
 ```
-Prefer **relative paths** for all Edit/Write operations inside a worktree. When an absolute path
-is unavoidable, always derive it from `git rev-parse --show-toplevel` run inside the worktree,
-not from a `pwd` captured in the orchestrator context.
+Prefer **relative paths** for Edit/Write in a worktree; an unavoidable absolute comes from
+`git rev-parse --show-toplevel` inside it, never an orchestrator `pwd`. Same check before each
+`<automated>`: `worktree-path-safety.md` step 0c (#4767).
 
 **0. Pre-commit HEAD safety assertion (MANDATORY — #2924, #3819):**
 Assert HEAD is not the protected/default branch before committing (#3819). If drifted onto it, HALT — never self-recover via `git update-ref refs/heads/<protected>`:
@@ -571,7 +571,7 @@ git commit -m "{type}({phase}-{plan}): {concise task description}
 
 **6. Post-commit deletion check:** After recording the hash, verify the commit did not accidentally delete tracked files:
 ```bash
-DELETIONS=$(git diff --diff-filter=D --name-only HEAD~1 HEAD 2>/dev/null || true)
+DELETIONS=$(git show --first-parent --diff-filter=D --name-only --pretty=format: HEAD 2>/dev/null || true)
 if [ -n "$DELETIONS" ]; then
   echo "WARNING: Commit includes file deletions: $DELETIONS"
 fi
@@ -753,7 +753,7 @@ After writing SUMMARY.md, verify claims before proceeding.
 
 **2. Check commits exist:**
 ```bash
-git log --oneline --all | grep -q "{hash}" && echo "FOUND: {hash}" || echo "MISSING: {hash}"
+git merge-base --is-ancestor "{hash}" HEAD 2>/dev/null && echo "FOUND: {hash}" || echo "MISSING: {hash}"
 ```
 
 **3. Append result to SUMMARY.md:** `## Self-Check: PASSED` or `## Self-Check: FAILED` with missing items listed.
@@ -777,8 +777,10 @@ gsd_run query state.record-metric \
   --tasks "${TASK_COUNT}" --files "${FILE_COUNT}"
 
 # Add decisions (extract from SUMMARY.md key-decisions)
+# --phase is required here: without it the verb falls back to STATE.md's global
+# pointer, which misattributes decisions when plans execute out of pointer order (#4763).
 for decision in "${DECISIONS[@]}"; do
-  gsd_run query state.add-decision --summary "${decision}"
+  gsd_run query state.add-decision --phase "${PHASE}" --summary "${decision}"
 done
 
 # Update session info (stopped-at, resume-file; timestamp set automatically)

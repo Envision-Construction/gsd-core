@@ -25,6 +25,9 @@ O GSD armazena as configurações do projeto em `.planning/config.json`. Criado 
     "search_gitignored": false,
     "sub_repos": []
   },
+  "planner": {
+    "stall_detection_enabled": true
+  },
   "context": null,
   "workflow": {
     "research": true,
@@ -101,18 +104,9 @@ O GSD armazena as configurações do projeto em `.planning/config.json`. Criado 
     "quick_branch_template": null
   },
   "gates": {
-    "confirm_project": true,
-    "confirm_phases": true,
-    "confirm_roadmap": true,
-    "confirm_breakdown": true,
-    "confirm_plan": true,
     "execute_next_plan": true,
-    "issues_review": true,
-    "confirm_transition": true
-  },
-  "safety": {
-    "always_confirm_destructive": true,
-    "always_confirm_external_services": true
+    "confirm_transition": true,
+    "confirm_milestone_scope": true
   },
   "project_code": null,
   "agent_skills": {},
@@ -267,6 +261,9 @@ Todos os controles de fluxo de trabalho seguem o padrão **ausente = habilitado*
 | `workflow.subagent_timeout` | number | `600` | Timeout em segundos para invocações individuais de subagente. Aumente para fases de pesquisa ou execução de longa duração |
 | `executor.stall_detect_interval_minutes` | number | `5` | Minutos entre verificações de travamento do executor enquanto um agente executor está ativo. O orquestrador de fase de execução usa essa cadência para inspecionar commits recentes e evitar espera eterna por um agente silencioso. |
 | `executor.stall_threshold_minutes` | number | `10` | Minutos sem conclusão do executor ou atividade de commit no branch esperado antes que a fase de execução ofereça opções de recuperação para um possível executor travado. |
+| `planner.stall_detection_enabled` | boolean | `true` | Controla a detecção limitada de travamento do planejador padrão, dos planejadores de esboço/por plano em chunks, do verificador de planos e do planejador de revisão. Use `gsd config-set planner.stall_detection_enabled false` para ignorar o polling do watchdog e aguardar cada agente pelo mecanismo de conclusão nativa do runtime. **Aviso:** `false` abre mão da recuperação limitada se o runtime perder a entrega da conclusão; pode ser necessário interromper e usar o fallback existente do sistema de arquivos. A execução e o tratamento do resultado nunca são ignorados. |
+| `planner.stall_detect_interval_minutes` | number | `5` | Minutos entre verificações de travamento enquanto um planejador ou verificador de planos está ativo. O orquestrador inspeciona a atividade em disco de `*-PLAN.md` nessa cadência (#2650). |
+| `planner.stall_threshold_minutes` | number | `10` | Minutos sem marcador de conclusão ou atividade recente em planos antes que a fase de planejamento ofereça automaticamente as opções aceitar/tentar novamente/parar (#2650). |
 | `workflow.inline_plan_threshold` | number | `3` | Número máximo de tasks em uma fase antes que o planejador gere um arquivo PLAN.md separado em vez de incorporar tasks no prompt |
 | `workflow.drift_threshold` | number | `3` | Número mínimo de novos elementos estruturais (novos diretórios, exportações barrel, migrações, módulos de rota) introduzidos durante uma fase antes que o gate de deriva pós-execução da base de código tome ação. Consulte [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Adicionado na v1.39 |
 | `workflow.drift_action` | string | `warn` | O que fazer quando `workflow.drift_threshold` é excedido após `/gsd-execute-phase`. `warn` imprime uma mensagem sugerindo `/gsd-map-codebase --paths …`; `auto-remap` gera `gsd-codebase-mapper` com escopo para os caminhos afetados. Adicionado na v1.39 |
@@ -593,27 +590,16 @@ Exemplo de ramificação para task rápida:
 
 ## Configurações de Gate
 
-Controla prompts de confirmação durante os fluxos de trabalho.
+Controla prompts de confirmação durante os fluxos de trabalho. Cada gate só se aplica sob
+`mode: "interactive"` — `"yolo"` sempre aprova automaticamente, independentemente dessas
+configurações (não existe um terceiro modo `"custom"`). Defina um gate como `false` para
+pular apenas aquela confirmação, mantendo o modo interactive para o resto.
 
 | Configuração | Tipo | Padrão | Descrição |
 |---------|------|---------|-------------|
-| `gates.confirm_project` | boolean | `true` | Confirma detalhes do projeto antes de finalizar |
-| `gates.confirm_phases` | boolean | `true` | Confirma a divisão de fases |
-| `gates.confirm_roadmap` | boolean | `true` | Confirma o roadmap antes de prosseguir |
-| `gates.confirm_breakdown` | boolean | `true` | Confirma a divisão de tasks |
-| `gates.confirm_plan` | boolean | `true` | Confirma cada plano antes da execução |
-| `gates.execute_next_plan` | boolean | `true` | Confirma antes de executar o próximo plano |
-| `gates.issues_review` | boolean | `true` | Revisa issues antes de criar planos de correção |
-| `gates.confirm_transition` | boolean | `true` | Confirma a transição de fase |
-
----
-
-## Configurações de Segurança (Safety)
-
-| Configuração | Tipo | Padrão | Descrição |
-|---------|------|---------|-------------|
-| `safety.always_confirm_destructive` | boolean | `true` | Confirma operações destrutivas (exclusões, sobrescritas) |
-| `safety.always_confirm_external_services` | boolean | `true` | Confirma interações com serviços externos |
+| `gates.execute_next_plan` | boolean | `true` | Confirma antes de executar o próximo plano (`execute-plan.md`) |
+| `gates.confirm_transition` | boolean | `true` | Confirma a transição de fase (`transition.md`) |
+| `gates.confirm_milestone_scope` | boolean | `true` | Confirma o escopo do milestone antes do lançamento (`complete-milestone.md`) |
 
 ---
 

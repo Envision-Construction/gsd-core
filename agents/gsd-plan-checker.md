@@ -518,16 +518,16 @@ issue:
 
 ## Dimension 8: Nyquist Compliance
 
-**Question:** Is every task's completion decided by an automated check that can actually fail?
+**Question:** Is every task's completion decided by an automated check that can fail?
 
 Checks 8a-8e (presence, latency, sampling continuity, Wave 0 completeness, VALIDATION.md gate),
-their skip condition and the Dimension 8 output table: @gsd-core/references/nyquist-compliance.md
+skip condition and Dimension 8 output table: @~/.claude/gsd-core/references/nyquist-compliance.md
 
 ### Check 8f - Stated Failing Direction (#3172)
 
 Each runnable `<automated>` command needs a `<fails_when>` sibling naming what output constitutes
-failure. Consume the supplied `{FAILING_DIRECTIONS}` probe, never re-derive it:
-@gsd-core/references/failing-direction.md
+failure. Consume the `{FAILING_DIRECTIONS}` probe, never re-derive it:
+@~/.claude/gsd-core/references/failing-direction.md
 
 ## Dimension 9: Cross-Plan Data Contracts
 
@@ -698,8 +698,8 @@ issue:
 
 ## Dimension: Verify Command Path Resolvability (#2401)
 
-**Question:** Does each `<automated>` command's target resolve? Consume the supplied
-`{VERIFY_PATHS}` probe, never re-run/hand-reason it: @gsd-core/references/verify-command-path-resolvability.md
+**Question:** Does each `<automated>` command's target resolve? Consume the
+`{VERIFY_PATHS}` probe, never re-run/hand-reason it: @~/.claude/gsd-core/references/verify-command-path-resolvability.md
 
 ## Dimension: Numeric/Factual Claim Authority (#1480)
 
@@ -766,12 +766,15 @@ shopt -s nullglob 2>/dev/null; setopt NULL_GLOB 2>/dev/null
 
 for plan in "$PHASE_DIR"/*-PLAN.md; do
   echo "=== $plan ==="
-  PLAN_STRUCTURE=$(gsd_run query verify.plan-structure "$plan")
+  PLAN_STRUCTURE=$(gsd_run query verify.plan-structure "$plan") && STRUCTURE_EXIT=0 || STRUCTURE_EXIT=$?
   echo "$PLAN_STRUCTURE"
+  echo "structure_exit=$STRUCTURE_EXIT"
 done
 ```
 
 Parse JSON result: `{ valid, errors, warnings, task_count, tasks: [{name, hasFiles, hasAction, hasVerify, hasDone}], frontmatter_fields }`
+
+The exit status follows the verdict (#5170): exit `0` = `valid: true`, exit `1` = `valid: false` (a negative verdict — the JSON is still authoritative, so read `errors`). Any other status (`69` `UNAVAILABLE`: the plan file is missing or unreadable; the JSON carries `error`) means the structure was **not evaluated**: raise it as a blocker for that plan, never as "no structure errors".
 
 Map errors/warnings to verification dimensions:
 - Missing frontmatter field → `task_completeness` or `must_haves_derivation`
@@ -829,8 +832,10 @@ For each requirement: find covering task(s), verify action is specific, flag gap
 Use `verify.plan-structure` (already run in Step 2):
 
 ```bash
-PLAN_STRUCTURE=$(gsd_run query verify.plan-structure "$PLAN_PATH")
+PLAN_STRUCTURE=$(gsd_run query verify.plan-structure "$PLAN_PATH") && STRUCTURE_EXIT=0 || STRUCTURE_EXIT=$?
 ```
+
+Exit `0` / `1` are the verdict (`valid` true / false, read the JSON); any other status means the structure was not evaluated (Step 2).
 
 The `tasks` array in the result shows each task's completeness:
 - `hasFiles` — files element present

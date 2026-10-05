@@ -1,7 +1,8 @@
 /**
  * Codex Agent TOML — typed IR for `~/.codex/agents/<agent>.toml` (#3243, ADR-2313).
  *
- * A genuine leaf: node builtins only. This is a **document model**, not a policy —
+ * A genuine leaf: node builtins, plus the zero-import `frontmatter-fence.cjs`. This is a
+ * **document model**, not a policy —
  * it knows how to parse/render/strip two known keys (`model`,
  * `model_reasoning_effort`) from a Codex agent `.toml`. It does NOT know which
  * `model` values are illegal for Codex (that predicate — Anthropic-flavored
@@ -22,7 +23,9 @@
  * stdout-JSON caller (`agent-install-check.cts`'s `checkCodexSandboxPosture`).
  * This module was already the single fs/path-free-parsing home both callers
  * shared; `fs`/`path` are imported below ONLY for `validateCodexSandboxHolds`'s
- * roster check — still node builtins only, no third-party or bin/lib dependency.
+ * roster check — still node builtins only, no third-party dependency, and no bin/lib
+ * dependency beyond the zero-import, side-effect-free `frontmatter-fence.cjs` (the one
+ * frontmatter fence owner, read by `extractToolsValue`).
  *
  * ── The reconciliation (40-design.md) ──────────────────────────────────────
  *
@@ -44,6 +47,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { locateFrontmatterFence } from './frontmatter-fence.cjs';
 
 /** Frozen reason enum for a failed {@link parseCodexAgentToml}. */
 export const PARSE_REASON = Object.freeze({
@@ -448,9 +452,9 @@ export function stripReasoningEffort(doc: CodexAgentDoc): CodexAgentDoc {
 /**
  * The 17 roles measured as widening under derivation (declare Write/Edit,
  * never in the pre-#3897 `CODEX_AGENT_SANDBOX` map, so the old
- * `|| 'read-only'` fallback silently under-granted them). Pinned to
- * `read-only` pending the open question of whether Codex enforces
- * `sandbox_mode` or treats it as advisory (HALT.md). This list is CLOSED and
+ * `|| 'read-only'` fallback silently under-granted them) — pinned to
+ * `read-only` from 2026-09-08 (HALT.md) until #4770 lifted the hold on
+ * 2026-09-21. This list is CLOSED and
  * SHRINK-ONLY: a new writing role never lands here (S6, T26); it is validated
  * against the live tool contract every time it is consulted
  * ({@link _deriveCodexSandboxModeFromTools}) and against the real
@@ -467,29 +471,25 @@ export function stripReasoningEffort(doc: CodexAgentDoc): CodexAgentDoc {
  * parses the list correctly, so this role genuinely derives
  * `workspace-write` from its tool contract — HALT.md's original 16-role
  * count measured against the pre-fix (single-line) readers and undercounted
- * this role. It is held here for the same reason as the other 16: pending
- * Codex's `sandbox_mode` enforcement decision, not because the derivation is
- * wrong.
+ * this role.
+ *
+ * **LIFTED 2026-09-21 (#4770, maintainer decision: documented enforcement
+ * suffices).** The map is empty: the rung-3 hold's recorded reopen condition
+ * — official OpenAI documentation establishing Codex `sandbox_mode` as an
+ * enforced technical boundary that custom subagent TOML files honor — is
+ * satisfied, so every role now derives `sandbox_mode` purely from its own
+ * `tools:` frontmatter (`workspace-write` iff Write/Edit is declared). The
+ * shrink-to-zero invariant (ADR-3473 §8.3) is satisfied by reaching zero;
+ * the map is kept as an empty frozen structure so a future re-hold has a
+ * shape to land in, and {@link validateCodexSandboxHolds} keeps failing if
+ * the list ever grows a role that no longer exists in `agents/`. The
+ * #3897 security-review F1/F3 fail-closed pins are unchanged and
+ * map-independent: `suspicious` identities (non-ASCII after
+ * normalization) still pin `read-only`, and post-lift the sandbox derives
+ * from an artifact's own CONTENT, so the F1 identity-confusion attack no
+ * longer has a hold to ride.
  */
-export const CODEX_SANDBOX_HOLDS: Readonly<Record<string, string>> = Object.freeze({
-  'gsd-ai-researcher': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-code-fixer': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-code-reviewer': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-debug-session-manager': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-doc-classifier': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-doc-synthesizer': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-doc-verifier': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-doc-writer': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-dom-verifier': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-domain-researcher': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-eval-auditor': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-eval-planner': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-intel-updater': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-pattern-mapper': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-ui-auditor': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-ui-researcher': 'declares Write/Edit; pending Codex sandbox_mode enforcement decision',
-  'gsd-nyquist-auditor': 'declares Write/Edit (YAML list-form tools:, surfaced by the list-form parse fix); pending Codex sandbox_mode enforcement decision',
-});
+export const CODEX_SANDBOX_HOLDS: Readonly<Record<string, string>> = Object.freeze({});
 
 // True iff a `tools:` frontmatter value declares Write or Edit as a whole
 // token (never a substring match, so a hypothetical "Edith"-named tool could
@@ -667,11 +667,11 @@ export function isSandboxHeld(
 // (see {@link deriveCodexSandboxMode}'s own totality note).
 export function extractToolsValue(agentContent: unknown): string | undefined {
   if (typeof agentContent !== 'string') return undefined;
-  if (!agentContent.startsWith('---')) return '';
-  const endIndex = agentContent.indexOf('---', 3);
-  if (endIndex === -1) return '';
-  const frontmatter = agentContent.substring(3, endIndex);
-  const lines = frontmatter.split(/\r?\n/);
+  // The block is the one the one fence owner finds, so a `---` inside a value (a
+  // description mentioning `a---b`) cannot cut the tools list off.
+  const fence = locateFrontmatterFence(agentContent);
+  if (!fence?.closed) return '';
+  const lines = agentContent.slice(fence.openEnd, fence.bodyEnd).split(/\r?\n/);
   const toolsLineIndex = lines.findIndex((line) => /^tools:/.test(line));
   if (toolsLineIndex === -1) return '';
   const inlineMatch = lines[toolsLineIndex].match(/^tools:[ \t]*(\S.*)$/);

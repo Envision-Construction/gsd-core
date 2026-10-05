@@ -276,10 +276,10 @@ function git(args, { cwd = REPO_ROOT } = {}) {
  * "nothing changed" would make every moved hash unattributable and produce a failure
  * storm that reads exactly like a real finding.
  */
-function resolveChangedPaths(base = 'origin/next') {
+function resolveChangedPaths(base = 'origin/next', { cwd = REPO_ROOT } = {}) {
   let out;
   try {
-    out = git(['diff', '--name-only', `${base}...HEAD`]);
+    out = git(['diff', '--name-only', `${base}...HEAD`], { cwd });
   } catch (err) {
     throw new Error(
       `emitted-attribution: could not resolve changed paths from "${base}...HEAD": ${err.message}. ` +
@@ -328,14 +328,56 @@ function baseRefCandidates(env = process.env) {
  * failure would make the suite permanently red in the gsd-test container, where no
  * base ref can exist by construction.
  */
-function resolveBase(env = process.env) {
+function resolveBase(env = process.env, { cwd = REPO_ROOT } = {}) {
   for (const candidate of baseRefCandidates(env)) {
+    if (candidate.startsWith('-')) continue; // never let an env value reach git as an option
     try {
-      const sha = git(['rev-parse', '--verify', `${candidate}^{commit}`]).trim();
+      const sha = git(['rev-parse', '--verify', `${candidate}^{commit}`], { cwd }).trim();
       if (/^[0-9a-f]{40}$/.test(sha)) return { ref: candidate, sha };
     } catch { /* try the next candidate */ }
   }
   return null;
+}
+
+/**
+ * The commit the differential gate measures FROM: the merge-base of the resolved base
+ * ref and HEAD, alongside the base tip it was derived from.
+ *
+ * The baseline manifests, the changed-path range (`resolveChangedPaths`'s three-dot
+ * diff) and the ack-trailer range (`readAckTrailers`) must all start at ONE commit, or
+ * a change that landed only on the base side after HEAD forked shows up in
+ * baseline-vs-current while no path in `merge-base..HEAD` explains it (#5008). That is
+ * exactly what `release.yml`'s finalize lane hit: it tests `release/X.Y.Z` as is (never
+ * merged onto `next`), `next` gained #4937 between `create` and `finalize`, and a
+ * baseline built at the `next` TIP attributed that merge to the release branch.
+ *
+ * PR lanes merge the tree onto `pull_request.base.sha` first, so there the merge-base
+ * IS the base tip and the cache key (`emitted-baseline-<base.sha>`) still hits.
+ *
+ * Null when no base ref resolves (the caller's explicit-skip path, same as
+ * `resolveBase`). A merge-base failure once a base DOES resolve THROWS: the three-dot
+ * diff needs the same commit, so a silent fallback to the tip would reintroduce the
+ * mismatch this exists to close.
+ *
+ * @returns {{ ref: string, tipSha: string, sha: string } | null} `sha` is the merge-base.
+ */
+function resolveAttributionBase(env = process.env, { cwd = REPO_ROOT } = {}) {
+  const resolved = resolveBase(env, { cwd });
+  if (!resolved) return null;
+  let sha;
+  try {
+    sha = git(['merge-base', resolved.sha, 'HEAD'], { cwd }).trim();
+  } catch (err) {
+    throw new Error(
+      `emitted-attribution: could not resolve the merge-base of "${resolved.ref}" and HEAD: ${err.message}. ` +
+      'This is a hard error on purpose — measuring the baseline at the base tip instead ' +
+      'would attribute base-only merges to this tree.',
+    );
+  }
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error(`emitted-attribution: merge-base of "${resolved.ref}" and HEAD is not a 40-hex sha: ${JSON.stringify(sha)}`);
+  }
+  return { ref: resolved.ref, tipSha: resolved.sha, sha };
 }
 
 /**
@@ -955,6 +997,52 @@ function readAckTrailers({ baseRef, headRef = 'HEAD', cwd = REPO_ROOT, timeoutMs
   return parseAckTrailers({ hash: hashValues, growth: growthValues });
 }
 
+/**
+ * Pin ALL THREE "before" inputs of the differential gate to the ONE merge-base sha
+ * `resolveAttributionBase` returned (#5008): the baseline, the changed-path range
+ * (`resolveChangedPaths`), and the ack-trailer range (`readAckTrailers`) must share one
+ * origin, or a change that landed only on the base side after HEAD forked shows up in
+ * baseline-vs-current while nothing in `merge-base..HEAD` explains it — the release-lane
+ * shape #5008 fixes (see `resolveAttributionBase`'s doc comment for the full story).
+ *
+ * Passing the RESOLVED SHA to each of the three, never the ref NAME, closes the other
+ * half of that bug: a ref name re-resolves live inside each call, so a fetch landing
+ * mid-run could move the changed-path range and the ack range to a newer commit than
+ * the one the baseline was built at, even though all three started from the same
+ * `attributionBase`. A sha is inert — nothing can move what it resolves to.
+ *
+ * Every dependency is injected (`resolveBaselineFn`, `buildBaselineFn`, `readJson`) so
+ * this wiring — previously inlined and untested at the real-tree test's call site — is
+ * itself testable without a real installer spawn or a live baseline cache/build.
+ *
+ * @param {{ref: string, tipSha: string, sha: string}} attributionBase `resolveAttributionBase`'s result.
+ * @param {object} [opts]
+ * @param {string} [opts.cwd]
+ * @param {function} opts.resolveBaselineFn required: a `resolveBaseline`-shaped function, `(opts) => result`
+ * @param {function} [opts.buildBaselineFn] defaults to `buildBaselineAtRef`
+ * @param {function} [opts.readJson] passed through to `resolveBaselineFn` as its own `readJson`
+ * @returns {{resolvedBaseline: object, changedPaths: string[], ack: object}} `ack` is `readAckTrailers`'s
+ *   own return shape (`{hash, growth, errors}`).
+ */
+function resolveAttributionInputs(attributionBase, {
+  cwd = REPO_ROOT,
+  resolveBaselineFn,
+  buildBaselineFn = buildBaselineAtRef,
+  readJson,
+} = {}) {
+  if (typeof resolveBaselineFn !== 'function') {
+    throw new Error('resolveAttributionInputs: resolveBaselineFn must be supplied');
+  }
+  const resolvedBaseline = resolveBaselineFn({
+    expectedSha: attributionBase.sha,
+    readJson,
+    buildFallback: () => buildBaselineFn(attributionBase.sha, { cwd }),
+  });
+  const changedPaths = resolveChangedPaths(attributionBase.sha, { cwd });
+  const ack = readAckTrailers({ baseRef: attributionBase.sha, cwd });
+  return { resolvedBaseline, changedPaths, ack };
+}
+
 module.exports = {
   REPO_ROOT,
   FIXTURE_SUBDIR,
@@ -971,6 +1059,8 @@ module.exports = {
   resolveBaseSha,
   baseRefCandidates,
   resolveBase,
+  resolveAttributionBase,
+  resolveAttributionInputs,
   baselineFamilyNamesAtRef,
   baselineManifestsAtRef,
   baselineSizesAtRef,

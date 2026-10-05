@@ -24,6 +24,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { planSubjectPattern } = require('../gsd-core/bin/lib/gate-evaluation-scope.cjs');
 
 const EXECUTE_PHASE = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md');
 const COMPLETION_RECONCILIATION = path.join(__dirname, '..', 'gsd-core', 'workflows',
@@ -82,6 +83,32 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
     assert.doesNotThrow(() => runFixed('01.1'));
   });
 
+  // Run every (subject, expected) case for one regex in a SINGLE bash subprocess
+  // instead of one execFileSync per case. This repo's own timeout-vs-cost rule
+  // (never widen a timeout to paper over the real cost) applies here: the
+  // real cost was N real process forks per test, which is what made this test
+  // flaky under a loaded CI runner (each case's spawn+pipe competing for the
+  // same fork/exec budget as every other subprocess-heavy test running
+  // concurrently in the same chunk) -- observed as one case's execFileSync
+  // landing almost exactly on TIMEOUT (5054ms vs the file's 5000ms constant)
+  // while sibling cases ran in single-digit milliseconds, on a run where no
+  // case's grep logic was actually wrong (verified independently against real
+  // macOS bash 3.2 + BSD grep). One spawn evaluating all cases removes every
+  // opportunity for cross-test contention to land on any ONE case's timeout,
+  // without touching TIMEOUT itself.
+  function matchAll(re, cases) {
+    const script = cases
+      .map(([subject], i) => `echo ${JSON.stringify(subject)} | grep -qE ${JSON.stringify(re)} && echo ${i}:1 || echo ${i}:0`)
+      .join('\n');
+    const output = execFileSync('bash', [], { input: script, encoding: 'utf8', timeout: TIMEOUT });
+    const results = new Array(cases.length).fill(null);
+    for (const line of output.trim().split('\n')) {
+      const [idx, flag] = line.split(':');
+      results[Number(idx)] = flag === '1';
+    }
+    return results;
+  }
+
   test('the resulting anchored ERE matches decimal commit scopes and rejects near-miss scopes', () => {
     const phaseN = runFixed('01.1'); // '1\.1'
     const planN = '3';
@@ -94,17 +121,10 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
       ['feat(011-03):', false],
       ['feat(12-03):', false],
     ];
-    for (const [subject, expected] of cases) {
-      const script = `echo ${JSON.stringify(subject)} | grep -qE ${JSON.stringify(re)}`;
-      let matched;
-      try {
-        execFileSync('bash', [], { input: script, encoding: 'utf8', timeout: TIMEOUT });
-        matched = true;
-      } catch {
-        matched = false;
-      }
-      assert.equal(matched, expected, `expected ${subject} match=${expected} against ${re}`);
-    }
+    const results = matchAll(re, cases);
+    cases.forEach(([subject, expected], i) => {
+      assert.equal(results[i], expected, `expected ${subject} match=${expected} against ${re}`);
+});
   });
 
   test('the resulting anchored ERE matches a plain padded-integer phase and rejects near-miss scopes', () => {
@@ -117,54 +137,61 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
       ['feat(011-03):', false],
       ['feat(12-03):', false],
     ];
-    for (const [subject, expected] of cases) {
-      const script = `echo ${JSON.stringify(subject)} | grep -qE ${JSON.stringify(re)}`;
-      let matched;
-      try {
-        execFileSync('bash', [], { input: script, encoding: 'utf8', timeout: TIMEOUT });
-        matched = true;
-      } catch {
-        matched = false;
-      }
-      assert.equal(matched, expected, `expected ${subject} match=${expected} against ${re}`);
-    }
+    const results = matchAll(re, cases);
+    cases.forEach(([subject, expected], i) => {
+      assert.equal(results[i], expected, `expected ${subject} match=${expected} against ${re}`);
+});
   });
 
-  describe('source parity — each of the 4 production sites carries the fixed logic', () => {
-    test('execute-phase.md safe_resume_gate carries the fixed PHASE_NUMBER/PHASE_INT/PHASE_REST/PHASE_N logic', () => {
-      const w = fs.readFileSync(EXECUTE_PHASE, 'utf8');
-      assert.ok(w.includes(fixedSnippet('PHASE_NUMBER', 'PHASE')),
-        'safe_resume_gate must carry the byte-identical fixed decimal-tolerant snippet');
-    });
-
-    test('execute-phase.md TDD gate carries the fixed PHASE_NUMBER/PHASE_INT/PHASE_REST/PHASE_N logic', () => {
-      const w = fs.readFileSync(EXECUTE_PHASE, 'utf8');
-      // The TDD gate block is nested one level deeper (4-space indent) than
-      // safe_resume_gate's top-level snippet.
-      assert.ok(w.includes(fixedSnippet('PHASE_NUMBER', 'PHASE', '    ')),
-        'the TDD gate must carry the byte-identical fixed decimal-tolerant snippet (indented)');
-    });
-
-    test('completion-reconciliation.md carries the fixed SPOT_-prefixed logic', () => {
-      const frag = fs.readFileSync(COMPLETION_RECONCILIATION, 'utf8');
-      assert.ok(frag.includes(fixedSnippet('SPOT_PHASE_NUMBER', 'SPOT_PHASE')),
-        'completion-reconciliation spot-check must carry the byte-identical fixed SPOT_-prefixed snippet');
-    });
-
+  describe('source parity — the one remaining shell site carries the fixed logic; the workflow sites ask the resolver (#5164)', () => {
+    // #5164 (epic #5056 Phase 7): the three workflow sites (execute-phase.md safe_resume_gate and
+    // TDD gate, completion-reconciliation.md) no longer derive the scope regex in shell: they ask
+    // `check evaluation-scope --plan`, whose pattern is `planSubjectPattern`. tdd.md keeps a shell
+    // example for humans, so it is the one site whose snippet is still pinned byte-for-byte.
     test('tdd.md carries the fixed bare PHASE/PLAN logic', () => {
       const ref = fs.readFileSync(TDD_REF, 'utf8');
       assert.ok(ref.includes(fixedSnippet('PHASE', 'PHASE')),
         'tdd.md gate-enforcement example must carry the byte-identical fixed bare-PHASE snippet');
     });
 
-    test('none of the 4 sites still contains the old unconditional $((10#...)) form on a template/variable phase number', () => {
+    test('the workflow sites derive no phase arithmetic of their own — they ask the resolver', () => {
       const w = fs.readFileSync(EXECUTE_PHASE, 'utf8');
       const frag = fs.readFileSync(COMPLETION_RECONCILIATION, 'utf8');
+      assert.ok(!w.includes('$((10#') && !frag.includes('$((10#'), 'no `$((10#…))` phase arithmetic remains in the execute-phase workflow files');
+      assert.ok(w.includes('gsd_run check evaluation-scope --plan') && frag.includes('gsd_run check evaluation-scope --plan'),
+        'both execute-phase files must ask the evaluation-scope resolver for a plan\'s commits');
+    });
+
+    test('none of the sites still contains the old unconditional $((10#...)) form on a template/variable phase number', () => {
       const ref = fs.readFileSync(TDD_REF, 'utf8');
-      assert.ok(!w.includes('PHASE_N=$((10#{phase_number}))'), 'old broken form must not remain in execute-phase.md (site 1)');
-      assert.ok(!w.includes('PHASE_N=$((10#${PHASE_NUMBER}))'), 'old broken form must not remain in execute-phase.md (site 2)');
-      assert.ok(!frag.includes('SPOT_PHASE_N=$((10#{phase_number}))'), 'old broken form must not remain in completion-reconciliation.md (site 3)');
-      assert.ok(!ref.includes('PHASE_N=$((10#${PHASE}))'), 'old broken form must not remain in tdd.md (site 4)');
+      assert.ok(!ref.includes('PHASE_N=$((10#${PHASE}))'), 'old broken form must not remain in tdd.md');
+    });
+
+    // Generative-fix-divergence parity: the shell snippet that still ships in tdd.md and the
+    // resolver's pattern must accept and reject the same commit scopes.
+    test('the resolver\'s plan pattern agrees with the shell snippet\'s ERE on every case above', () => {
+      const cases = [
+        ['01.1-03', 'feat(01.1-03):', true],
+        ['01.1-03', 'test(1.1-3):', true],
+        ['01.1-03', 'feat(01-03):', false],
+        ['01.1-03', 'feat(01.2-03):', false],
+        ['01.1-03', 'feat(011-03):', false],
+        ['01.1-03', 'feat(12-03):', false],
+        ['01-03', 'feat(01-03):', true],
+        ['01-03', 'feat(01.1-03):', false],
+        ['01-03', 'feat(011-03):', false],
+        ['03A-02', 'feat(3A-2):', true],
+        ['03A-02', 'feat(3-2):', false],
+      ];
+      for (const [planId, subject, expected] of cases) {
+        const resolver = new RegExp(planSubjectPattern(planId)).test(subject);
+        assert.equal(resolver, expected, `resolver: ${planId} vs ${subject}`);
+        const [phase, plan] = planId.split('-');
+        const phaseN = runFixed(phase);
+        const planN = String(Number(plan.replace(/\D+$/, '')));
+        const shellRe = `^[a-z]+\\((0*${phaseN})-(0*${planN})\\):`;
+        assert.equal(matchAll(shellRe, [[subject, expected]])[0], expected, `shell: ${planId} vs ${subject}`);
+      }
     });
   });
 });

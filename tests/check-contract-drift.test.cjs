@@ -541,6 +541,7 @@ describe('contract-drift: typed surface', () => {
       'unknown_kind',
       'unknown_producer',
       'unmatched_consumer_token',
+      'unresolved_reference_include',
       'vestigial_marker',
     ]);
     assert.ok(Object.isFrozen(VIOLATION_KINDS));
@@ -844,6 +845,71 @@ describe('contract-drift: end-to-end via check-contract-drift.cjs --root', () =>
     assert.deepEqual(r.report.violations, []);
   });
 
+  // #4841: referenceIncludes() is what lets an agent DELEGATE its completion marker to a reference
+  // doc, so "which pointer spellings does it follow" is behaviour, not trivia. These pin it end to end
+  // rather than through the matcher: the marker lives ONLY in the reference, so the fixture is clean
+  // exactly when the pointer was followed and reports `no_consumer` exactly when it was not.
+  //
+  // The gate in tests/shipped-reference-cites.test.cjs pins the same spellings on its own half. Both
+  // halves need their own pin — the live corpus carries zero project-relative pointers, so a reversion
+  // that touched only THIS regex would otherwise be silent.
+  const DELEGATED_REGISTRY = [
+    '| Agent | Role | Completion Markers | Consumed by | Kind |',
+    '|-------|------|--------------------|--------------|------|',
+    '| gsd-alpha | Fixture | `## ALPHA COMPLETE` | `gsd-core/workflows/w.md` | sentinel-match |',
+  ].join('\n');
+  const DELEGATED_REF = ['# Ref', '', '```markdown', '## ALPHA COMPLETE', 'done', '```', ''].join('\n');
+  function delegatedFixture(dir, pointer) {
+    writeFixture(dir, {
+      registryBody: DELEGATED_REGISTRY,
+      agents: { 'gsd-alpha.md': `# Alpha\n\nProcedure: ${pointer}\n\nGate: \`<required_reading>\` MUST be Read.\n` },
+      extraFiles: {
+        'gsd-core/workflows/w.md': 'Dispatch on `## ALPHA COMPLETE`.\n\n<required_reading>\n- x.md\n</required_reading>\n',
+        'gsd-core/references/ref.md': DELEGATED_REF,
+      },
+    });
+  }
+
+  for (const [label, pointer] of [
+    ['the installed tilde form', '@~/.claude/gsd-core/references/ref.md'],
+    ['the installed $HOME form', '@$HOME/.claude/gsd-core/references/ref.md'],
+    ['the bare repo-relative form', '@gsd-core/references/ref.md'],
+    ['a project-relative prefix', '@.claude/gsd-core/references/ref.md'],
+    ['a NESTED project-relative prefix', '@config/nested/gsd-core/references/ref.md'],
+  ]) {
+    test(`#4841: referenceIncludes follows ${label}`, (t) => {
+      const dir = createTempDir('gsd-4841-follow-');
+      t.after(() => cleanup(dir));
+      delegatedFixture(dir, pointer);
+      const r = runCheckJson(dir);
+      assert.equal(r.exitCode, 0, `${pointer} was not followed; stderr: ${r.stderr}`);
+      assert.deepEqual(r.report.violations, []);
+    });
+  }
+
+  for (const [label, pointer] of [
+    ['a dot prefix segment', '@./gsd-core/references/ref.md'],
+    ['a dot-dot prefix segment', '@../gsd-core/references/ref.md'],
+    ['a dot-dot segment in a NON-FIRST position', '@a/../gsd-core/references/ref.md'],
+    ['a token continuing past the name', '@~/.claude/gsd-core/references/ref.md/xx?'],
+    ['a trailing traversal', '@~/.claude/gsd-core/references/ref.md/../../ref.md'],
+  ]) {
+    test(`#4841: referenceIncludes does NOT follow ${label}`, (t) => {
+      const dir = createTempDir('gsd-4841-nofollow-');
+      t.after(() => cleanup(dir));
+      delegatedFixture(dir, pointer);
+      const r = runCheckJson(dir);
+      assert.equal(r.exitCode, 1, `${pointer} was followed and should not have been`);
+      // `declared_marker_not_emitted`, not `no_consumer`: the registry declares the marker and the
+      // agent no longer appears to emit it, because the text carrying it was never folded in. That is
+      // the check reporting the unfollowed pointer through the mechanism it actually has.
+      assert.ok(
+        r.report.violations.some((x) => x.kind === 'declared_marker_not_emitted'),
+        `expected the delegated marker to go unfound, got: ${JSON.stringify(r.report.violations)}`,
+      );
+    });
+  }
+
   test('planted unmatched sentinel fails and names the producer', (t) => {
     const dir = createTempDir('gsd-3565-orphan-');
     t.after(() => cleanup(dir));
@@ -978,6 +1044,241 @@ describe('contract-drift: end-to-end via check-contract-drift.cjs --root', () =>
     const r = runCheckJson(dir);
     assert.equal(r.exitCode, 1);
     assert.ok(r.report.violations.some((x) => x.kind === 'unclosed_fence'));
+  });
+  // ─── #4930: reference includes resolve exactly, or are reported ──────────
+  // The issue's repro: gsd-alpha declares ALPHA COMPLETE but emits nothing of
+  // its own; its only pointer names a path that does not exist but BEGINS
+  // with a real file's name. The old checker read that real file and let it
+  // satisfy the contract, so the verdict depended on a file the agent text
+  // never names.
+  const INCLUDE_ONLY_AGENT = (pointerTail) => ({
+    'gsd-alpha.md': [
+      '# Alpha',
+      '',
+      `Full procedure: @~/.claude/gsd-core/references/${pointerTail}`,
+      '',
+      'Gate: `<required_reading>` MUST be Read.',
+      '',
+    ].join('\n'),
+  });
+  const MARKER_REFERENCE = '```markdown\n## ALPHA COMPLETE\n```\n';
+
+  test('#4930: a pointer continuing past a real name is reported and does not borrow that file', (t) => {
+    const verdicts = [];
+    for (const present of [true, false]) {
+      const dir = createTempDir('gsd-4930-prefix-');
+      t.after(() => cleanup(dir));
+      writeFixture(dir, {
+        registryBody: CLEAN_REGISTRY,
+        agents: INCLUDE_ONLY_AGENT('tdd.md/xx/yy'),
+        extraFiles: { ...CLEAN_EXTRA, ...(present ? { 'gsd-core/references/tdd.md': MARKER_REFERENCE } : {}) },
+      });
+      const r = runCheckJson(dir);
+      assert.equal(r.exitCode, 1);
+      const v = r.report.violations.find((x) => x.kind === 'unresolved_reference_include');
+      assert.ok(v, `expected unresolved_reference_include, got: ${JSON.stringify(r.report.violations)}`);
+      assert.equal(v.agent, 'gsd-alpha');
+      assert.ok(v.detail.includes('tdd.md/xx/yy'), v.detail);
+      assert.ok(
+        r.report.violations.some((x) => x.kind === 'declared_marker_not_emitted' && x.marker === 'ALPHA COMPLETE'),
+        `the marker must not be satisfied by the un-named file: ${JSON.stringify(r.report.violations)}`,
+      );
+      verdicts.push(r.report.violations.map((x) => `${x.kind}:${x.marker}`).sort());
+    }
+    assert.deepEqual(verdicts[0], verdicts[1], 'the verdict must not depend on a file the agent text never names');
+  });
+
+  // Every continuation spelling the issue drove (six, then seven more), plus a zero-width space.
+  // #4841's anchored grammar already refuses to FOLLOW each of them; what #4930 adds is that the
+  // refusal is REPORTED. One fixture carries all fourteen, so the assertion is over the whole set:
+  // exactly one violation per pointer, each naming the pointer as written.
+  const CONTINUATIONS = [
+    'tdd.md/xx/yy', 'tdd.md./xx', 'tdd.mdx/xx', 'tdd.md\\xx', 'tdd.md%2fxx', 'tdd.md\u2044xx',
+    'tdd.md\u2215xx', 'tdd.md\uFF0Fxx', 'tdd.md\u29F8xx', 'tdd.md\uFF3Cxx', 'tdd.md%252fxx',
+    'tdd.md%2e%2e', 'tdd.md\u0085xx', 'tdd.md\u200Bxx',
+    // Name-class characters are never stripped as prose punctuation, alone or ahead of it, so none
+    // of these can shorten to the real `tdd.md`.
+    'tdd.md_', 'tdd.md-', 'tdd.md_.', 'tdd.md._', 'tdd.md-)',
+  ];
+
+  test('#4930: every continuation spelling is reported once, as written', (t) => {
+    const dir = createTempDir('gsd-4930-spellings-');
+    t.after(() => cleanup(dir));
+    writeFixture(dir, {
+      registryBody: CLEAN_REGISTRY,
+      agents: CLEAN_AGENTS,
+      extraFiles: { ...CLEAN_EXTRA, 'gsd-core/references/tdd.md': MARKER_REFERENCE },
+    });
+    fs.appendFileSync(
+      path.join(dir, 'agents', 'gsd-alpha.md'),
+      // Each pointer written TWICE: a pointer is reported once per agent, however often it recurs.
+      CONTINUATIONS.map((tail) => `See @~/.claude/gsd-core/references/${tail} here.\n`).join('').repeat(2),
+    );
+    const r = runCheckJson(dir);
+    assert.equal(r.exitCode, 1);
+    const details = r.report.violations
+      .filter((x) => x.kind === 'unresolved_reference_include')
+      .map((x) => x.detail);
+    assert.equal(details.length, CONTINUATIONS.length, JSON.stringify(details));
+    for (const tail of CONTINUATIONS) {
+      assert.ok(
+        details.some((d) => d.includes(`@~/.claude/gsd-core/references/${tail} does not name a reference whole`)),
+        `${JSON.stringify(tail)} must be reported as written: ${JSON.stringify(details)}`,
+      );
+    }
+  });
+
+  // The other side of reporting: a decline is now a violation, so a follower that WRONGLY failed to
+  // parse would turn the lint red on a correct pointer. These are the closing-punctuation shapes the
+  // shipped agents/ corpus and ordinary prose use; every one must still delegate the marker cleanly.
+  const FOLLOWERS = ['', ' next', '`', '**', ')', '.', '. Next', ',', '`.', ']', ':'];
+
+  for (const follower of FOLLOWERS) {
+    test(`#4930: closing punctuation ${JSON.stringify(follower)} still includes the named file, unreported`, (t) => {
+      const dir = createTempDir('gsd-4930-follower-');
+      t.after(() => cleanup(dir));
+      writeFixture(dir, {
+        registryBody: CLEAN_REGISTRY,
+        agents: INCLUDE_ONLY_AGENT(`tdd.md${follower}`),
+        extraFiles: { ...CLEAN_EXTRA, 'gsd-core/references/tdd.md': MARKER_REFERENCE },
+      });
+      const r = runCheckJson(dir);
+      assert.equal(r.exitCode, 0, `stderr: ${r.stderr} violations: ${JSON.stringify(r.report.violations)}`);
+      assert.deepEqual(r.report.violations, []);
+    });
+  }
+
+  // #4888's ambiguity rule declines whenever the UNSTRIPPED token names something, whether or not the
+  // stripped name also does — a raw-only `tdd.md)` is as much a second reading as a raw-plus-stripped
+  // pair. Both shapes are pinned, and the reason must not claim more than the check tested.
+  for (const [label, withStripped] of [
+    ['and the stripped name also exists', true],
+    ['and only the unstripped token exists', false],
+  ]) {
+    test(`#4930: an unstripped token that names a file is reported as ambiguous, ${label}`, (t) => {
+      const dir = createTempDir('gsd-4930-ambiguous-');
+      t.after(() => cleanup(dir));
+      writeFixture(dir, {
+        registryBody: CLEAN_REGISTRY,
+        agents: INCLUDE_ONLY_AGENT('tdd.md)'),
+        extraFiles: { ...CLEAN_EXTRA, ...(withStripped ? { 'gsd-core/references/tdd.md': MARKER_REFERENCE } : {}) },
+      });
+      // `)` rather than a trailing `.`: Windows silently STRIPS a trailing dot from a file name, so
+      // `tdd.md.` would land as `tdd.md` with no error and the fixture would test nothing. An existence
+      // check cannot show the name survived, so compare the canonical native name instead. That is a
+      // strong check, not a proof: the name is ASCII, so Unicode normalization cannot alias it, and it
+      // is written and looked up in one case; realpathSync.native does not promise the stored spelling
+      // in general. A filesystem that refuses or rewrites the name cannot exercise this, and skips.
+      const refs = path.join(dir, 'gsd-core', 'references');
+      try {
+        fs.writeFileSync(path.join(refs, 'tdd.md)'), MARKER_REFERENCE);
+      } catch (e) {
+        t.skip(`file name unavailable on this host (${e.code})`);
+        return;
+      }
+      let stored = null;
+      try {
+        stored = path.basename(fs.realpathSync.native(path.join(refs, 'tdd.md)')));
+      } catch {
+        // absent under that name — the skip below
+      }
+      if (stored !== 'tdd.md)') {
+        t.skip('this filesystem does not preserve the name `tdd.md)`');
+        return;
+      }
+      const r = runCheckJson(dir);
+      assert.equal(r.exitCode, 1);
+      const v = r.report.violations.find((x) => x.kind === 'unresolved_reference_include');
+      assert.ok(v, `expected unresolved_reference_include, got: ${JSON.stringify(r.report.violations)}`);
+      assert.match(v.detail, /tdd\.md\) is ambiguous — `tdd\.md\)` itself names something on disk, so stripping it to `tdd\.md`/);
+      assert.ok(
+        r.report.violations.some((x) => x.kind === 'declared_marker_not_emitted' && x.marker === 'ALPHA COMPLETE'),
+        'neither reading may satisfy the marker',
+      );
+    });
+  }
+
+  test('#4930: a real include still delegates the marker (positive control)', (t) => {
+    const dir = createTempDir('gsd-4930-include-');
+    t.after(() => cleanup(dir));
+    writeFixture(dir, {
+      registryBody: CLEAN_REGISTRY,
+      agents: INCLUDE_ONLY_AGENT('tdd.md.'),
+      extraFiles: { ...CLEAN_EXTRA, 'gsd-core/references/tdd.md': MARKER_REFERENCE },
+    });
+    const r = runCheckJson(dir);
+    assert.equal(r.exitCode, 0, `stderr: ${r.stderr} violations: ${JSON.stringify(r.report.violations)}`);
+    assert.deepEqual(r.report.violations, []);
+  });
+
+  test('#4930: an include naming a missing file is reported, not swallowed', (t) => {
+    const dir = createTempDir('gsd-4930-missing-');
+    t.after(() => cleanup(dir));
+    writeFixture(dir, { registryBody: CLEAN_REGISTRY, agents: CLEAN_AGENTS, extraFiles: CLEAN_EXTRA });
+    fs.appendFileSync(path.join(dir, 'agents', 'gsd-alpha.md'), 'See @~/.claude/gsd-core/references/absent.md\n');
+    const r = runCheckJson(dir);
+    assert.equal(r.exitCode, 1);
+    const v = r.report.violations.find((x) => x.kind === 'unresolved_reference_include');
+    assert.ok(v, `expected unresolved_reference_include, got: ${JSON.stringify(r.report.violations)}`);
+    assert.match(v.detail, /absent\.md does not exist/);
+  });
+
+  test('#4930: an include naming a directory is reported as not a regular file', (t) => {
+    const dir = createTempDir('gsd-4930-dir-');
+    t.after(() => cleanup(dir));
+    writeFixture(dir, { registryBody: CLEAN_REGISTRY, agents: CLEAN_AGENTS, extraFiles: CLEAN_EXTRA });
+    fs.mkdirSync(path.join(dir, 'gsd-core', 'references', 'dir.md'));
+    fs.appendFileSync(path.join(dir, 'agents', 'gsd-alpha.md'), 'See @~/.claude/gsd-core/references/dir.md\n');
+    const r = runCheckJson(dir);
+    assert.equal(r.exitCode, 1);
+    const v = r.report.violations.find((x) => x.kind === 'unresolved_reference_include');
+    assert.ok(v, `expected unresolved_reference_include, got: ${JSON.stringify(r.report.violations)}`);
+    assert.match(v.detail, /dir\.md is not a regular file/);
+  });
+
+  test('#4930: a dangling symlink under gsd-core/references/ is reported and not followed', (t) => {
+    const dir = createTempDir('gsd-4930-dangling-');
+    t.after(() => cleanup(dir));
+    writeFixture(dir, { registryBody: CLEAN_REGISTRY, agents: CLEAN_AGENTS, extraFiles: CLEAN_EXTRA });
+    try {
+      fs.symlinkSync(path.join(dir, 'nowhere', 'gone.md'), path.join(dir, 'gsd-core', 'references', 'gone.md'));
+    } catch (e) {
+      t.skip(`symlink unavailable on this host (${e.code})`);
+      return;
+    }
+    fs.appendFileSync(path.join(dir, 'agents', 'gsd-alpha.md'), 'See @~/.claude/gsd-core/references/gone.md\n');
+    const r = runCheckJson(dir);
+    assert.equal(r.exitCode, 1);
+    const v = r.report.violations.find((x) => x.kind === 'unresolved_reference_include');
+    assert.ok(v, `expected unresolved_reference_include, got: ${JSON.stringify(r.report.violations)}`);
+    // tryWithinRoot realpath-resolves, and a dangling link has no realpath, so it is refused as
+    // uncontained (a plain missing file, by contrast, resolves and then fails as `does not exist`).
+    assert.match(v.detail, /gone\.md does not resolve inside gsd-core\/references\//);
+  });
+
+  test('#4930: an include whose realpath leaves gsd-core/references/ is not followed', (t) => {
+    const dir = createTempDir('gsd-4930-escape-');
+    t.after(() => cleanup(dir));
+    writeFixture(dir, {
+      registryBody: CLEAN_REGISTRY,
+      agents: INCLUDE_ONLY_AGENT('out.md'),
+      extraFiles: { ...CLEAN_EXTRA, 'outside/out.md': MARKER_REFERENCE },
+    });
+    try {
+      fs.symlinkSync(path.join(dir, 'outside', 'out.md'), path.join(dir, 'gsd-core', 'references', 'out.md'));
+    } catch (e) {
+      t.skip(`symlink unavailable on this host (${e.code})`);
+      return;
+    }
+    const r = runCheckJson(dir);
+    assert.equal(r.exitCode, 1);
+    const v = r.report.violations.find((x) => x.kind === 'unresolved_reference_include');
+    assert.ok(v, `expected unresolved_reference_include, got: ${JSON.stringify(r.report.violations)}`);
+    assert.match(v.detail, /does not resolve inside gsd-core\/references\//);
+    assert.ok(
+      r.report.violations.some((x) => x.kind === 'declared_marker_not_emitted' && x.marker === 'ALPHA COMPLETE'),
+      'the escaped file must not satisfy the marker',
+    );
   });
 });
 

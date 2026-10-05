@@ -1,10 +1,24 @@
-# ADR-4910: Planning documents are read and written through one parse → mutate → serialize seam [Proposed]
+# ADR-4910: Planning documents are read and written through one parse → mutate → serialize seam [Accepted]
 
-- **Status:** Proposed — design lock for Phases 1–6 of epic [#4906](https://github.com/open-gsd/gsd-core/issues/4906). Ratify to `Accepted` at Phase 6 closeout, once the phases have demonstrably shipped. No production code lands in this PR.
+- **Status:** Accepted — ratified 2026-09-26 (originally Proposed 2026-09-20); see "Ratification" below
 - **Date:** 2026-09-20
 - **Issue:** [#4910](https://github.com/open-gsd/gsd-core/issues/4910) — Phase 0 of epic [#4906](https://github.com/open-gsd/gsd-core/issues/4906)
-- **Subsumes as layers:** [ADR-1372](1372-markdown-sectionizer-seam.md) (`markdown-sectionizer` — structure), [ADR-2143](2143-markdown-table-and-mutation-consolidation.md) (`markdown-table`, bounded mutation, fail-loud `Result<T>`). Both remain in force and unchanged; this ADR frames them as the layers a planning document composes, and neither is a rewrite target. **Their reciprocal `Subsumed by` back-links are deliberately not added yet:** `docs/adr/README.md` lifecycle rule 3 states that only an `Accepted` ADR is owed the back-link, because a `Proposed` ADR's claim is prospective. They land in the Phase 6 ratification PR, when this ADR becomes `Accepted` and the index check begins demanding them.
+- **Subsumes as layers:** [ADR-1372](1372-markdown-sectionizer-seam.md) (`markdown-sectionizer` — structure), [ADR-2143](2143-markdown-table-and-mutation-consolidation.md) (`markdown-table`, bounded mutation, fail-loud `Result<T>`). Both remain in force and unchanged; this ADR frames them as the layers a planning document composes, and neither is a rewrite target. Both now carry the reciprocal `Subsumed by` back-link this ADR's ratification obligates.
 - **Relationship to prior work:** the third consolidation in this family, after [#1372](https://github.com/open-gsd/gsd-core/issues/1372) (read seam) and [#2143](https://github.com/open-gsd/gsd-core/issues/2143) (tables, bounded mutation, fail-loud). Sibling: [#2121](https://github.com/open-gsd/gsd-core/issues/2121) (`phase-id.cts`). The node-scoped parse-error contract (§5) applies to documents the `Evidence` distinction [#4631](https://github.com/open-gsd/gsd-core/issues/4631) draws for gates.
+
+## Ratification (2026-09-26): Proposed → Accepted
+
+Ratified per `docs/adr/README.md`'s ["Ratifying a stale `Proposed`"](README.md#ratifying-a-stale-proposed) procedure. Phases 0 through 5 are shipped and their sub-issues closed `COMPLETED`: [#4910](https://github.com/open-gsd/gsd-core/issues/4910) (Phase 0, this ADR), [#4917](https://github.com/open-gsd/gsd-core/issues/4917) (Phase 1), [#4932](https://github.com/open-gsd/gsd-core/issues/4932) (Phase 2), [#4958](https://github.com/open-gsd/gsd-core/issues/4958) (Phase 3), [#4961](https://github.com/open-gsd/gsd-core/issues/4961) (Phase 4), [#4984](https://github.com/open-gsd/gsd-core/issues/4984) (Phase 5). Phase 6 ([#5007](https://github.com/open-gsd/gsd-core/issues/5007)) — draining the grandfather allowlist to zero and closing the ratchet §6/§7 describe, per this ADR's own instruction that Phase 6 "also ratifies this ADR" — is this branch's own deliverable; its engineering is complete and committed here (see below), and this ratification is that phase's last remaining item, landing in the same PR that closes #5007. The epic ([#4906](https://github.com/open-gsd/gsd-core/issues/4906)) remains open until that PR merges.
+
+**Evidence the decision shipped:**
+
+- **The `PlanningDoc` seam exists.** `src/planning-document.cts` (Phase 1, [#4917](https://github.com/open-gsd/gsd-core/issues/4917)) implements the parse → mutate → serialize seam this ADR decides: frontmatter + section tree + typed field nodes (`boldField`, `table`, `checklist`), node-addressed mutation via `valueSpan`, and byte-stable splicing (§2, §3).
+- **The phase-heading grammar's census is zero.** Phase 6 ([#5007](https://github.com/open-gsd/gsd-core/issues/5007)) drained the last 15 grandfathered hand-rolled Phase-heading call sites onto the shared `phase-id.cts` builders (`buildPhaseHeadingScanRegex`, `buildPhaseHeadingRegex`, `phaseHeadingPrefixSrcFor`) — 16 commits on this branch, `edcb2d1141`..`eee40bc38d` (`git log --oneline` against this branch's base), each one site migrated and its allowlist entry deleted in the same commit per §6's drain discipline. `scripts/lint-phase-id-drift.cjs`'s `findPhaseHeadingScanLiteralDrift` reports zero tree-wide occurrences of the hand-typed `#{2,4}\s*Phase\s+` literal, which is §8's "exactly one implementation" acceptance criterion (Phase 5, [#4984](https://github.com/open-gsd/gsd-core/issues/4984)) carried through to the ratchet.
+- **The ratchet is type-narrowing plus lint, per §6.** `eslint-rules/no-adhoc-markdown-parsing.cjs` gained a fifth detector, `isFieldShapedRegex` (commit `1324e86b0f`), closing the exact gap #4852 demonstrated: a bold-label field `.replace()` mutation of a registry-recognised planning artifact now fails `lint:ci` rather than passing silently.
+- **The positive-control lint exists, per §7.** `scripts/lint-planning-document-positive-control.cjs` (commit `eee40bc38d`) asserts one fixture per declared-accepted `PlanningDoc` grammar, modelled on `scripts/lint-table-schema-drift.cjs`'s registry mechanism, and is wired into `lint:ci` — a parser declaring an accepted grammar with no control now fails the build.
+- **Governance on track to close.** Phase sub-issues [#4910](https://github.com/open-gsd/gsd-core/issues/4910)/[#4917](https://github.com/open-gsd/gsd-core/issues/4917)/[#4932](https://github.com/open-gsd/gsd-core/issues/4932)/[#4958](https://github.com/open-gsd/gsd-core/issues/4958)/[#4961](https://github.com/open-gsd/gsd-core/issues/4961)/[#4984](https://github.com/open-gsd/gsd-core/issues/4984) are closed `COMPLETED`; [#5007](https://github.com/open-gsd/gsd-core/issues/5007) (Phase 6) and epic [#4906](https://github.com/open-gsd/gsd-core/issues/4906) close when this PR merges.
+
+Three Amendments (2026-09-21, 2026-09-22, 2026-09-24) narrowed or corrected specific claims along the way — the write-refusal rule, the STATE.md re-scope, and the Phase 3 table/checklist-writer correction — and none of them is reopened by this ratification; they stand as recorded. A fourth Amendment (2026-09-27), landing after ratification, closes §1's still-live naming risk (Consequences' "Risk — naming") by absorbing `src/plan-document.cts`'s frontmatter reads onto this seam; see that Amendment below.
 
 ## Context
 
@@ -141,6 +155,12 @@ extends that rather than inventing a second notion of what a planning document i
 > `*-PLAN.md` **body**. The ambiguity is resolved by **absorption** — that module becomes a typed
 > field reader beneath this seam — not by a naming convention every future author must be told.
 > Until that lands, the two names are close enough to confuse, and this note is the warning.
+>
+> **Landed 2026-09-27, per Amendment below.** `src/plan-document.cts`'s 7 frontmatter-derived
+> scheduling fields, plus `objective` as an 8th, now read through this seam's
+> `readFrontmatterField`/`readFrontmatterFieldFromSource` rather than calling
+> `frontmatter.cts`'s `extractFrontmatter` directly. See the "Amendment (2026-09-27)" section
+> for the evidence.
 
 ### 2. A structural write replaces a node. There is no span, because there is no regex.
 
@@ -458,7 +478,8 @@ Two consequences for the phases:
   test, the fail-first regression per absorbed issue, §7's positive controls, and the per-phase
   `gsd-test` gate. [ADR-2143](2143-markdown-table-and-mutation-consolidation.md)'s own Phase 5 exists because a coverage re-check found a seam its
   Phase 0 had left unowned; `/adr-phase-coverage` runs again at epic closeout for that reason.
-- **Risk — naming.** `planning-document` beside `plan-document` (§1). Live until absorption lands.
+- **Risk — naming.** `planning-document` beside `plan-document` (§1). Live until absorption
+  lands — landed 2026-09-27, see "Amendment (2026-09-27)" below.
 - **Non-goals.** Repairing the twelve at their existing call sites (the pattern that produced them
   — three times for #4852 alone). Replacing markdown as the storage format; the artifacts stay
   human-readable and hand-editable. Rewriting `markdown-sectionizer` or `markdown-table`.
@@ -613,3 +634,206 @@ Raised by a maintainer ruling on 2026-09-21, after §5 shipped in
 recorded in that PR as an interpretation of #4906's *"an unparseable shape surfaces `could-not-parse`
 with the offending span"* — a sentence that carries no read-or-write qualifier — and the
 interpretation was made without examining the write side at all.
+
+## Amendment (2026-09-22): two of Phase 2's cited defects are already fixed, and STATE.md's field-write engine is re-scoped out
+
+Phase 2's evidence list read *#4852, #4862, #4499*. Two of those three are **already fixed on
+`next`, independently of this epic**, and the third — #4862 — exposed a subsystem whose blast radius
+disqualifies it from a mechanical migration. All three claims below were reproduced against the
+built module, not inferred from reading source.
+
+### #4499 is already fixed
+
+`src/frontmatter.cts`'s `spliceFrontmatter` already preserves untouched top-level keys verbatim,
+per-key, comparing structural equality before deciding whether to regenerate a key's raw text.
+Reproduced: a document with `must_haves` and `tags` block sequences, with only `wave` changed,
+round-trips those two keys **byte-identically**. This predates this epic — the mechanism (`#1572`
+in its own comments) already implements the identity-preservation rule Decision 3 asks for, for
+YAML frontmatter specifically.
+
+**Struck from Phase 2's evidence.** Frontmatter is a different grammar from the body-field grammar
+this seam models (`boldField` / `table` / `checklist`) — Decision 1 treats it as one opaque region,
+supplied by `frontmatter.cts` as a layer, not decomposed into writable nodes. `spliceFrontmatter`'s
+internal per-key YAML splicing is therefore not a "verb writes a field with its own regex" instance
+in the sense this phase targets, and it is not broken. No migration is owed here.
+
+### #4862 is already fixed at its own level, and its subsystem is re-scoped out
+
+`state-document.cts`'s `stateReplaceField` already anchors its bold-field pattern to line start with
+same-line-only leading whitespace (its own comments cite `#4243`). Reproduced: writing `Last
+Activity` leaves a sibling `**Last Activity Description:**` field and the `state_head` frontmatter
+key both intact. The exact symptom #4862 reported does not reproduce.
+
+**What #4862's site actually is, measured rather than assumed:** `stateReplaceField` /
+`stateReplaceFieldWithFallback` carries a **CRITICAL** `get_impact(direction=both)` rating — 190+
+affected symbols, truncated as a lower bound. So, measured the same way, do `phase.cts`'s
+`mutateMilestonePhase` (121) and `roadmap.cts`'s `cmdRoadmapUpdatePlanProgress` (200) — the two
+sites Phase 2 *does* keep. **The CRITICAL label does not distinguish these groups**, and an earlier
+draft of this amendment claimed it did without checking the second two; corrected here. All three
+symbols live in large, single-file modules (`phase.cts` at 4,800+ lines, `roadmap.cts` at 1,600+,
+`state-transition.cts` at 3,500+), and `direction: both` walks into every sibling function such a
+file touches — a known measurement artifact of bidirectional impact on a large shared module, not
+evidence specific to any one of these three symbols' actual behavior.
+
+**What genuinely distinguishes them is architectural, and this is the actual basis for the
+re-scoping:** `stateReplaceField` is one building block inside `updateCore`
+(`state-transition.cts`), which is a full read-modify-write transaction — session-vs-body field
+routing (`sessionLabelsForBodyField`), a three-condition frontmatter-fallback case (`#3699` case D),
+frontmatter reconstruction and re-sync, and post-write preservation reconciliation
+(`readModifyWriteStateMd`). Its own comments cite four prior hardening passes against exactly the
+corruption classes this epic worries about — `#3374`, `#3699`, `#4010`, `#4243` — predating #4906.
+`mutateMilestonePhase` and `cmdRoadmapUpdatePlanProgress`, by contrast, are each **one field, one
+grammar, a three-arm decision that collapses onto a single `setFieldValue` call plus a caller-side
+pre-check**, inside a confinement window another module already computes — a substitution of
+mechanism with the same inputs and outputs, not a design task.
+
+This is not "a verb brings its own regex to a field write." `updateCore` is a proven,
+actively-maintained transactional engine that already defends against silent corruption, and it
+does not map onto `PlanningDoc`'s current node model at all: there is no node concept for a
+multi-field transaction, a frontmatter-derived-from-body sync pass, or a session-scoped write with
+an archive-shadowing guard. Migrating it would mean designing that model, not calling an existing
+seam function.
+
+**The STATE.md field-write engine is re-scoped out of Phase 2** on that architectural basis. It is
+not defective, so there is no urgency, and its migration — if ever undertaken — needs its own design
+phase with its own node-model design, not a slot inside a phase whose other deliverable is a
+same-mechanism substitution in `phase.cts`/`roadmap.cts`.
+
+**Struck from Phase 2's evidence.**
+
+### What Phase 2 actually delivers
+
+With both struck, Phase 2's census is exactly the `**Plans:**` line: `src/phase.cts`'s
+`planCountBodyPattern` (still live — one capture group, confined by `withPhaseSection` but still a
+regex the seam should own) and `src/roadmap.cts`'s `planCountPattern` (the correct three-arm sibling,
+still a duplicate implementation under Decision 2's "two copies that agree today are the same
+defect" rule). Both write the same field on the same artifact and migrate together onto one seam
+call. `#4852` remains the phase's fail-first evidence; `Refs #4852`, since it is already closed
+`NOT_PLANNED`.
+
+No new phase number is opened for the STATE.md engine. If a future contributor wants to bring
+`STATE.md` under this seam, that is new work requiring its own issue, its own design, and its own
+`get_impact` accounting — not an unclaimed fragment of this phase.
+
+## Amendment (2026-09-24): Phase 3 does not add table/checklist writers — the "arrive with Phase 3" claim was aspirational, not evidence-backed
+
+Phase 1's own docstring on `planning-document.cts` and `CONTEXT.md`'s Planning Document Module
+glossary entry both state, in near-identical wording: *"table/checklist writers arrive with Phase
+3."* Phase 3's actual evidence — [#4736](https://github.com/open-gsd/gsd-core/issues/4736) and
+[#4793](https://github.com/open-gsd/gsd-core/issues/4793) — does not need either, checked directly
+against both call sites before writing this phase's code, not assumed:
+
+- **#4736** (`quick.md` Step 7c writes unescaped prose into STATE.md's Quick Tasks table) is fixed
+  by routing the workflow through `src/markdown-table.cts`'s existing `appendQuickTaskRow`, called
+  via the `quick-tasks-append` CLI subcommand. That function already implements Decision 4's exact
+  contract — one escape function (`escapeCell`), shared by the reader (`parseMarkdownTable`,
+  `matchTableSchema`) and the writer, refusing (a fail-loud `Result`) rather than guessing on an
+  unrecognized schema. The defect was that `quick.md`'s own text never called it, not that the
+  escaping capability was missing. This never touches `planning-document.cts`: STATE.md's field-write
+  engine was explicitly re-scoped out of this epic by Phase 2's own 2026-09-22 amendment above, and
+  building a `table`-node writer for one call site inside that already-out-of-scope engine would
+  either bypass `readModifyWriteStateMd`'s locking/resync discipline or require the STATE.md
+  transactional redesign Phase 2 already declined to do here.
+- **#4793** (`src/decisions.cts`'s `parseDecisions` rejects a second plain-prose colon in a decision
+  title) is fixed entirely inside `decisions.cts`'s own dedicated grammar (`bulletTitledColonRe`).
+  `decisions.cts` has never imported `planning-document.cts` — it is a standalone parser for
+  `<decisions>` blocks in phase `CONTEXT.md` files, which are not `.planning/` root artifacts in
+  `PLANNING_ARTIFACTS`'s sense (`isCanonicalPlanningFile`'s registry does not cover per-phase
+  `CONTEXT.md` files at all). There is no writer counterpart to fix here either — decisions are
+  hand-written by a human or by `discuss-phase`'s own prose generation, never re-serialized by a
+  structural writer; the fix is a reader-side grammar widening (Decision 4a's "the reader is liberal
+  toward a human's variation" half), not a writer change.
+
+**Corrected, rather than silently left inaccurate.** `planning-document.cts`'s docstring and
+`CONTEXT.md`'s glossary entry are updated in this same PR to remove the "arrive with Phase 3" claim:
+`table`/`checklist` nodes remain parse-and-read-only, and no phase in this epic's remaining evidence
+(Phases 4-6, reviewed against their own cited issues before writing this sentence) currently names a
+call site that needs a `table`- or `checklist`-node writer. If one is found later, it is that
+phase's deliverable, stated there with its own evidence — not a debt silently carried past a phase
+whose own docstring promised it and then didn't measure whether the promise was still true.
+
+**`emittable ⊆ accepted` (§4a) is already satisfied and needed no new test.** `PlanningDoc`'s only
+currently-writable node kind is `boldField`, and
+`tests/planning-document.test.cjs`'s existing fast-check property ("row 31: every value
+setFieldValue accepts round-trips identically" — a document-shaped generator per
+`CONTRIBUTING.md`'s fixture-provenance rule, 300 seeded runs) already asserts, for the whole
+registry as it currently stands, that every value the writer accepts round-trips identically once
+spliced and re-parsed. Neither of this phase's two fixes touches `setFieldValue`, `serialize`, or
+`parsePlanningDoc`, so this phase's obligation is to confirm the property still holds (it does,
+unmodified), not to author a new one.
+
+**What Phase 3 actually delivers:** `quick-tasks-append` gains an optional `--status` flag
+(threading through to `appendQuickTaskRow`'s pre-existing `status` field), closing the last gap that
+kept `quick.md`'s `$VALIDATE_MODE` row shape on the raw-markdown path; `quick.md` Step 7c is rewritten
+to call `quick-tasks-append` instead of authoring the row via the Edit tool; and
+`bulletTitledColonRe` is widened to treat the LAST bare colon before the closing `**` as the title
+separator, so a plain-prose second colon no longer forces `could-not-parse`, while a title with zero
+bare colons still does (the #1639 discipline, unweakened — pinned by a negative-control test).
+
+## Amendment (2026-09-27): `src/plan-document.cts` absorption lands — closing §1's naming risk
+
+[#5026](https://github.com/open-gsd/gsd-core/issues/5026), surfaced by a post-epic
+`/adr-phase-coverage` run rather than a new report: §1's "Naming, recorded as a live risk" and its
+Consequences echo ("Risk — naming... Live until absorption lands") both name absorption, not a
+naming convention, as the resolution — and no phase of epic #4906 (Phases 0-6, ratified above) ever
+did it. This amendment lands that absorption.
+
+`src/plan-document.cts`'s frontmatter-derived fields already delegated to `frontmatter.cts`'s
+`extractFrontmatter` — no duplicated YAML parsing ever existed. The gap was only that the call
+happened directly, bypassing this seam. Its actual distinctive content — the `<task>` XML-ish block
+grammar (including the deliberately fence-blind legacy `## Task N` heading fallback), the
+`<objective>` tag, and the `<threat_model>` table — are domain-specific micro-grammars this seam's
+five node kinds (`frontmatter`/`section`/`boldField`/`table`/`checklist`) do not express, and stay
+exactly as they were; only the frontmatter-field-reading portion moved.
+
+**A second, narrower entry point was needed, not the one this ADR's design docs first assumed.**
+`parsePlanningDoc`'s artifact-kind gate (`PLANNING_ARTIFACTS`/`isCanonicalPlanningFile`) exists to
+distinguish "this document records nothing" from "wrong kind entirely" for a caller that might hand
+it any `.planning/`-root file, including a non-markdown one. That risk does not exist for
+`plan-document.cts`: every real `*-PLAN.md` lives nested under `.planning/phase/*/plans/`, never at
+the `.planning/` root `PLANNING_ARTIFACTS` enumerates (confirmed by execution:
+`isCanonicalPlanningFile('01-PLAN.md')` is `false`), and two of its five real callers
+(`src/planning-inspect.cts`, `src/quick-batch-dispatch.cts`) hold only in-memory plan content with no
+filename to gate on at all. Routing through `parsePlanningDoc` as originally planned would have made
+every one of `plan-document.cts`'s 8 frontmatter fields silently go blank for every real plan
+document — the opposite of the required byte-identical migration. `src/planning-document.cts` gained
+a second, narrower reader, `readFrontmatterFieldFromSource(source, key)`, which locates the
+frontmatter span directly via the same `frontmatterRegion`-composing primitive `parsePlanningDoc`
+itself uses (`findFrontmatterSpan`), with no `PlanningDoc`/artifact-kind gate at all — alongside
+`readFrontmatterField(doc, key)`, which reads the same way off an already-parsed `PlanningDoc`'s
+`FrontmatterNode`. Both share one internal lookup-and-shape helper rather than duplicating the
+extractFrontmatter-call-plus-result-shaping logic — the same `DEFECT.GENERATIVE-FIX` class this
+epic exists to close.
+
+**Evidence:**
+
+- `src/planning-document.cts` exports `readFrontmatterField(doc: PlanningDoc, key: string)` and
+  `readFrontmatterFieldFromSource(source: string, key: string)`, both returning the seam's
+  `NodeRead` shape (widened to `NodeRead<T = string>`, default-compatible with every pre-existing
+  caller) — `{ok:true, value}` on a present key; `{ok:false, reason:'no-frontmatter', ...}` with no
+  fence at all; `{ok:false, reason:'unparseable-frontmatter', ...}` when `extractFrontmatter` reports
+  its own `FRONTMATTER_UNPARSEABLE` marker; `{ok:false, reason:'field-not-found', ...}` for an absent
+  key — proven against `extractFrontmatter` directly in `tests/planning-document.test.cjs`'s new
+  `#5026` describe blocks.
+- `src/plan-document.cts`'s `parsePlanDocument` migrated its 7 frontmatter-derived scheduling
+  fields (`wave`, `depends_on`, `autonomous`, `agent_hint`, `files_modified`, `files_deleted`,
+  `type`) onto `readFrontmatterFieldFromSource`, unwrapped to the same `value-or-undefined` shape
+  a direct `fm[key]` read gave. `objective` is migrated too, as an 8th field — it reads through
+  the same `frontmatterField` helper, as a fallback used only when the `<objective>` XML tag
+  (`extractObjective`, unrelated and untouched) is absent — included because it is the exact same
+  frontmatter-key-read pattern as the other seven, not a deliberate scope decision to exclude it.
+  The `<task>`/`<objective>`-tag/`<threat_model>` parsing itself is untouched.
+- `tests/plan-document.test.cjs`'s full 27-test pre-existing suite (including its "legacy behavior
+  unchanged" regression block) passes unmodified, plus 11 new before/after parity tests covering
+  every one of the 7 scheduling fields across present/absent/array/hyphenated-alt-key/malformed-frontmatter
+  shapes. Every real caller's own test suite
+  (`tests/phase.test.cjs`, `tests/planning-inspect.test.cjs`, `tests/planning-inspect.unit.test.cjs`,
+  `tests/task-command-router-resolve-content.test.cjs`, `tests/quick-batch-dispatch.test.cjs`,
+  `tests/init.test.cjs`) passes with no regressions.
+- Known, accepted side-effect-only divergence: `extractFrontmatter`'s optional `sourcePath`
+  parameter (used only to name a file in its truncated-frontmatter stderr diagnostic, #1882) has no
+  equivalent on `readFrontmatterFieldFromSource`. `parsePlanDocument`'s own `planPath` parameter is
+  therefore no longer threaded into that diagnostic; the diagnostic falls back to its own documented
+  content-digest dedup (the same fallback `extractFrontmatter` already used for the two callers that
+  never had a path to give it). This affects only an out-of-band stderr message, never
+  `parsePlanDocument`'s return value.

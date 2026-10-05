@@ -35,6 +35,7 @@
 const fs = require('fs');
 const path = require('path');
 const { escapeRegex: escapeRe } = require('../../gsd-core/bin/lib/pattern.cjs');
+const { normalizeEol } = require('../../gsd-core/bin/lib/text-lines.cjs');
 
 const WORKFLOW_PATH = path.join(__dirname, '..', '..', 'gsd-core', 'workflows', 'pr-branch.md');
 
@@ -87,14 +88,31 @@ const BASH_FENCE_OPEN_RE = /^```bash\s*$/;
 const BASH_FENCE_CLOSE_RE = /^```\s*$/;
 const PICK_LOOP_MARKER = 'for HASH in $(printf \'%s\' "$INCLUDED_COMMITS")';
 
-// Scans `text` for fenced ```bash blocks and returns the verbatim body
-// (fence markers stripped, lines rejoined with '\n') of the single block
-// that contains `create_pr_branch`'s cherry-pick loop. Throws if the marker
-// is found in zero or more-than-one bash block, since the recipe must have
-// exactly one canonical form.
-const extractPickLoop = (text) => {
+/**
+ * Scans `text` for fenced ```bash blocks and returns the verbatim body
+ * (fence markers stripped, lines rejoined with '\n') of the single block
+ * that contains `marker`. Throws if the marker is found in zero or
+ * more-than-one bash block, since each recipe must have exactly one
+ * canonical form. Generic version of the original `extractPickLoop`
+ * (#4605/#4606): used both for the cherry-pick loop and for the canonical
+ * declarations / mode-derivation blocks that precede it.
+ *
+ * The returned body is run through `normalizeEol` (`src/text-lines.cts`,
+ * the repo's sole `\r?\n`/CRLF-normalization owner) before it is handed
+ * back: `text.split('\n')` above leaves a trailing `\r` on every line when
+ * the source was checked out CRLF (e.g. a Windows `git` checkout without an
+ * enforcing `.gitattributes` `eol` rule for the path in question), and a
+ * caller that feeds that body straight into `bash -c`/heredocs sees an
+ * embedded `\r` corrupt heredoc terminator matching (the shell never sees
+ * the literal closing line, reads to EOF still inside the recipe's open
+ * `if`/`done`, and fails with a `syntax error: unexpected end of file`).
+ * Normalizing here, at the single extraction seam, fixes every caller
+ * (`extractPickLoop`, the declarations block, the derivation block) at
+ * once rather than requiring each call site to remember to do it.
+ */
+const extractBashBlockContaining = (text, marker) => {
   if (typeof text !== 'string') {
-    throw new Error('extractPickLoop: expected the workflow text as a string');
+    throw new Error('extractBashBlockContaining: expected the workflow text as a string');
   }
 
   const lines = text.split('\n');
@@ -108,8 +126,8 @@ const extractPickLoop = (text) => {
         bodyLines.push(lines[j]);
         j += 1;
       }
-      const body = bodyLines.join('\n');
-      if (body.includes(PICK_LOOP_MARKER)) {
+      const body = normalizeEol(bodyLines.join('\n'));
+      if (body.includes(marker)) {
         matches.push(body);
       }
       i = j + 1;
@@ -119,14 +137,16 @@ const extractPickLoop = (text) => {
   }
 
   if (matches.length === 0) {
-    throw new Error(`pr-branch.md: no create_pr_branch cherry-pick loop found (expected a bash block containing "${PICK_LOOP_MARKER}")`);
+    throw new Error(`pr-branch.md: no bash block found containing "${marker}"`);
   }
   if (matches.length > 1) {
-    throw new Error(`pr-branch.md: cherry-pick loop found in ${matches.length} bash blocks — the recipe must have exactly one canonical form`);
+    throw new Error(`pr-branch.md: "${marker}" found in ${matches.length} bash blocks — the recipe must have exactly one canonical form`);
   }
 
   return matches[0];
 };
+
+const extractPickLoop = (text) => extractBashBlockContaining(text, PICK_LOOP_MARKER);
 
 const normalizePaths = (input) => {
   const raw = typeof input === 'string' ? input.split('\n') : input;
@@ -182,6 +202,7 @@ module.exports = {
   parseWorkflow,
   readWorkflow,
   extractPickLoop,
+  extractBashBlockContaining,
   normalizePaths,
   forbiddenRegex,
   forbiddenPaths,
