@@ -27,6 +27,29 @@ import ioMod = require('./io.cjs');
 const { output, error: coreError } = ioMod;
 import { platformWriteSync } from './shell-command-projection.cjs';
 
+/**
+ * Portfolio ownership: bind the learnings store target (`~/.gsd/knowledge`) to
+ * the caller's declared writable scopes BEFORE the first write. That store is
+ * OUTSIDE any one repository's worktree, so a worktree-scoped enforce
+ * descriptor cannot authorize it and the write is REFUSED EXPLICITLY under
+ * enforce rather than silently writing outside the owned scopes. There is no
+ * context-only exemption and no out-of-root allowance: a legitimate
+ * global-store write under enforce is a documented limitation, not a bypass.
+ * Audit (the default) is unchanged.
+ */
+function assertOwnerTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      coreError('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface LearningRecord {
@@ -365,12 +388,14 @@ function cmdLearningsQuery(tag: string, raw: boolean): void {
 }
 
 function cmdLearningsCopy(cwd: string, raw: boolean): void {
+  assertOwnerTargetsBound(cwd, [getStoreDir()]);
   const planDir = path.join(cwd, '.planning');
   const result = learningsCopyFromProject(planDir);
   output(result, raw, undefined);
 }
 
-function cmdLearningsPrune(olderThan: string, raw: boolean): void {
+function cmdLearningsPrune(olderThan: string, raw: boolean, cwd: string = process.cwd()): void {
+  assertOwnerTargetsBound(cwd, [getStoreDir()]);
   try {
     const result = learningsPrune(olderThan);
     output(result, raw, undefined);
@@ -379,10 +404,11 @@ function cmdLearningsPrune(olderThan: string, raw: boolean): void {
   }
 }
 
-function cmdLearningsDelete(id: string, raw: boolean): void {
+function cmdLearningsDelete(id: string, raw: boolean, cwd: string = process.cwd()): void {
   if (!/^[a-z0-9]+-[a-f0-9]+$/.test(id)) {
     coreError(`Invalid learning ID: "${id}"`);
   }
+  assertOwnerTargetsBound(cwd, [getStoreDir()]);
   const deleted = learningsDelete(id);
   output({ id, deleted }, raw, undefined);
 }

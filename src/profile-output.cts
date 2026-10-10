@@ -19,6 +19,25 @@ import os from 'node:os';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import io = require('./io.cjs');
 const { output, error } = io;
+
+/**
+ * Portfolio ownership: bind the generated profile/preferences/CLAUDE.md target
+ * to the caller's declared writable scopes BEFORE the first write. Under an
+ * enforce policy a missing/foreign/stale/out-of-scope descriptor refuses with
+ * the stable owner_context_refused reason; audit is a no-op.
+ */
+function assertOwnerOutputTargetBound(cwd: string, outputPath: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, [outputPath]);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), io.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import configLoader = require('./config-loader.cjs');
 const { loadConfig } = configLoader;
@@ -293,6 +312,14 @@ function buildClaudeMdWorkflowEnforcement(runtime: unknown): string {
     `- \`${String(formatGsdSlash('quick', runtime))}\` for small fixes, doc updates, and ad-hoc tasks`,
     `- \`${String(formatGsdSlash('debug', runtime))}\` for investigation and bug fixing`,
     `- \`${String(formatGsdSlash('execute-phase', runtime))}\` for planned phase work`,
+    '',
+    // Ownership routing (workflow-ownership 2026-10-10): the entry point is
+    // chosen by ownership, not task size. This generated block is a carrier
+    // for repos that never load a GSD workflow, so it must not reintroduce
+    // "quick because it looks small" — that is how an active-phase task gets
+    // misfiled as standalone quick work.
+    'Choose the entry point by ownership, not size alone: a task belonging to an active phase follows that phase, a linked quick task names its parent, and standalone quick/operational work carries an explicit rationale. '
+      + `\`${String(formatGsdSlash('quick', runtime))}\` and \`${String(formatGsdSlash('fast', runtime))}\` run the core ownership preflight before creating planning directories, editing state, or dispatching; a refused preflight stops the operation — do not bypass it.`,
     '',
     'Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.',
   ].join('\n');
@@ -764,6 +791,7 @@ function cmdWriteProfile(cwd: string, options: CmdWriteProfileOptions, raw: bool
     outputPath = path.join(cwd, outputPath);
   }
 
+  assertOwnerOutputTargetBound(cwd, outputPath);
   platformEnsureDir(path.dirname(outputPath));
   platformWriteSync(outputPath, template);
 
@@ -945,6 +973,7 @@ function cmdGenerateDevPreferences(cwd: string, options: CmdGenerateDevPreferenc
     outputPath = path.join(cwd, outputPath);
   }
 
+  assertOwnerOutputTargetBound(cwd, outputPath);
   platformEnsureDir(path.dirname(outputPath));
   platformWriteSync(outputPath, template);
 
@@ -1098,9 +1127,11 @@ function cmdGenerateClaudeProfile(cwd: string, options: CmdGenerateClaudeProfile
       existingContent = existingContent.trimEnd() + '\n\n' + sectionContent + '\n';
       action = 'appended';
     }
+    assertOwnerOutputTargetBound(cwd, targetPath);
     platformWriteSync(targetPath, existingContent);
   } else {
     platformEnsureDir(path.dirname(targetPath));
+    assertOwnerOutputTargetBound(cwd, targetPath);
     platformWriteSync(targetPath, sectionContent + '\n');
     action = 'created';
   }
@@ -1220,6 +1251,7 @@ function cmdGenerateClaudeMd(cwd: string, options: CmdGenerateClaudeMdOptions, r
     existingContent = sections.join('\n\n') + '\n';
     action = 'created';
     platformEnsureDir(path.dirname(outputPath));
+    assertOwnerOutputTargetBound(cwd, outputPath);
     platformWriteSync(outputPath, existingContent);
   } else if (!/<!-- GSD:[a-z]+-start/.test(existingContent) && !options.force) {
     // #1098: the target instruction file already exists and contains NO GSD
@@ -1277,6 +1309,7 @@ function cmdGenerateClaudeMd(cwd: string, options: CmdGenerateClaudeMdOptions, r
       fileContent = fileContent.trimEnd() + '\n\n' + buildClaudeMdProfilePlaceholder(resolveRuntime(cwd)) + '\n';
     }
 
+    assertOwnerOutputTargetBound(cwd, outputPath);
     platformWriteSync(outputPath, fileContent);
   }
 

@@ -9,7 +9,7 @@
  * from the prior hand-written .cjs; only types are added.
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 
 // ⚠️ DO NOT add a sibling `.cjs` import to this module. `configuration.cjs` must load
@@ -322,6 +322,27 @@ function mergeDefaults(parsed: Record<string, unknown>): Record<string, unknown>
   return deepMergeConfig(defaults, parsed);
 }
 
+/**
+ * Fallback used ONLY when the ownership module is unavailable in a standalone
+ * install. It is NOT a second validator: it does not parse, regex, or resolve
+ * policy semantics. It answers one question — "is any owner policy configured
+ * or present?" — because a present policy's schema cannot be verified without
+ * the gate, so it must fail closed. Legacy standalone behaviour is preserved
+ * ONLY when nothing is configured and the default path is genuinely absent
+ * (ENOENT); an explicit GSD_OWNER_POLICY (any value), a present default file
+ * (any content, including audit), and any non-ENOENT stat error all refuse.
+ */
+function policyIsConfiguredOrPresent(cwd: string): boolean {
+  if (process.env['GSD_OWNER_POLICY'] !== undefined) return true;
+  const defaultPath = join(cwd, '.planning', 'owner-policy.json');
+  try {
+    lstatSync(defaultPath);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
 function migrateOnDisk(cwd: string, workstream?: string, configPathOverride?: string): MigrateOnDiskResult {
   // #3749: the caller (cmdMigrateConfig in config.cts) supplies the config
   // path resolved through planning-workspace's PROJECT-aware planningDir.
@@ -371,6 +392,30 @@ function migrateOnDisk(cwd: string, workstream?: string, configPathOverride?: st
     // REFUSED. Returning early here is what keeps the corrupted-section input from
     // reaching writeFileSync at all.
     return { migrated: false, normalizations: [], wrote: null, skipped };
+  }
+  // Portfolio ownership: bind this config write to the caller's declared
+  // writable scopes (full semantic preflight). The require is LAZY and guarded
+  // so the #3571 install-layout contract (this module must load where the
+  // sibling is absent) is preserved; when the sibling is unavailable, no
+  // enforcement is possible from here.
+  let ownerContextMod: typeof import('./owner-context.cjs') | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module (lazy, guarded for the #3571 layout)
+    ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  } catch {
+    ownerContextMod = null;
+  }
+  if (ownerContextMod) {
+    ownerContextMod.assertTargetsAuthorized(cwd, [configPath]);
+  } else if (policyIsConfiguredOrPresent(cwd)) {
+    // #3571 standalone/audit installs keep their existing behaviour when no
+    // enforce policy is configured. But when an EXPLICIT enforce policy exists
+    // and the ownership module cannot be loaded, absence of the gate must NOT
+    // silently authorize the write — refuse with an unavailable-gate error.
+    throw new Error(
+      'owner-context gate unavailable: an enforce owner policy is configured but the ownership module '
+      + 'could not be loaded; refusing to write ' + configPath,
+    );
   }
   try {
     writeFileSync(configPath, JSON.stringify(result, null, 2));

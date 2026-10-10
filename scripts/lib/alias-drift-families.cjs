@@ -25,6 +25,7 @@ const FAMILIES = Object.freeze([
   { commandAliases: 'PHASES_COMMAND_ALIASES', subcommands: 'PHASES_SUBCOMMANDS', router: 'phases-command-router' },
   { commandAliases: 'VALIDATE_COMMAND_ALIASES', subcommands: 'VALIDATE_SUBCOMMANDS', router: 'validate-command-router' },
   { commandAliases: 'ROADMAP_COMMAND_ALIASES', subcommands: 'ROADMAP_SUBCOMMANDS', router: 'roadmap-command-router' },
+  { commandAliases: 'QUICK_BATCH_COMMAND_ALIASES', subcommands: 'QUICK_BATCH_SUBCOMMANDS', router: 'quick-batch-command-router' },
   { commandAliases: 'EVAL_COMMAND_ALIASES', subcommands: 'EVAL_SUBCOMMANDS', router: 'eval-command-router' },
 ].map(Object.freeze));
 

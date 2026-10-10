@@ -888,6 +888,28 @@ function ledgerPath(cwd: string): string {
   return path.join(cwd, '.planning', LEDGER_FILE_NAME);
 }
 
+/**
+ * Portfolio ownership: bind the WINDOWS.md ledger target to the caller's
+ * declared writable scopes BEFORE the first side effect (the ledger lock/write).
+ * A direct caller of the exported cmdWindows* writers is bound the same as the
+ * CLI. Enforce refuses with the stable owner_context_refused reason; audit is a
+ * no-op.
+ */
+function assertOwnerLedgerWriteBound(cwd: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- io.cjs is an export= CommonJS module
+  const io = require('./io.cjs') as typeof import('./io.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, [ledgerPath(cwd)]);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      io.error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), io.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
 // ─── #3780: cross-process ledger mutation lock ─────────────────────────────
 
 interface LedgerLockHandle { path: string; token: string; dev: number | null; ino: number | null }
@@ -1226,6 +1248,7 @@ export function cmdWindowsAppend(
   opts: { raw?: boolean } = {},
 ): void {
   void opts;
+  assertOwnerLedgerWriteBound(cwd);
   const parsed = parseArgs(args, {
     flags: ['--kind', '--phase', '--file', '--line', '--description'],
     required: ['--kind', '--phase', '--description'],
@@ -1277,6 +1300,7 @@ export function cmdWindowsWaive(
   opts: { raw?: boolean } = {},
 ): void {
   void opts;
+  assertOwnerLedgerWriteBound(cwd);
   const { positionals } = parseArgs(args, { flags: [], required: [], positionals: 2 });
   const idStr = positionals[0];
   const reason = positionals[1];
@@ -1307,6 +1331,7 @@ export function cmdWindowsMarkFixed(
   opts: { raw?: boolean } = {},
 ): void {
   void opts;
+  assertOwnerLedgerWriteBound(cwd);
   const { positionals } = parseArgs(args, { flags: [], required: [], positionals: 1 });
   const id = parseIdOrThrow(positionals[0]);
 

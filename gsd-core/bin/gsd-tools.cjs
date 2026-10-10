@@ -328,6 +328,9 @@ const milestone = require('./lib/milestone.cjs');
 const commands = require('./lib/commands.cjs');
 const runtimeIdentity = require('./lib/runtime-identity.cjs');
 const init = require('./lib/init.cjs');
+// Portfolio ownership (additive owner_context contract): the mandatory
+// dispatch gate below. Source: src/owner-context.cts (gitignored build).
+const ownerContext = require('./lib/owner-context.cjs');
 const frontmatter = require('./lib/frontmatter.cjs');
 const workstream = require('./lib/workstream.cjs');
 const docs = require('./lib/docs.cjs');
@@ -901,6 +904,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       if (!content || !source || !provider || !confidence || !kind) {
         error('Usage: gsd-tools research-store put <key> --content <str> --source <s> --provider <p> --confidence <c> --kind <k>', ERROR_REASON.USAGE);
       }
+      // Mandatory direct-writer gate: `put` persists the entry to a real cache
+      // file (project tier under .planning/research/.cache, or the user tier
+      // under ~/.gsd/research-cache for a curated source). The dispatch gate
+      // cannot see that resolved path, so bind it here — under enforce a
+      // descriptor that does not own the resolved file refuses BEFORE the write
+      // (review 2026-10-10). `get` remains read-only and is never gated.
+      const storeDir = researchStore.resolveStorePath(cwd, source, { homeDir });
+      assertOwnerTargetsBound(cwd, [path.join(storeDir, `${key}.json`)]);
       const entry = researchStore.putResearch(cwd, key, { content, source, provider, confidence, kind }, { homeDir });
       output(entry, raw);
     } else {
@@ -1445,7 +1456,12 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // Silent no-op when the section is absent or the table is already canonical
     // — the quick/fast workflows call this before their first append, so the
     // migration runs exactly once, on the first quick run, unprompted otherwise.
-    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    // #ownership-runtime: resolve through the scoped planning workspace so a
+    // GSD_PROJECT / GSD_WORKSTREAM run edits the SAME STATE.md that `state *`
+    // reads and that `quick.md` derives as `$(dirname "$quick_dir")/STATE.md`,
+    // instead of a hard-coded root `.planning/STATE.md` no other reader uses.
+    const { planningPaths } = require('./lib/planning-workspace.cjs');
+    const statePath = planningPaths(cwd).state;
     if (!fs.existsSync(statePath)) {
       output({ ok: true, migrated: false, reason: `STATE.md not found at ${statePath}` }, raw);
       return;
@@ -1519,7 +1535,11 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             || (qtaQuickId && qtaSlug ? `[${qtaQuickId}-${qtaSlug}](./quick/${qtaQuickId}-${qtaSlug}/)` : undefined);
           const qtaStatus = qtaParsed['status'] || undefined;
 
-          const statePath = path.join(cwd, '.planning', 'STATE.md');
+          // #ownership-runtime: same scoped resolution as the migrate route —
+          // the Quick Tasks table lives in the workstream/project STATE.md the
+          // rest of the CLI reads, not a hard-coded root path.
+          const { planningPaths } = require('./lib/planning-workspace.cjs');
+          const statePath = planningPaths(cwd).state;
           if (!fs.existsSync(statePath)) {
             error(`quick-tasks-append: STATE.md not found at ${statePath}`, ERROR_REASON.USAGE);
           }
@@ -1592,6 +1612,21 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     const cp = require('node:child_process');
     const fsx = require('node:fs');
     const os = require('node:os');
+    // Portfolio ownership: `dispatch-step` spawns a reviewer lane and writes its
+    // output into a (possibly temporary) run directory whose concrete targets
+    // are not knowable before the spawned process allocates them. An AMBIGUOUS
+    // writer like this is REFUSED EXPLICITLY under enforce rather than presumed
+    // read-only; the pure `plan`/`sections`/`flags`/`explicit-from-argv` verbs
+    // stay ungated.
+    if (args[1] === 'dispatch-step') {
+      const gate = require('./lib/owner-context.cjs').ownerContextGate(cwd);
+      if (gate.enforcing) {
+        error(
+          'owner-context refused (' + gate.verdict + '): review-lane dispatch-step spawns a reviewer and writes unbound targets; an enforced descriptor cannot authorize it',
+          ERROR_REASON.OWNER_CONTEXT_REFUSED,
+        );
+      }
+    }
     const { REVIEWER_LANES, mergeReviewerLanes } = require('./lib/review-lane-descriptor.cjs');
     const { resolveLanePlan, resolveLaneEffort, resolveLaneBudget } = require('./lib/review-lane-invocation.cjs');
     const modelCatalog = require('./lib/model-catalog.cjs');
@@ -2299,6 +2334,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
 
     // Side-effect write (#3045 CORE REDESIGN) — see the doc comment above.
     // Never allowed to affect this query's own stdout contract or throw.
+    assertOwnerDispatchSentinelWrite(cwd);
     try {
       writeDispatchIsolationSentinel(cwd, { isolation, harnessFlag, phase: phaseArg, plan: planArg });
     } catch {
@@ -2914,6 +2950,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       ? args[planIdx + 1]
       : null;
 
+    assertOwnerDispatchSentinelWrite(cwd);
     const result = writeDispatchIsolationSentinel(cwd, { isolation, harnessFlag, phase, plan });
     output(result, raw);
   }
@@ -3390,11 +3427,11 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             const olderIdx = args.indexOf('--older-than');
             const olderThan = olderIdx !== -1 ? args[olderIdx + 1] : null;
             if (!olderThan) error('Usage: gsd-tools learnings prune --older-than <duration>', ERROR_REASON.USAGE);
-            learnings.cmdLearningsPrune(olderThan, raw);
+            learnings.cmdLearningsPrune(olderThan, raw, cwd);
           } else if (subcommand === 'delete') {
             const id = args[2];
             if (!id) error('Usage: gsd-tools learnings delete <id>', ERROR_REASON.USAGE);
-            learnings.cmdLearningsDelete(id, raw);
+            learnings.cmdLearningsDelete(id, raw, cwd);
           } else {
             error('Unknown learnings subcommand. Available: list, query, copy, prune, delete', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
@@ -3834,7 +3871,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     return warnings;
   }
 
-  function routeRestoreCustomFiles({ args, error }) {
+  function routeRestoreCustomFiles({ args, cwd, error }) {
     // Last-wins so a duplicated flag resolves rather than erroring, matching
     // the rest of the gsd-tools flag surface.
     let configDir = null;
@@ -3949,6 +3986,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         continue;
       }
 
+      // Mandatory direct-writer gate, OUTSIDE the copy try/catch below so a
+      // refusal is never downgraded to a swallowed SKIPPED_COPY_FAILED: `--apply`
+      // writes each restored file to its resolved destination, which may sit
+      // OUTSIDE the project (a runtime config dir passed by --config-dir). The
+      // dispatch gate cannot see it, so bind the actual destination here — under
+      // enforce a descriptor that does not own this path refuses BEFORE the copy
+      // (review 2026-10-10). The preview path (no --apply) never reaches this line.
+      assertOwnerTargetsBound(cwd, [destPath]);
       try {
         fs.mkdirSync(path.dirname(destPath), { recursive: true });
         fs.copyFileSync(srcPath, destPath);
@@ -4112,6 +4157,13 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           const { prompt, metadata } = promptBudget.applyBudget({ sections, budget, options });
 
           // ── Write outputs ─────────────────────────────────────────────────
+          // Mandatory direct-writer gate: prompt-budget writes BOTH output files
+          // the caller named by flag. The dispatch gate cannot see these paths,
+          // so bind them to the caller's declared writable scopes here — under
+          // enforce a descriptor that does not own these paths refuses BEFORE
+          // either file is written (review 2026-10-10: with no descriptor the CLI
+          // exited 0 and wrote both files into a temp dir outside the owner).
+          assertOwnerTargetsBound(cwd, [path.resolve(outputMetadataFile), path.resolve(outputPromptFile)]);
           await fs.promises.writeFile(path.resolve(outputMetadataFile), JSON.stringify(metadata, null, 2));
           await fs.promises.writeFile(path.resolve(outputPromptFile), prompt);
 
@@ -4700,6 +4752,42 @@ function resolveSpawnBinary(name, platform = process.platform, env = process.env
   return resolveExecutableBinary(name, { platform, env });
 }
 
+// Portfolio ownership: the core-owned preflight entry the quick/fast/
+// quick-batch adapters call BEFORE any mkdir/edit/dispatch. It reports the
+// resolved context (audit) and, under an enforce policy, exits non-zero with
+// the stable owner_context_refused reason so a shell caller stops.
+function routeOwnerContext({ cwd, raw }) {
+  const outcome = ownerContext.preflightOwnerContext(cwd);
+  output(outcome, raw);
+  if (outcome.enforcing && !outcome.ok) {
+    error('owner-context refused (' + outcome.verdict + '): ' + outcome.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+  }
+}
+
+// Portfolio ownership: `dispatch-isolation` and `record-dispatch-isolation`
+// mutate `.gsd/dispatch-isolation-sentinel.json`. The sentinel write is
+// best-effort (its own try/catch swallows failures), so the mandatory gate runs
+// HERE, OUTSIDE that catch — a refused write must stop the command, not be
+// silently downgraded to "sentinel not recorded".
+// Shared direct-writer target binding for host routes that write a path the
+// dispatch gate could not see (flag-supplied output paths, a resolved runtime
+// config dir, a resolved research-store file). Maps a refusal to the SAME
+// stable owner_context_refused reason the dispatch gate emits.
+function assertOwnerTargetsBound(cwd, targets) {
+  try {
+    ownerContext.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof ownerContext.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
+function assertOwnerDispatchSentinelWrite(cwd) {
+  assertOwnerTargetsBound(cwd, [path.join(cwd, '.gsd', 'dispatch-isolation-sentinel.json')]);
+}
+
 const HOST_COMMAND_ROUTERS = {
   // Each entry wraps its `route*Command` router so it receives the module-scope
   // lib the old `case` arm passed, plus the per-dispatch context
@@ -4786,6 +4874,7 @@ const HOST_COMMAND_ROUTERS = {
     'quick-tasks-migrate': routeQuickTasksMigrate,
     // #3676 (Phase 4, epic #3344): quick-batch coordination verbs.
     'quick-batch': routeQuickBatchCommand,
+  'owner-context': routeOwnerContext,
     'normalize-test-command': routeNormalizeTestCommand,
     'dispatch-should-flatten': routeDispatchShouldFlatten,
     'dispatch-isolation': routeDispatchIsolation,
@@ -4862,7 +4951,18 @@ async function dispatchHostCommand({ command, args, cwd, raw, error, defaultValu
   // every other router legitimately wants via `cwd`. Optional — callers/tests
   // that omit it (every existing one) leave routers that don't read it
   // byte-unaffected.
-  await router({ args, cwd, raw, error, defaultValue, workstreamContext, invokingCwd });
+  try {
+    await router({ args, cwd, raw, error, defaultValue, workstreamContext, invokingCwd });
+  } catch (err) {
+    // Portfolio ownership: a DIRECT-writer owner-context refusal thrown from a
+    // router's own mutation boundary (e.g. quick-batch create/update/complete)
+    // maps to the SAME stable reason the dispatch gate emits, so a refused
+    // writer is observable identically whether the gate or the writer caught it.
+    if (err instanceof ownerContext.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
   return true; // consumed — don't emit "Unknown command"
 }
 
@@ -5097,7 +5197,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
   'from-gsd2, frontmatter, gap-analysis, generate-claude-md, generate-claude-profile, ' +
   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
-  'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
+  'profile-sample, progress, project-instruction-file, prompt-budget, owner-context, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
   'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
   'resolve-execution, review-lane, select-revert-commits, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
@@ -5593,6 +5693,22 @@ function extractField(obj, fieldPath) {
 }
 
 async function runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext = null, invokingCwd) {
+  // Portfolio ownership - mandatory DISPATCH boundary. Under an enforce policy
+  // a missing / wrong-owner / stale / invalid owner context refuses BEFORE the
+  // command mutates. The audit default resolves the context and preserves
+  // today's behaviour (audit is a no-op here). Read-only subcommands are not
+  // classified as mutating, so reads are never blocked.
+  if (ownerContext.isMutatingCommand(command, args)) {
+    // The SAME semantic gate the direct writer uses — no duplicate decision.
+    try {
+      ownerContext.assertOwnerContextForWrite(cwd);
+    } catch (err) {
+      if (err instanceof ownerContext.OwnerContextRefusal) {
+        error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+      }
+      throw err;
+    }
+  }
   switch (command) {
 
     default: {

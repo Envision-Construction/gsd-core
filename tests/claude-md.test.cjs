@@ -56,6 +56,22 @@ describe('generate-claude-md', () => {
       content.indexOf('/gsd-fast') < content.indexOf('/gsd-quick'),
       '/gsd-fast must precede /gsd-quick in the entry-point list'
     );
+    // workflow-ownership 2026-10-10: this generated carrier must route by
+    // ownership, not size — otherwise a repo that never loads a GSD workflow
+    // reintroduces "quick because it looks small" ahead of the command-level
+    // ownership preflight.
+    assert.ok(
+      content.includes('Choose the entry point by ownership, not size alone'),
+      'workflow block must state that the entry point is chosen by ownership'
+    );
+    assert.ok(
+      content.includes('run the core ownership preflight before creating planning directories'),
+      'workflow block must name the ownership preflight on the quick/fast paths'
+    );
+    assert.ok(
+      content.includes('a refused preflight stops the operation'),
+      'workflow block must say a refused preflight stops the operation'
+    );
     assert.ok(content.includes('Do not make direct repo edits outside a GSD workflow'));
   });
 

@@ -20,6 +20,37 @@ const { output, ERROR_REASON } = ioMod;
 // See the identical note in check-command-router.cts: a destructured const carries no
 // type annotation, so TS will not narrow after `error(...)` without this.
 const error: typeof ioMod.error = ioMod.error;
+
+/**
+ * Portfolio ownership: bind the concrete target(s) of a command mutation to the
+ * caller's declared writable scopes BEFORE the first side effect. Under an
+ * enforce policy a missing/foreign/stale/out-of-scope descriptor refuses with
+ * the stable `owner_context_refused` reason; under audit it is a no-op.
+ */
+function assertOwnerTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Portfolio ownership: `effort sync` is a DRY RUN by default (read-only) and
+ * only writes with `--apply`. On the apply path the target is the runtime's
+ * GLOBAL agents directory (`~/.claude/agents`, `~/.codex/agents`, …), which a
+ * worktree-scoped descriptor's writable scopes cannot name — so under an
+ * enforce policy the apply path is REFUSED explicitly rather than silently
+ * writing outside the owned scopes. Dry-run and audit keep today's behaviour.
+ */
+function assertOwnerEffortApplyBound(cwd: string, agentsDir: string): void {
+  assertOwnerTargetsBound(cwd, [agentsDir]);
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import configLoaderMod = require('./config-loader.cjs');
 const { loadConfig, isGitIgnored } = configLoaderMod;
@@ -901,7 +932,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
   // legal pin untouched). Every other non-claude runtime keeps the prior
   // early-return; the claude branch below is untouched byte-for-byte.
   if (runtime === 'codex') {
-    cmdEffortSyncCodex(raw, dryRun, opts.configDir);
+    cmdEffortSyncCodex(cwd, raw, dryRun, opts.configDir);
     return;
   }
 
@@ -936,6 +967,7 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
     output({ synced: 0, skipped: 0, changes: [], dry_run: dryRun, agents_dir: agentsDir, reason: 'agents directory not found' }, raw, '');
     return;
   }
+  if (!dryRun) assertOwnerEffortApplyBound(cwd, agentsDir);
 
   // Skip symlinks — only write regular files to avoid clobbering symlink targets.
   const files = fs.readdirSync(agentsDir).filter(f => {
@@ -1174,7 +1206,7 @@ interface EffortSyncFileFailure {
  * `write_failures`, and `read_failures` are new fields, never a reshape of
  * the existing ones.
  */
-function cmdEffortSyncCodex(raw: boolean, dryRun: boolean, configDir?: string): void {
+function cmdEffortSyncCodex(cwd: string, raw: boolean, dryRun: boolean, configDir?: string): void {
   // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
   const { getGlobalConfigDir } = require('./runtime-homes.cjs') as { getGlobalConfigDir(runtime: string, explicitDir?: string | null): string };
   const agentsDir = path.join(configDir || getGlobalConfigDir('codex'), 'agents');
@@ -1183,6 +1215,7 @@ function cmdEffortSyncCodex(raw: boolean, dryRun: boolean, configDir?: string): 
     output({ synced: 0, skipped: 0, changes: [], dry_run: dryRun, agents_dir: agentsDir, reason: 'agents directory not found' }, raw, '');
     return;
   }
+  if (!dryRun) assertOwnerEffortApplyBound(cwd, agentsDir);
 
   // Skip symlinks — matches the claude branch's existing guard above (only
   // write regular files, never follow a symlink into clobbering its target).
@@ -1328,6 +1361,7 @@ function cmdEffortSyncOpencode(cwd: string, raw: boolean, dryRun: boolean, confi
     output({ synced: 0, skipped: 0, changes: [], dry_run: dryRun, agents_dir: agentsDir, reason: 'agents directory not found' }, raw, '');
     return;
   }
+  if (!dryRun) assertOwnerEffortApplyBound(cwd, agentsDir);
 
   // Skip symlinks — matches the claude branch's existing guard (only write
   // regular files, never follow a symlink into clobbering its target).
@@ -2838,6 +2872,11 @@ function cmdCommitToSubrepo(cwd: string, message: string | undefined, files: str
   for (const [repo, repoFiles] of Object.entries(grouped)) {
     const repoCwd = path.join(cwd, repo);
 
+    // Portfolio ownership ("child owner"): the CHILD repository is the mutation
+    // target. Bind it before the first `git add`, so a descriptor scoped to the
+    // parent cannot commit into a sub-repo it does not own.
+    assertOwnerTargetsBound(cwd, [repoCwd]);
+
     // Stage files (strip sub-repo prefix for paths relative to that repo)
     // #2608: this is the sub-repo twin of cmdCommit's staging loop and carried
     // the identical defect — a failed `git add` was dropped silently and the
@@ -3728,6 +3767,9 @@ function cmdTodoComplete(cwd: string, filename: string | undefined, options: Tod
 
   // Ensure completed directory exists (only on the real run — a dry run
   // creates nothing).
+  // Ownership gate BEFORE the first side effect (the completed-dir mkdir, the
+  // write target and the source delete).
+  assertOwnerTargetsBound(cwd, [resolvedTarget, resolvedSource]);
   platformEnsureDir(completedDir);
 
   const completedContent = upsertTodoCompletionFields(content, today);
@@ -4298,11 +4340,13 @@ function cmdCommitDocsGuardEnable(cwd: string, raw: boolean): void {
     }
     // Already ours — idempotent no-op (row 3). Leave any user edits intact;
     // just make sure the executable bit survived.
+    assertOwnerTargetsBound(cwd, [hookPath]);
     try { fs.chmodSync(hookPath, 0o755); } catch { /* best-effort */ }
     output({ enabled: true, action: 'already_enabled', path: hookPath }, raw, 'already_enabled');
     return;
   }
 
+  assertOwnerTargetsBound(cwd, [hookPath]);
   platformWriteSync(hookPath, buildCommitDocsGuardHookScript());
   fs.chmodSync(hookPath, 0o755);
   output({ enabled: true, action: 'written', path: hookPath }, raw, 'enabled');
@@ -4335,6 +4379,7 @@ function cmdCommitDocsGuardDisable(cwd: string, raw: boolean): void {
     );
   }
 
+  assertOwnerTargetsBound(cwd, [hookPath]);
   fs.unlinkSync(hookPath);
   output({ disabled: true, action: 'removed', path: hookPath }, raw, 'disabled');
 }

@@ -35,6 +35,11 @@ import commandRoutingHub = require('./command-routing-hub.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import cjsCommandRouterAdapter = require('./cjs-command-router-adapter.cjs');
 import { safeJsonParse } from './security.cjs';
+// #ownership-runtime: the routed quick-batch verb set is owned by the
+// command-alias registry (src/command-aliases.cts), the same table the shared
+// mutation classifier reads — so a new verb cannot be added to one and silently
+// bypass the other (scripts/check-alias-drift.cjs enforces the pairing).
+import { QUICK_BATCH_SUBCOMMANDS } from './command-aliases.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import nodeFs = require('node:fs');
 // #5118: the writer set is owned by src/verification.cts.
@@ -128,20 +133,7 @@ function routeQuickBatchCommand({ args, cwd, raw, error, _quickBatch, _quickBatc
   routeHubCommandFamily({
     family: 'quick-batch',
     args,
-    subcommands: [
-      'create',
-      'update',
-      'resume',
-      'complete',
-      'effective-concurrency',
-      'merge-eligible',
-      'spawn-plan',
-      'filter-executed',
-      'verification-routing',
-      'merge-routing',
-      'cleanup-entry',
-      'parse-args',
-    ],
+    subcommands: [...QUICK_BATCH_SUBCOMMANDS],
     handlers: {
       // `quick-batch create --file <path> [--base-revision <sha>] [--options <json>]`
       create: () => {

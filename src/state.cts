@@ -682,7 +682,12 @@ function cmdStatePatch(cwd: string, patches: Record<string, string>, raw: boolea
     const results = { updated, failed };
 
     output(results, raw, results.updated.length > 0 ? 'true' : 'false');
-  } catch {
+  } catch (err) {
+    // Portfolio ownership: a pre-write gate refusal is the process-exit seam
+    // (ExitError). Re-throw it so `state patch` reports owner_context_refused
+    // once, with a non-zero exit, instead of appending a misleading
+    // "STATE.md not found".
+    if (err && typeof err === 'object' && (err as { name?: string }).name === 'ExitError') throw err;
     error('STATE.md not found');
   }
 }
@@ -859,7 +864,13 @@ function cmdStateUpdate(cwd: string, field: string | undefined, value: string | 
     } else {
       output({ updated: false, reason: explainUpdateFailure(field as string), preserved }, false, undefined);
     }
-  } catch {
+  } catch (err) {
+    // Portfolio ownership: a refusal raised by the mandatory pre-write gate is
+    // the process-exit seam (error()/ExitError). Re-throw it so a refused write
+    // reports `owner_context_refused` with a NON-ZERO exit instead of being
+    // swallowed into a misleading `{ updated: false, reason: 'STATE.md not
+    // found' }` at exit 0.
+    if (err && typeof err === 'object' && (err as { name?: string }).name === 'ExitError') throw err;
     output({ updated: false, reason: 'STATE.md not found' }, false, undefined);
   }
 }
@@ -4157,6 +4168,12 @@ function writeStateMd(statePath: string, content: string, transaction: StateTran
     err.code = 'STATE_TRANSACTION_KIND_INVALID';
     throw err;
   }
+  // Portfolio ownership: `writeStateMd` is ADR-3408 §8.3's sanctioned-exception
+  // write path (cmdStateSync / REGENERATE_STATE). The dispatch gate cannot see
+  // this target — `state sync` declares no GSD_OWNER_TARGETS — so bind STATE.md
+  // to the caller's writable scopes HERE, before the lock/write. Without this a
+  // descriptor that does not own `.planning` wrote STATE.md (review 2026-10-10).
+  if (cwd) assertOwnerStateTargetsBound(cwd, [statePath]);
   const lockPath = acquireStateLock(statePath, clock);
   // Test seam (audit M8): fire AFTER the lock is taken so a test can simulate a
   // concurrent writer landing in the (now-closed) scan→lock window.
@@ -4585,7 +4602,48 @@ function syncAndPreserveStateMd(
  * @param clock
  *   Optional clock seam; defaults to realClock. Passed through to acquireStateLock.
  */
+/**
+ * Portfolio ownership: bind a STATE.md-family mutation to the caller's declared
+ * writable scopes. Full semantic preflight, once at a mutation entry (the
+ * STATE.md chokepoint, `cmdStateMilestoneSwitch`, `cmdStatePrune`). Audit is a
+ * no-op; enforce refuses before the lock/write.
+ */
+function assertOwnerStateTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    ownerContextMod.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof ownerContextMod.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Bind all of a state operation's targets once, then keep the authorized-
+ * operation scope active while `fn` performs the multi-file mutation. A nested
+ * gated writer inside `fn` (e.g. cmdStatePrune's STATE.md read-modify-write)
+ * then binds to this operation instead of re-checking the snapshot the
+ * operation is itself rewriting, while direct writes the entry gate bound
+ * (STATE-ARCHIVE.md) stay covered by that same target set.
+ */
+function withOwnedStateOperation<T>(cwd: string, targets: string[], fn: () => T): T {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    return ownerContextMod.withOwnedOperation(cwd, targets, fn);
+  } catch (err) {
+    if (err instanceof ownerContextMod.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
 function readModifyWriteStateMd(statePath: string, transformFn: (content: string) => string, cwd: string, options?: ReadModifyWriteOptions, clock?: StateLockClock): boolean {
+  assertOwnerStateTargetsBound(cwd, [statePath]);
   const resync = !options || options.resync !== false;
   const lockPath = acquireStateLock(statePath, clock);
   try {
@@ -5330,6 +5388,10 @@ function cmdSignalWaiting(cwd: string, type: string | undefined, question: strin
     phase: phase || null,
   };
 
+  // Portfolio ownership: bind the WAITING.json target BEFORE the mkdir/write.
+  // The catch below would otherwise swallow a refusal into `signaled:false` at
+  // exit 0, so the gate runs outside it.
+  assertOwnerStateTargetsBound(cwd, [waitingPath]);
   try {
     platformEnsureDir(gsdDir);
     platformWriteSync(waitingPath, JSON.stringify(signal, null, 2));
@@ -5351,6 +5413,8 @@ function cmdSignalResume(cwd: string, raw: boolean): void {
   let removed = false;
   for (const p of paths) {
     if (fs.existsSync(p)) {
+      // Portfolio ownership: the WAITING.json delete is a real target mutation.
+      assertOwnerStateTargetsBound(cwd, [p]);
       try { fs.unlinkSync(p); removed = true; } catch { /* intentionally empty */ }
     }
   }
@@ -5660,6 +5724,7 @@ function cmdStateMilestoneSwitch(cwd: string, version: string | undefined, name:
   }
   const resolvedName = (name && String(name).trim()) || 'milestone';
   const statePath = planningPaths(cwd).state;
+  assertOwnerStateTargetsBound(cwd, [statePath]);
 
   // ADR-1769 Phase 4: dispatches to the STATE.md Transition Module. The reset
   // policy (frontmatter rebuild + Current Position body reset) is the pure
@@ -6372,12 +6437,6 @@ function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): v
   // non-numeric or absent id lands on 0 and prune bails, as before.
   const currentPhase = parseInt(String(resolveCurrentPhaseId(fm, body)), 10) || 0;
   const cutoff = currentPhase - keepRecent;
-
-  if (cutoff <= 0) {
-    emit({ pruned: false, reason: `Only ${currentPhase} phases — nothing to prune with --keep-recent ${keepRecent}` }, raw, 'false');
-    return;
-  }
-
   const archivePath = path.join(path.dirname(statePath), 'STATE-ARCHIVE.md');
   const archived: PrunedSection[] = [];
 
@@ -6410,35 +6469,49 @@ function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): v
     return;
   }
 
-  readModifyWriteStateMd(statePath, (content) => {
-    const result = runPruneCore(content);
-    archived.push(...result.archivedSections);
-    return result.newContent;
-  }, cwd);
-
-  // Write archived entries to STATE-ARCHIVE.md
-  if (archived.length > 0) {
-    const timestamp = realClock.localToday();
-    let archiveContent = platformReadSync(archivePath);
-    if (archiveContent === null) {
-      archiveContent = '# STATE Archive\n\nPruned entries from STATE.md. Recoverable but no longer loaded into agent context.\n\n';
+  // Portfolio ownership: the REAL (non-dry-run) prune writes STATE.md AND
+  // STATE-ARCHIVE.md, so it binds BOTH targets before the first write. The gate
+  // runs here, AFTER the --dry-run early return above, so `state prune --dry-run`
+  // keeps its promised read-only behaviour (no descriptor required) while the
+  // mutating path stays fail-closed under an enforce policy. A no-op prune
+  // (nothing to prune) still checks authority, so a mismatched descriptor
+  // refuses rather than silently reaching a no-op write.
+  return withOwnedStateOperation(cwd, [statePath, archivePath], () => {
+    if (cutoff <= 0) {
+      emit({ pruned: false, reason: `Only ${currentPhase} phases — nothing to prune with --keep-recent ${keepRecent}` }, raw, 'false');
+      return;
     }
-    archiveContent += `## Pruned ${timestamp} (phases 1-${cutoff}, kept recent ${keepRecent})\n\n`;
-    for (const section of archived) {
-      archiveContent += `### ${section.section}\n\n${section.lines.join('\n')}\n\n`;
-    }
-    platformWriteSync(archivePath, archiveContent);
-  }
 
-  const totalPruned = archived.reduce((sum, s) => sum + s.count, 0);
-  emit({
-    pruned: totalPruned > 0,
-    cutoff_phase: cutoff,
-    keep_recent: keepRecent,
-    sections: archived.map(s => ({ section: s.section, entries_archived: s.count })),
-    total_archived: totalPruned,
-    archive_file: totalPruned > 0 ? 'STATE-ARCHIVE.md' : null,
-  }, raw, totalPruned > 0 ? 'true' : 'false');
+    readModifyWriteStateMd(statePath, (content) => {
+      const result = runPruneCore(content);
+      archived.push(...result.archivedSections);
+      return result.newContent;
+    }, cwd);
+
+    // Write archived entries to STATE-ARCHIVE.md
+    if (archived.length > 0) {
+      const timestamp = realClock.localToday();
+      let archiveContent = platformReadSync(archivePath);
+      if (archiveContent === null) {
+        archiveContent = '# STATE Archive\n\nPruned entries from STATE.md. Recoverable but no longer loaded into agent context.\n\n';
+      }
+      archiveContent += `## Pruned ${timestamp} (phases 1-${cutoff}, kept recent ${keepRecent})\n\n`;
+      for (const section of archived) {
+        archiveContent += `### ${section.section}\n\n${section.lines.join('\n')}\n\n`;
+      }
+      platformWriteSync(archivePath, archiveContent);
+    }
+
+    const totalPruned = archived.reduce((sum, s) => sum + s.count, 0);
+    emit({
+      pruned: totalPruned > 0,
+      cutoff_phase: cutoff,
+      keep_recent: keepRecent,
+      sections: archived.map(s => ({ section: s.section, entries_archived: s.count })),
+      total_archived: totalPruned,
+      archive_file: totalPruned > 0 ? 'STATE-ARCHIVE.md' : null,
+    }, raw, totalPruned > 0 ? 'true' : 'false');
+  });
 }
 
 /**

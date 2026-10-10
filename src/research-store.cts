@@ -169,6 +169,14 @@ function putResearch(
     throw new Error('invalid research key');
   }
 
+  // Portfolio ownership: a DIRECT caller that bypasses the CLI route must not
+  // write the cache file outside its declared writable scopes. The route binds
+  // the same resolved path; this guard covers the in-process API. Under audit
+  // (no enforce policy) it is a no-op, preserving existing callers.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  ownerContextMod.assertTargetsAuthorized(cwd, [containedFile]);
+
   fs.mkdirSync(dir, { recursive: true });
   platformWriteSync(containedFile, JSON.stringify(entry));
   return entry;

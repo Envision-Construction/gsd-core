@@ -2543,6 +2543,17 @@ function cmdVerificationAppendAudit(
   }
   const result = planAuditAppend(content, { heading: heading as string, rows, date });
   if (result.appended) {
+    // Portfolio ownership: bind the append target before the first write.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+    const ocMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+    try {
+      ocMod.assertTargetsAuthorized(cwd, [resolvedPath]);
+    } catch (err) {
+      if (err instanceof ocMod.OwnerContextRefusal) {
+        error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), io.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+      }
+      throw err;
+    }
     fs.writeFileSync(resolvedPath, result.content);
   }
   output({ appended: result.appended }, raw);

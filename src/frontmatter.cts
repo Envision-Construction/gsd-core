@@ -35,6 +35,26 @@ import unusableInputMod = require('./unusable-input.cjs');
 const { UNUSABLE_REASON, warnUnusableInput } = unusableInputMod;
 import { load as yamlLoad, dump as yamlDump, FAILSAFE_SCHEMA, YAMLException } from './vendor/js-yaml.cjs';
 
+/**
+ * Portfolio ownership: bind the RESOLVED frontmatter target file to the
+ * caller's declared writable scopes BEFORE the write. An ABSOLUTE path naming
+ * another repository (or any path outside the owned scopes) is refused here —
+ * a descriptor that authorizes `src` never authorizes a sibling checkout's
+ * markdown file. Under audit (no enforce policy) it is a no-op.
+ */
+function assertOwnerFrontmatterTargetBound(cwd: string, fullPath: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, [fullPath]);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type FrontmatterValue = string | string[] | Record<string, unknown>;
@@ -1540,6 +1560,7 @@ function cmdFrontmatterSet(cwd: string, filePath: string, field: string | undefi
     output({ error: noOpErr, field }, raw, undefined);
     return;
   }
+  assertOwnerFrontmatterTargetBound(cwd, fullPath);
   platformWriteSync(fullPath, newContent);
   output({ updated: true, field, value: parsedValue }, raw, 'true');
 }
@@ -1646,6 +1667,7 @@ function cmdFrontmatterMerge(cwd: string, filePath: string, data: string | undef
   for (const [key, value] of Object.entries(mergeData)) setOwnField(fm, key, value);
   const newContent = spliceOrReportRefusal(content, fm, filePath, raw);
   if (newContent === null) return;
+  assertOwnerFrontmatterTargetBound(cwd, fullPath);
   platformWriteSync(fullPath, newContent);
   output({ merged: true, fields: Object.keys(mergeData) }, raw, 'true');
 }

@@ -78,7 +78,11 @@ function routeStateCommand({ state, args, cwd, raw, error }: RouteStateCommandOp
   routeHubCommandFamily({
     family: 'state',
     args,
-    subcommands: ['load', 'complete-phase', ...STATE_SUBCOMMANDS.filter((s) => s !== 'load')],
+    // `load` and `complete-phase` are listed explicitly so they lead the
+    // manifest; both are also present in the command-alias registry the shared
+    // mutation classifier reads (src/command-aliases.cts), so they are filtered
+    // out of the derived tail to keep the list duplicate-free.
+    subcommands: ['load', 'complete-phase', ...STATE_SUBCOMMANDS.filter((s) => s !== 'load' && s !== 'complete-phase')],
     defaultSubcommand: 'load',
     // No SDK-only state subcommands remain: add-roadmap-evolution was the last
     // holdout after the SDK retirement (ADR-0174) and is now implemented in CJS

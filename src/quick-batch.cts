@@ -47,11 +47,49 @@ import { posixNormalize, platformWriteSync } from './shell-command-projection.cj
 import { realClock } from './clock.cjs';
 import type { Clock } from './clock.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import io = require('./io.cjs');
+const { ERROR_REASON } = io;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { withPlanningLock, planningDir, planningRoot, planningPaths, quickDirFrom } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import fileOverlapPartitioner = require('./file-overlap-partitioner.cjs');
 const { partitionByFileOverlap } = fileOverlapPartitioner;
+
+/**
+ * Portfolio ownership: bind the concrete filesystem targets of a quick-batch
+ * mutation to the caller's declared writable scopes BEFORE the first write. A
+ * foreign, stale, missing, or out-of-scope descriptor throws the typed
+ * OwnerContextRefusal here — from a DIRECT JS caller just as much as from the
+ * CLI dispatch gate, which maps it to the stable `owner_context_refused`
+ * reason. Under audit (no enforce policy) it is a no-op, so today's behaviour
+ * is preserved exactly. Called OUTSIDE each operation's withPlanningLock try so
+ * the refusal is never swallowed into a `{ ok: false }` Result.
+ */
+function assertOwnerTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      // Emit the SAME stable reason the dispatch gate uses. error() writes the
+      // structured stderr line and throws ExitError, which the routing hub
+      // rethrows (an ExitError is the process-exit seam, never a handler failure).
+      io.error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
+/**
+ * True for an ownership refusal OR the CLI exit seam it raises, so a refusal is
+ * never swallowed into a `{ ok: false }` Result by an operation's catch.
+ */
+function isOwnershipRefusal(err: unknown): boolean {
+  const name = err && typeof err === 'object' ? (err as { name?: string }).name : '';
+  return name === 'OwnerContextRefusal' || name === 'ExitError';
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -494,6 +532,10 @@ function createBatch(
   const dagResult = validateDag(itemsInput);
   if (!dagResult.ok) return dagResult;
 
+  // Ownership gate BEFORE the first side effect (the .planning/quick-batches
+  // directory mkdir is the very first write this operation performs).
+  assertOwnerTargetsBound(cwd, [path.join(planningDir(cwd), 'quick-batches')]);
+
   const clock = options.clock ?? realClock;
   try {
     return withPlanningLock(cwd, (): Result<{ batchId: string; manifestPath: string; manifest: QuickBatchManifest }> => {
@@ -760,6 +802,9 @@ function completeQuickItem(
   fields: CompleteQuickItemFields,
   options: { clock?: Clock } = {},
 ): Result<{ appended: boolean; manifest: QuickBatchManifest }> {
+  // Ownership gate BEFORE the first side effect — completion writes BOTH the
+  // scoped STATE.md Quick Tasks row and BATCH.json, so both targets are bound.
+  assertOwnerTargetsBound(cwd, [planningPaths(cwd).state, batchManifestPath(cwd, batchId)]);
   const clock = options.clock ?? realClock;
   try {
     return withPlanningLock(cwd, (): Result<{ appended: boolean; manifest: QuickBatchManifest }> => {
@@ -843,6 +888,8 @@ function updateBatchItems(
   updates: QuickBatchItemUpdate[],
   options: { clock?: Clock } = {},
 ): Result<{ manifest: QuickBatchManifest }> {
+  // Ownership gate BEFORE the first side effect (the BATCH.json rewrite below).
+  assertOwnerTargetsBound(cwd, [batchManifestPath(cwd, batchId)]);
   const clock = options.clock ?? realClock;
   try {
     return withPlanningLock(cwd, (): Result<{ manifest: QuickBatchManifest }> => {
@@ -999,12 +1046,17 @@ function resumeBatch(
       .map((it) => it.quick_id);
 
     if (transitions.length > 0) {
+      // Ownership gate ONLY before a real transition write: a resume with no
+      // pending transitions performs no write, so it stays usable under an
+      // enforce policy without a descriptor (read-only compatibility).
+      assertOwnerTargetsBound(cwd, [batchManifestPath(cwd, batchId)]);
       platformWriteSync(batchManifestPath(cwd, batchId), JSON.stringify(manifest, null, 2) + '\n');
     }
 
     return { ok: true, value: { eligible, transitions, manifest } };
     }, clock);
   } catch (err) {
+    if (isOwnershipRefusal(err)) throw err;
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }

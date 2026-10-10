@@ -32,6 +32,28 @@ async function routeCapabilityCommand({ args, cwd, raw }) {
   // If 'loop' were ever added to SKIP_ROOT_RESOLUTION, 'capability' should
   // be added at the same time to keep them consistent.
   const capSubcommand = args[1];
+  // Portfolio ownership: the capability lifecycle mutates the runtime install
+  // root and shared config, which live OUTSIDE any one repository's worktree.
+  // A worktree-scoped enforce descriptor therefore cannot authorize them, so
+  // this path is REFUSED EXPLICITLY under enforce rather than silently writing
+  // outside the owned scopes. Audit (and every non-writer subcommand) keeps
+  // today's behaviour; genuine read-only verbs (state/list/outdated) are not
+  // gated here.
+  const MUTATING_CAPABILITY_SUBCOMMANDS = new Set(['install', 'update', 'remove', 'disable', 'enable', 'set', 'trust']);
+  if (MUTATING_CAPABILITY_SUBCOMMANDS.has(capSubcommand)) {
+    let oc = null;
+    try { oc = require('./owner-context.cjs'); } catch { oc = null; }
+    if (oc) {
+      const gate = oc.ownerContextGate(cwd);
+      if (gate.enforcing) {
+        error(
+          'owner-context refused (' + gate.verdict + '): capability ' + capSubcommand
+          + ' writes the runtime install root / shared config, which an enforced repository descriptor cannot authorize',
+          ERROR_REASON.OWNER_CONTEXT_REFUSED,
+        );
+      }
+    }
+  }
   // --- Capability management CLI helpers (ADR-1244 D5/D6; install/update/remove/list/disable/enable).
   //     Pure arg parsing + scope/config/host-version resolution. The lifecycle modules themselves are
   //     lazy-required inside each mutating branch so the common state/set paths never load them. ---

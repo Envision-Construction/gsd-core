@@ -20,6 +20,7 @@ alias_drift_paths=(
   'src/phases-command-router.cts'
   'src/validate-command-router.cts'
   'src/roadmap-command-router.cts'
+  'src/quick-batch-command-router.cts'
   'src/eval-command-router.cts'
   'scripts/check-alias-drift.cjs'
   'scripts/lib/alias-drift-families.cjs'
