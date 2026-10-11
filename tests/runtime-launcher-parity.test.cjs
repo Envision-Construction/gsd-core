@@ -30,7 +30,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
-const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { gitOrThrow, throwIfFailed, GIT_FIXTURE_TIMEOUT_MS } = require('./helpers/git-fixture.cjs');
 const { cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
 const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
 
@@ -765,7 +765,7 @@ describe('runtime-launcher-parity (#373)', () => {
   test('(K2) end-to-end: the resolved local tool honors git.allow_default_branch_commits (#4834)', (t) => {
     // The issue's console repro with the REAL gsd-tools: a foreign gsd_run
     // first on PATH, the real binary installed at the config home, a temp
-    // project on its default branch `master`. With the override set, the
+    // project whose local branch is established as `master`. With the override set, the
     // launcher must reach the real local tool and report `master` as NOT
     // protected; without the override the same tool reports it protected —
     // the control that keeps the assertion from passing vacuously. Before
@@ -774,6 +774,15 @@ describe('runtime-launcher-parity (#373)', () => {
     const { createTempGitProject, cleanup: cleanupDir } = require('./helpers.cjs');
     const project = createTempGitProject('gsd-4834-k2-');
     const projectControl = createTempGitProject('gsd-4834-k2c-');
+    // The fixture's branch must not depend on the host's `init.defaultBranch`:
+    // on a host defaulting to `main` the fixture's base branch is `main`, so the
+    // issue repro's `--is-protected master` answers false and the control
+    // assertion fails for an environment reason. Establish `master` LOCALLY
+    // (git branch -M, repo-local only — no global config is touched) so the
+    // repro's branch name is the fixture's real branch on every host.
+    for (const dir of [project, projectControl]) {
+      gitOrThrow(['branch', '-M', 'master'], { cwd: dir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS });
+    }
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4834-k2-home-'));
     const foreignBin = writeForeignGsdRun(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4834-k2-path-')));
     const fakeRuntime = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4834-k2-rt-'));

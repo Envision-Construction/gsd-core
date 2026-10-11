@@ -200,6 +200,7 @@ module.exports = {
   "tests/owner-context-nested-mutation.test.cjs",
   "tests/owner-context-writer-matrix.test.cjs",
   "tests/owner-context.unit.test.cjs",
+  "tests/ownership-preflight-projection.test.cjs",
   "tests/ownership-runtime-projection.test.cjs",
   "tests/packaging-shipped-scripts-require-only-shipped.test.cjs",
   "tests/path-replacement.test.cjs",

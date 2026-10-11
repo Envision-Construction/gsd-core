@@ -33,17 +33,34 @@ const { convertClaudeToCodexMarkdown } = require('../gsd-core/bin/lib/runtime-ar
 const { cleanup } = require('./helpers.cjs');
 const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
-const WORKFLOWS = ['gsd-core/workflows/quick.md', 'gsd-core/workflows/fast.md', 'gsd-core/workflows/quick-batch.md'];
-const MARKER = /<!-- OWNERSHIP-RUNTIME-PREFLIGHT v(\d+) \(patch-gsd-ownership-runtime\) -->/;
+const WORKFLOWS = [
+  'gsd-core/workflows/quick.md',
+  'gsd-core/workflows/fast.md',
+  'gsd-core/workflows/quick-batch.md',
+  'gsd-core/workflows/plan-phase.md',
+  'gsd-core/workflows/execute-phase.md',
+];
+// The optional JEV advisory fragment is projected only for the quick/fast/plan/
+// execute carriers.
+const JEV_WORKFLOWS = [
+  'gsd-core/workflows/quick.md',
+  'gsd-core/workflows/fast.md',
+  'gsd-core/workflows/execute-phase.md',
+  'gsd-core/workflows/execute-plan.md',
+];
+const MARKER = /<!-- OWNERSHIP-RUNTIME-PREFLIGHT v(\d+)/;
+const JEV_MARKER = /<!-- JEV-ADVISORY-ENTRY v(\d+)/;
 
 function assertCompleteBlock(text, label) {
   const m = text.match(MARKER);
   assert.ok(m, `${label}: ownership-preflight marker absent`);
+  assert.equal(m[1], '4', `${label}: expected the core-authored v4 marker`);
   assert.ok(text.includes(`<!-- /OWNERSHIP-RUNTIME-PREFLIGHT -->`), `${label}: end marker absent`);
   assert.ok(text.includes('<ownership_preflight>'), `${label}: open tag absent`);
   assert.ok(text.includes('</ownership_preflight>'), `${label}: close tag absent`);
   assert.ok(/gsd_run owner-context preflight/.test(text), `${label}: preflight invocation absent`);
-  assert.ok(text.includes('quick_dir'), `${label}: core-resolved quick_dir absent`);
+  assert.ok(text.includes('owner_context_refused'), `${label}: refusal signal absent`);
+  assert.ok(text.includes('Resolve `gsd_run` (this workflow'), `${label}: bootstrap ordering absent`);
 }
 
 // One install per runtime, reused across the assertions below.
@@ -142,6 +159,32 @@ describe('ownership-runtime projection reaches real emitted surfaces', () => {
     });
   }
 
+  for (const runtime of ['opencode', 'antigravity', 'codex', 'cursor', 'pi']) {
+    test(`${runtime}: emitted quick/fast/plan/execute carry the JEV advisory fragment, and only those`, () => {
+      const { base } = installFor(runtime);
+      const expected = [...new Set([...WORKFLOWS, ...JEV_WORKFLOWS])];
+      for (const rel of expected) {
+        const file = path.join(base, rel);
+        if (!fs.existsSync(file)) continue;
+        const text = fs.readFileSync(file, 'utf8');
+        const wantJev = JEV_WORKFLOWS.includes(rel);
+        const m = text.match(JEV_MARKER);
+        assert.equal(Boolean(m), wantJev, `${runtime}:${rel}: JEV fragment placement`);
+        if (!wantJev) continue;
+        assert.equal(m[1], '1', `${runtime}:${rel}: JEV fragment version`);
+        assert.ok(
+          text.includes('gsd_run jev-advisory prepare --scenario <id> --entry <'),
+          `${runtime}:${rel}: exact supported prepare spelling`,
+        );
+        assert.ok(text.includes('advisory'), `${runtime}:${rel}: advisory-only authority`);
+        assert.ok(
+          text.indexOf('<!-- JEV-ADVISORY-ENTRY') > text.indexOf('<!-- /OWNERSHIP-RUNTIME-PREFLIGHT -->'),
+          `${runtime}:${rel}: JEV fragment must follow the ownership block`,
+        );
+      }
+    });
+  }
+
   test('emitted workflow bodies no longer hard-code a root .planning/quick path', () => {
     for (const runtime of ['opencode', 'antigravity', 'codex', 'cursor', 'pi']) {
       const { base } = installFor(runtime);
@@ -167,6 +210,32 @@ describe('ownership-runtime projection reaches real emitted surfaces', () => {
         }
       }
     }
+  });
+
+  test('installed surfaces: default entry is offline; JEV prepare is the only offline-documented entry path', () => {
+    const orig = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = () => { calls += 1; throw new Error('no network during install/read'); };
+    try {
+      const { base } = installFor('claude');
+      for (const rel of [...new Set([...WORKFLOWS, ...JEV_WORKFLOWS])]) {
+        const file = path.join(base, rel);
+        if (fs.existsSync(file)) fs.readFileSync(file, 'utf8');
+      }
+      for (const rel of JEV_WORKFLOWS) {
+        const file = path.join(base, rel);
+        if (!fs.existsSync(file)) continue;
+        const text = fs.readFileSync(file, 'utf8');
+        assert.match(
+          text,
+          /prepare --scenario <id> --entry <[^>]+>[\s\S]{0,48}OFFLINE/i,
+          `${rel}: the JEV prepare path must be documented OFFLINE`,
+        );
+      }
+    } finally {
+      globalThis.fetch = orig;
+    }
+    assert.equal(calls, 0, 'installing/reading the default entry must make zero provider requests');
   });
 
   test('--gemini is a redirect stub: no gemini runtime surface is produced', () => {
