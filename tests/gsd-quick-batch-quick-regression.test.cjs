@@ -107,7 +107,7 @@ const OWNERSHIP_PREFLIGHT_LINES = new Set([
     try { return ownershipPreflightLines(git(['show', 'HEAD:commands/gsd/fast.md'])); } catch { return []; }
   })(),
 ]);
-function isOwnershipRuntimeSweepLine(body) {
+function isOwnershipRuntimeSweepLine(body, diffHasLauncherPreamble) {
   if (OWNERSHIP_PREFLIGHT_LINES.has(body)) return true;
   if (body.startsWith('**Bootstrap the resolver once here')) return true;
   if (body === '# Canonical resolver: define once per file, then use in every subcommand block below.') return true;
@@ -117,9 +117,16 @@ function isOwnershipRuntimeSweepLine(body) {
   // any remaining ORDINARY quick prose/step line still trips this row.
   if (body.includes('QUICK_DIR')) return true;
   if (body.includes('gsd_run query init.quick')) return true;
+  if (body.includes('gsd-tools query init.quick')) return true;
   if (body.includes('.planning/quick')) return true;
   if (body.includes('GSD_PROJECT / GSD_WORKSTREAM')) return true;
   if (body.includes('could not resolve the quick dir')) return true;
+  // The resolved-runner security-note swap (`gsd-tools query …` -> `gsd_run query …`).
+  if (body.includes('query frontmatter.get')) return true;
+  // The bootstrap block's shell fence delimiters, recognized only when the same
+  // diff actually carries a canonical launcher preamble line (i.e. it IS the
+  // bootstrap block), so an unrelated fence edit still trips this row.
+  if (diffHasLauncherPreamble && (body === '```bash' || body === '```')) return true;
   return false;
 }
 
@@ -151,6 +158,7 @@ function editsBeyondSharedDirective(base, file) {
     .map((l) => l.slice(1).trim());
   const addedBodies = new Set(bodiesOf('+'));
   const removedBodies = new Set(bodiesOf('-'));
+  const diffHasLauncherPreamble = [...addedBodies, ...removedBodies].some(looksLikeLauncherPreambleLine);
   return diffLines.some((line) => {
     if (!/^[+-]/.test(line) || line.startsWith('+++') || line.startsWith('---')) return false;
     const body = line.slice(1).trim();
@@ -158,7 +166,7 @@ function editsBeyondSharedDirective(base, file) {
     if (body === '' || body === INLINE_RESPONSE_LANGUAGE_DIRECTIVE) return false;
     if (body === CANONICAL_LAUNCHER_PREAMBLE.trim()) return false;
     if (looksLikeLauncherPreambleLine(body)) return false;
-    if (isOwnershipRuntimeSweepLine(body)) return false;
+    if (isOwnershipRuntimeSweepLine(body, diffHasLauncherPreamble)) return false;
     // #4780 fourth mechanical-sweep carve-out: the labeled-arguments sweep adds
     // the standing <arguments> block (plus its note) to EVERY argument-taking
     // command and rewords each bare $ARGUMENTS splice to name that block. A

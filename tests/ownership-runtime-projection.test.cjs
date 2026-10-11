@@ -69,7 +69,14 @@ describe('configured Codex home wins in the emitted resolver', () => {
         const shell = convertClaudeToCodexMarkdown(loadPreamble().join('\n')) + '\nprintf "%s" "$GSD_TOOLS"';
         const result = runHook('-c', [shell], { interpreter: 'bash', cwd: project, env });
         assert.equal(result.exitCode, 0, result.stderr);
-        assert.equal(result.stdout, path.join(configured, 'gsd-core', 'bin', 'gsd-tools.cjs'));
+        // Separator-insensitive: on Windows the resolver's bash prints git's
+        // forward-slash form while `path.join` yields backslashes; the path is
+        // the same, so normalize both sides before comparing.
+        const forward = (p) => p.replace(/\\/g, '/');
+        assert.equal(
+          forward(result.stdout),
+          forward(path.join(configured, 'gsd-core', 'bin', 'gsd-tools.cjs')),
+        );
       } finally {
         cleanup(root);
       }

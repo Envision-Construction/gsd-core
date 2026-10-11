@@ -239,7 +239,15 @@ describe('policy ownership is bound to the canonical Git worktree root', () => {
       const nested = oc.ownerContextGate(path.join(real, '.planning'));
       assert.equal(atRoot.enforcing, true);
       assert.equal(nested.enforcing, true, 'a nested cwd must not silently fall back to audit');
-      assert.equal(nested.context.owner.root, real, 'the resolved owner root is still the worktree root');
+      // Separator-insensitive: on Windows git reports the worktree root with
+      // forward slashes while the fixture holds the native realpath; the root
+      // is the same path.
+      const forward = (p) => String(p).replace(/\\/g, '/');
+      assert.equal(
+        forward(nested.context.owner.root),
+        forward(real),
+        'the resolved owner root is still the worktree root',
+      );
     } finally {
       cleanup(tmp);
     }
