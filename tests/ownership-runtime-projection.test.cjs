@@ -27,7 +27,9 @@ const {
   INSTALL_SCRIPT,
   installerEnv,
 } = require('./helpers/install-shared.cjs');
-const { runNode } = require('./helpers/process-seam.cjs');
+const { runNode, runHook } = require('./helpers/process-seam.cjs');
+const { loadPreamble } = require('../scripts/sync-runtime-launcher.cjs');
+const { convertClaudeToCodexMarkdown } = require('../gsd-core/bin/lib/runtime-artifact-conversion.cjs');
 const { cleanup } = require('./helpers.cjs');
 const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
@@ -46,6 +48,35 @@ function assertCompleteBlock(text, label) {
 
 // One install per runtime, reused across the assertions below.
 const emitted = new Map();
+
+describe('configured Codex home wins in the emitted resolver', () => {
+  for (const withClaudeHome of [false, true]) {
+    test(`configured Codex home before default and Claude homes (${withClaudeHome})`, () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-codex-home-'));
+      try {
+        const configured = path.join(root, 'custom-codex');
+        const claude = path.join(root, 'custom-claude');
+        const homeRoot = path.join(root, 'home');
+        const project = path.join(root, 'project');
+        fs.mkdirSync(project);
+        for (const home of [configured, claude, path.join(homeRoot, '.codex')]) {
+          const tools = path.join(home, 'gsd-core', 'bin', 'gsd-tools.cjs');
+          fs.mkdirSync(path.dirname(tools), { recursive: true });
+          fs.writeFileSync(tools, 'console.log(JSON.stringify({packageName:"@opengsd/gsd-core"}));');
+        }
+        const env = { PATH: process.env.PATH, HOME: homeRoot, CODEX_HOME: configured, RUNTIME_DIR: project };
+        if (withClaudeHome) env.CLAUDE_CONFIG_DIR = claude;
+        const shell = convertClaudeToCodexMarkdown(loadPreamble().join('\n')) + '\nprintf "%s" "$GSD_TOOLS"';
+        const result = runHook('-c', [shell], { interpreter: 'bash', cwd: project, env });
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(result.stdout, path.join(configured, 'gsd-core', 'bin', 'gsd-tools.cjs'));
+      } finally {
+        cleanup(root);
+      }
+    });
+  }
+});
+
 function installFor(runtime) {
   if (emitted.has(runtime)) return emitted.get(runtime);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-ownproj-${runtime}-`));
