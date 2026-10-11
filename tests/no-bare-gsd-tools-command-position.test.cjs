@@ -140,7 +140,6 @@ const PROSE_ALLOWLIST = [
   { file: 'skills/gsd-health/SKILL.md', line: 21, reason: 'describes what the workflow calls internally ("calls `gsd-tools query validate.context`"); descriptive, not an instruction (#4780 shifted it from 16: the standing <arguments> block was added above it)' },
   { file: 'skills/gsd-manager/SKILL.md', line: 41, reason: 'parenthetical naming an init-command example; descriptive, not an instruction (#4780 shifted it from 36: the standing <arguments> block was added above it)' },
   { file: 'skills/gsd-next/SKILL.md', line: 21, reason: 'describes what the launcher reads internally ("reads project + workflow state via `gsd-tools smart-entry --json`"); descriptive, not an instruction (#4780 shifted it from 16: the standing <arguments> block was added above it)' },
-  { file: 'skills/gsd-quick-batch/SKILL.md', line: 116, reason: 'security note naming which query fields are read; descriptive, not an instruction (#4780 shifted it from 104: the standing <arguments> block and the stdin heredoc fence were added above it)' },
   { file: 'skills/gsd-workstreams/SKILL.md', line: 70, reason: 'describes formatting the JSON output "from gsd-tools query"; descriptive, not an instruction (the 6 real operative sites above it in this same file are the ones #4995 fixed to gsd_run)' },
 ];
 

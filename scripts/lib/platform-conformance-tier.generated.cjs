@@ -197,6 +197,7 @@ module.exports = {
   "tests/opencode-command-dir-plural.test.cjs",
   "tests/opencode-plugin-adapter.test.cjs",
   "tests/overlay-repo-helpers.test.cjs",
+  "tests/owner-context-nested-mutation.test.cjs",
   "tests/owner-context-writer-matrix.test.cjs",
   "tests/owner-context.unit.test.cjs",
   "tests/ownership-runtime-projection.test.cjs",

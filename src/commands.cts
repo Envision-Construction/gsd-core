@@ -43,7 +43,7 @@ function assertOwnerTargetsBound(cwd: string, targets: string[]): void {
 /**
  * Portfolio ownership: `effort sync` is a DRY RUN by default (read-only) and
  * only writes with `--apply`. On the apply path the target is the runtime's
- * GLOBAL agents directory (`~/.claude/agents`, `~/.codex/agents`, …), which a
+ * GLOBAL agents directory resolved from the runtime configuration home, which a
  * worktree-scoped descriptor's writable scopes cannot name — so under an
  * enforce policy the apply path is REFUSED explicitly rather than silently
  * writing outside the owned scopes. Dry-run and audit keep today's behaviour.

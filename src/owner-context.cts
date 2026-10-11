@@ -183,7 +183,7 @@ export interface GitExecResult {
   exitCode: number;
   stdout: string;
 }
-export type GitExecFn = (args: string[], opts?: { cwd?: string; timeout?: number }) => GitExecResult;
+export type GitExecFn = (args: string[], opts?: { cwd?: string; timeout?: number; env?: Record<string, string> }) => GitExecResult;
 
 export interface OwnerContextDeps {
   execGit?: GitExecFn;
@@ -463,7 +463,15 @@ export function resolveRepoIdentity(cwd: string, deps: OwnerContextDeps = {}): R
     // `--untracked-files=normal` so an untracked scope file counts toward the
     // advisory dirty list (the authoritative content check is the explicit
     // writable-scope fingerprint, which hashes bytes on disk).
-    const statusResult = git(['status', '--porcelain=v1', '--untracked-files=normal'], { cwd, timeout: 5000 });
+    // GIT_OPTIONAL_LOCKS=0: this resolution is READ-ONLY. A bare `git status`
+    // refreshes the index stat cache and writes it when stale, which fires any
+    // `post-index-change` hook and mutates index state the surrounding command
+    // did not ask for (driven: a hook that rewrote a restored entry's mode was
+    // triggered by the gate's own status call BEFORE the command ran). The env
+    // flag makes status skip that optional write, so the gate never perturbs
+    // the index; it is passed through execGit's opts.env rather than added to
+    // argv, keeping the args a test stub can key on unchanged.
+    const statusResult = git(['status', '--porcelain=v1', '--untracked-files=normal'], { cwd, timeout: 5000, env: { GIT_OPTIONAL_LOCKS: '0' } });
     if (statusResult.exitCode === 0) {
       const lines = statusResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
       const MAX = 200;
@@ -2242,11 +2250,47 @@ export function preflightOwnerContext(cwd: string, options: OwnerContextGateOpti
  * caller still consults ownerContextGate before a mutation.
  */
 export function ownerContextEnvelopeField(cwd: string, options: OwnerContextGateOptions = {}): OwnerContextV1 {
+  let context: OwnerContextV1;
   try {
-    return buildOwnerContext(cwd, options);
+    context = buildOwnerContext(cwd, options);
   } catch {
-    return buildOwnerContext(cwd, { ...options, deps: { ...(options.deps ?? {}), execGit: () => ({ exitCode: 1, stdout: '' }) } });
+    context = buildOwnerContext(cwd, { ...options, deps: { ...(options.deps ?? {}), execGit: () => ({ exitCode: 1, stdout: '' }) } });
   }
+  return { ...context, generated_at: envelopeGeneratedAt(cwd, options) };
+}
+
+/**
+ * Read-only envelope determinism. `ownerContextEnvelopeField` is the projection
+ * src/init.cts folds into EVERY init.* result, and init is a TOTAL, read-only
+ * publisher whose `--json` output is asserted byte-stable across identical reads
+ * (tests/qa/oracles.cjs `read-only-idempotence`; the init projection-parity
+ * tests). A wall-clock `generated_at` in that envelope makes two identical reads
+ * diverge, so the ENVELOPE pins it to the owning HEAD commit's committer time —
+ * a value that only moves when the owned context itself moves. With no commit /
+ * no git it falls back to the caller-injected clock seam, then the epoch. The
+ * `buildOwnerContext` descriptor keeps the caller's own `generated_at`; only the
+ * folded envelope (and the additive record published from it) is pinned.
+ */
+function envelopeGeneratedAt(cwd: string, options: OwnerContextGateOptions): string {
+  const deps = options.deps ?? {};
+  const git: GitExecFn = deps.execGit ?? ((args, opts) => {
+    const r = execGit(args, opts);
+    return { exitCode: typeof r.exitCode === 'number' ? r.exitCode : 1, stdout: String(r.stdout || '') };
+  });
+  try {
+    const r = git(['log', '-1', '--format=%cI', 'HEAD'], { cwd, timeout: 5000 });
+    if (r && r.exitCode === 0 && r.stdout.trim()) {
+      const t = new Date(r.stdout.trim());
+      if (!Number.isNaN(t.getTime())) return t.toISOString();
+    }
+  } catch {
+    /* no HEAD / no git: fall through to the deterministic fallback */
+  }
+  if (typeof deps.now === 'function') {
+    const t = new Date(deps.now());
+    if (!Number.isNaN(t.getTime())) return t.toISOString();
+  }
+  return new Date(0).toISOString();
 }
 
 // --- Additive record --------------------------------------------------------

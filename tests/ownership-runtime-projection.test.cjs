@@ -82,12 +82,12 @@ describe('ownership-runtime projection reaches real emitted surfaces', () => {
       const { base } = installFor(runtime);
       const modulePath = path.join(base, 'gsd-core', 'bin', 'lib', 'owner-context.cjs');
       assert.ok(fs.existsSync(modulePath), `${runtime}: compiled owner-context.cjs not installed`);
-      // allow-test-rule: the installed gsd-tools.cjs IS the product surface under test (#TBD) — reading the emitted file is the assertion
+      // allow-test-rule: the installed gsd-tools.cjs IS the product surface under test (#4) — reading the emitted file is the assertion
       const tools = fs.readFileSync(path.join(base, 'gsd-core', 'bin', 'gsd-tools.cjs'), 'utf8');
-      // allow-test-rule: asserting the emitted dispatch gate is present (#TBD) — the installed text is the product
+      // allow-test-rule: asserting the emitted dispatch gate is present (#4) — the installed text is the product
       assert.ok(/assertOwnerContextForWrite/.test(tools),
         `${runtime}: installed gsd-tools.cjs has no owner-context dispatch gate`);
-      // allow-test-rule: asserting the emitted classifier is present (#TBD) — the installed text is the product
+      // allow-test-rule: asserting the emitted classifier is present (#4) — the installed text is the product
       assert.ok(/isMutatingCommand/.test(tools),
         `${runtime}: installed gsd-tools.cjs has no mutating-command classifier`);
     }
