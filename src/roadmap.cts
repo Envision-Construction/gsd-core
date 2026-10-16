@@ -14,6 +14,24 @@ import { splitLines, detectEol, joinLines } from './text-lines.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
 const { output, error, formatDiagnosticToken, declineNoOp } = ioMod;
+
+/**
+ * Portfolio ownership: bind this module's direct mutation to the caller's
+ * declared writable scopes. Full semantic preflight, once at entry. Audit is a
+ * no-op; enforce refuses before the first filesystem write.
+ */
+function assertOwnerTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
 const { normalizePhaseName, phaseMarkdownRegexSource, matchPhaseDirs, stripProjectCodePrefix, OPTIONAL_PHASE_TAG_SOURCE, roadmapPhaseLookupSources, phaseHeadingPrefixSrcFor, PHASE_HEADING_BASELINE, isSentinelPhaseId, scopeToPhase, bracketQualifiedKey, foldBracketId } = phaseIdMod;
@@ -1127,6 +1145,7 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
   }
 
   const roadmapPath = planningPaths(cwd).roadmap;
+  assertOwnerTargetsBound(cwd, [roadmapPath]);
 
   const phaseInfo = findPhaseInternal(cwd, phaseNum);
   if (!phaseInfo) {
@@ -1737,6 +1756,7 @@ function cmdRoadmapAnnotateDependencies(cwd: string, phaseNum: string | null | u
   }
 
   const roadmapPath = planningPaths(cwd).roadmap;
+  assertOwnerTargetsBound(cwd, [roadmapPath]);
   if (!fs.existsSync(roadmapPath)) {
     declineNoOp(raw, 'updated', 'ROADMAP.md not found', 'roadmap annotate-dependencies skipped — ROADMAP.md not found.');
     return;

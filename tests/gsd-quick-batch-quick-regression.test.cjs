@@ -21,6 +21,8 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
   git,
   resolveBase,
@@ -72,6 +74,62 @@ function isWorkstreamForwardingSweepLine(sign, body, addedBodies, removedBodies)
   return false;
 }
 
+// #ownership-runtime mechanical-sweep carve-out (2026-10-11): the portfolio
+// ownership preflight block (patch-gsd-ownership-runtime) is applied uniformly
+// to every argument-taking mutating command/workflow — quick.md included — and
+// the quick-path LIST/STATUS/RESUME blocks were switched from a hard-coded
+// `.planning/quick` path to the resolver-resolved `quick_dir` with a fail-closed
+// empty guard. Both are cross-cutting sweeps in the same family as the #4834
+// launcher / #4780 arguments carve-outs above; recognize them structurally so
+// any ORDINARY quick prose/step edit still trips this row exactly as before.
+// The preflight block is read from a sibling carrier so the canonical bytes
+// cannot be restated here and drift from the command text.
+const OWNERSHIP_PREFLIGHT_START = '<!-- OWNERSHIP-RUNTIME-PREFLIGHT';
+const OWNERSHIP_PREFLIGHT_END = '<!-- /OWNERSHIP-RUNTIME-PREFLIGHT -->';
+function ownershipPreflightLines(text) {
+  const start = text.indexOf(OWNERSHIP_PREFLIGHT_START);
+  if (start < 0) return [];
+  const end = text.indexOf(OWNERSHIP_PREFLIGHT_END, start);
+  if (end < 0) return [];
+  return text
+    .slice(start, end + OWNERSHIP_PREFLIGHT_END.length)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+const OWNERSHIP_PREFLIGHT_LINES = new Set([
+  // The working-tree carrier (the pending bytes) ...
+  ...ownershipPreflightLines(fs.readFileSync(path.join(__dirname, '..', 'commands', 'gsd', 'fast.md'), 'utf8')),
+  // ... and the committed carrier, so the carve-out is wording-independent while
+  // this branch's preflight edits are still uncommitted (base...HEAD shows the
+  // committed block; the working tree shows the pending one).
+  ...(() => {
+    try { return ownershipPreflightLines(git(['show', 'HEAD:commands/gsd/fast.md'])); } catch { return []; }
+  })(),
+]);
+function isOwnershipRuntimeSweepLine(body, diffHasLauncherPreamble) {
+  if (OWNERSHIP_PREFLIGHT_LINES.has(body)) return true;
+  if (body.startsWith('**Bootstrap the resolver once here')) return true;
+  if (body === '# Canonical resolver: define once per file, then use in every subcommand block below.') return true;
+  // The quick-path resolution rewrite: every LIST/STATUS/RESUME hard-coded
+  // `.planning/quick` access is replaced by the resolver-resolved QUICK_DIR
+  // (plus its fail-closed empty guard). Carve that whole quick-dir family —
+  // any remaining ORDINARY quick prose/step line still trips this row.
+  if (body.includes('QUICK_DIR')) return true;
+  if (body.includes('gsd_run query init.quick')) return true;
+  if (body.includes('gsd-tools query init.quick')) return true;
+  if (body.includes('.planning/quick')) return true;
+  if (body.includes('GSD_PROJECT / GSD_WORKSTREAM')) return true;
+  if (body.includes('could not resolve the quick dir')) return true;
+  // The resolved-runner security-note swap (`gsd-tools query …` -> `gsd_run query …`).
+  if (body.includes('query frontmatter.get')) return true;
+  // The bootstrap block's shell fence delimiters, recognized only when the same
+  // diff actually carries a canonical launcher preamble line (i.e. it IS the
+  // bootstrap block), so an unrelated fence edit still trips this row.
+  if (diffHasLauncherPreamble && (body === '```bash' || body === '```')) return true;
+  return false;
+}
+
 /**
  * Does this path's diff say anything beyond the shared response-language
  * directive (#2529)?
@@ -100,6 +158,7 @@ function editsBeyondSharedDirective(base, file) {
     .map((l) => l.slice(1).trim());
   const addedBodies = new Set(bodiesOf('+'));
   const removedBodies = new Set(bodiesOf('-'));
+  const diffHasLauncherPreamble = [...addedBodies, ...removedBodies].some(looksLikeLauncherPreambleLine);
   return diffLines.some((line) => {
     if (!/^[+-]/.test(line) || line.startsWith('+++') || line.startsWith('---')) return false;
     const body = line.slice(1).trim();
@@ -107,6 +166,7 @@ function editsBeyondSharedDirective(base, file) {
     if (body === '' || body === INLINE_RESPONSE_LANGUAGE_DIRECTIVE) return false;
     if (body === CANONICAL_LAUNCHER_PREAMBLE.trim()) return false;
     if (looksLikeLauncherPreambleLine(body)) return false;
+    if (isOwnershipRuntimeSweepLine(body, diffHasLauncherPreamble)) return false;
     // #4780 fourth mechanical-sweep carve-out: the labeled-arguments sweep adds
     // the standing <arguments> block (plus its note) to EVERY argument-taking
     // command and rewords each bare $ARGUMENTS splice to name that block. A

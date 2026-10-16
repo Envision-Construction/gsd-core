@@ -39,6 +39,28 @@ import { migrateOnDisk } from './configuration.cjs';
 import unusableInputModule = require('./unusable-input.cjs');
 const { UNUSABLE_REASON, warnUnusableInput } = unusableInputModule;
 
+/**
+ * Portfolio ownership: bind the concrete `.planning/config.json` target to the
+ * caller's declared writable scopes BEFORE the first side effect (the
+ * `.planning` mkdir or the config write). Idempotent under audit; refuses with
+ * the stable `owner_context_refused` reason under an enforce policy. Every
+ * config mutator routes through here — the `config-set*`/`config-new-project`/
+ * `config-ensure-section` CLI commands AND the direct `setConfigValue`/
+ * `setConfigValues`/`unsetConfigValue` exports.
+ */
+function assertOwnerConfigTargetBound(cwd: string, configPath: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, [configPath]);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface SetConfigValueResult {
@@ -501,6 +523,7 @@ function buildNewProjectConfig(userChoices: Record<string, unknown>): Record<str
 function cmdConfigNewProject(cwd: string, choicesJson: string | undefined, raw: boolean): void {
   const planningBase = planningDir(cwd);
   const configPath = path.join(planningBase, 'config.json');
+  assertOwnerConfigTargetBound(cwd, configPath);
 
   // Idempotent: don't overwrite existing config
   if (fs.existsSync(configPath)) {
@@ -544,6 +567,7 @@ function cmdConfigNewProject(cwd: string, choicesJson: string | undefined, raw: 
 function ensureConfigFile(cwd: string): { created: boolean; reason?: string; path?: string } | undefined {
   const planningBase = planningDir(cwd);
   const configPath = path.join(planningBase, 'config.json');
+  assertOwnerConfigTargetBound(cwd, configPath);
 
   // Ensure .planning directory exists
   try {
@@ -705,6 +729,7 @@ function loadConfigJson(cwd: string): Record<string, unknown> {
 
 function unsetConfigValue(cwd: string, keyPath: string): UnsetConfigValueResult {
   const configPath = path.join(planningDir(cwd), 'config.json');
+  assertOwnerConfigTargetBound(cwd, configPath);
 
   return withPlanningLock(cwd, () => {
     const config = loadConfigJson(cwd);
@@ -730,6 +755,7 @@ function unsetConfigValue(cwd: string, keyPath: string): UnsetConfigValueResult 
  */
 function setConfigValue(cwd: string, keyPath: string, parsedValue: unknown): SetConfigValueResult {
   const configPath = path.join(planningDir(cwd), 'config.json');
+  assertOwnerConfigTargetBound(cwd, configPath);
 
   return withPlanningLock(cwd, () => {
     const config = loadConfigJson(cwd);
@@ -790,6 +816,7 @@ function setConfigValues(
   }
 
   const configPath = path.join(planningDir(cwd), 'config.json');
+  assertOwnerConfigTargetBound(cwd, configPath);
 
   return withPlanningLock(cwd, () => {
     const config = loadConfigJson(cwd);

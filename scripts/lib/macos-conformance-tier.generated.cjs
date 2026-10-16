@@ -144,6 +144,8 @@ module.exports = {
   "tests/observability/event.test.cjs",
   "tests/onboard-command.test.cjs",
   "tests/opencode-plugin-adapter.test.cjs",
+  "tests/owner-context-writer-matrix.test.cjs",
+  "tests/owner-context.unit.test.cjs",
   "tests/pause-work-context-detection.test.cjs",
   "tests/pause-work-improvements.test.cjs",
   "tests/perf-317-context-monitor-fs.test.cjs",

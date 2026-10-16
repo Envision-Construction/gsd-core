@@ -23,6 +23,48 @@ import { locateFrontmatterFence } from './frontmatter-fence.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- io.cjs is an export= CommonJS module
 import ioMod = require('./io.cjs');
 const { output, error, ERROR_REASON, formatDiagnosticToken } = ioMod;
+
+/**
+ * Portfolio ownership: bind concrete phase-directory/ROADMAP/STATE targets to
+ * the caller's declared writable scopes BEFORE the first delete/rename/write.
+ * Under an enforce policy a descriptor that authorizes an unrelated scope (or a
+ * missing/foreign/stale one) refuses here with the stable `owner_context_refused`
+ * reason; under audit it is a no-op. The multi-file `writePlanningFileSet` path
+ * uses `assertOwnerContextForWrite` directly with its own write set.
+ */
+function assertOwnerPhaseTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    ownerContextMod.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof ownerContextMod.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Bind ALL of a phase operation's targets once and keep the resulting
+ * authorized-operation scope active while `fn` performs the multi-file mutation.
+ * Nested gated writers inside `fn` (the STATE.md read-modify-write, sibling
+ * renames) then bind to this operation instead of re-checking the snapshot the
+ * operation is itself rewriting. Refusals at the entry are mapped to the stable
+ * `owner_context_refused` reason exactly as `assertOwnerPhaseTargetsBound` does.
+ */
+function withOwnedPhaseOperation<T>(cwd: string, targets: string[], fn: () => T): T {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    return ownerContextMod.withOwnedOperation(cwd, targets, fn);
+  } catch (err) {
+    if (err instanceof ownerContextMod.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateContract = require('./state-contract.cjs');
 const { publishStateContract } = stateContract;
@@ -1401,6 +1443,7 @@ function cmdPhaseAdd(cwd: string, description: string, raw: boolean, customId?: 
   if (!fs.existsSync(roadmapPath)) {
     error('ROADMAP.md not found');
   }
+  assertOwnerPhaseTargetsBound(cwd, [roadmapPath, path.join(planningDir(cwd), 'phases')]);
 
   const slug = generateSlugInternal(description) || '';
 
@@ -1543,6 +1586,7 @@ function cmdPhaseAddBatch(cwd: string, descriptions: string[], raw: boolean): vo
   if (!fs.existsSync(roadmapPath)) {
     error('ROADMAP.md not found');
   }
+  assertOwnerPhaseTargetsBound(cwd, [roadmapPath, path.join(planningDir(cwd), 'phases')]);
   const projectCode = (config.project_code as string) || '';
   const prefix = projectCode ? `${projectCode}-` : '';
 
@@ -1734,6 +1778,7 @@ function cmdPhaseInsert(
   if (!fs.existsSync(roadmapPath)) {
     error('ROADMAP.md not found');
   }
+  assertOwnerPhaseTargetsBound(cwd, [roadmapPath, path.join(planningDir(cwd), 'phases')]);
 
   const slug = generateSlugInternal(description) || '';
 
@@ -2582,6 +2627,18 @@ function cmdPhaseRemove(
     if (survivorStatusError) throw survivorStatusError;
   }
 
+  // Ownership gate BEFORE the FIRST destructive step (the phase-dir delete and
+  // the sibling renames below, then the ROADMAP/STATE rewrites). Binding the
+  // phases directory covers the deleted dir AND every renumbered sibling.
+  // The gate opens an AUTHORIZED OPERATION around the whole destructive body:
+  // the nested readModifyWriteStateMd below re-binds STATE.md to this operation
+  // rather than re-checking the snapshot this operation is itself rewriting
+  // (review 2026-10-10: an un-scoped nested gate refused stale_context AFTER the
+  // phase dir was deleted and ROADMAP rewritten, leaving the removal half-applied).
+  withOwnedPhaseOperation(
+    cwd,
+    [roadmapPath, phasesDir, path.join(planningDir(cwd), 'STATE.md')],
+    () => {
   if (targetDir) fs.rmSync(path.join(phasesDir, targetDir), { recursive: true, force: true });
 
   let renamedDirs: { from: string; to: string }[] = [];
@@ -2717,6 +2774,8 @@ function cmdPhaseRemove(
     },
     raw,
   );
+    },
+  );
   // #3227: unconditional here because `updateRoadmapAfterPhaseRemoval` above
   // always rewrites ROADMAP.md before this line is reached; every refusal path
   // (bad target, missing ROADMAP.md, --force-required, renumber failure) exits
@@ -2738,7 +2797,23 @@ interface WriteSpec {
  * re-run against an already-completed phase can produce a `writes[]` array
  * where every entry is byte-identical to what's already on disk.
  */
-function writePlanningFileSet(writes: WriteSpec[]): number {
+function writePlanningFileSet(cwd: string, writes: WriteSpec[]): number {
+  // Mandatory direct-writer gate (portfolio ownership): under an enforce
+  // policy an invalid owner context refuses BEFORE any byte is written. This
+  // calls the SAME semantic gate the dispatch boundary uses. The audit default
+  // resolves the context and preserves today's behaviour.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    // Bind the ACTUAL write paths to the descriptor's writable scopes: a
+    // descriptor naming an unrelated scope cannot authorize a planning write.
+    ownerContextMod.assertOwnerContextForWrite(cwd, { targets: writes.map((write) => write.filePath) });
+  } catch (err) {
+    if (err instanceof ownerContextMod.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
   const applied: WriteSpec[] = [];
   try {
     for (const write of writes) {
@@ -4975,7 +5050,7 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         stateUpdated = contentChangedAfterNormalize(statePath, originalStateContent, stateContent);
       }
 
-      anyPlanningWrite = writePlanningFileSet(writes) > 0;
+      anyPlanningWrite = writePlanningFileSet(cwd, writes) > 0;
     };
 
     if (fs.existsSync(statePath)) {

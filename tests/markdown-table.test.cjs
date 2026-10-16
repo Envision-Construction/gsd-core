@@ -1722,3 +1722,114 @@ describe('quick-tasks-migrate CLI and workflow wiring (#3730)', () => {
       'quick.md documents and invokes the migration path (#3730)');
   });
 });
+
+// ─── #ownership-runtime: quick-tasks table honours GSD_PROJECT/WORKSTREAM ─────
+//
+// `workflows/quick.md` derives the table target as
+// `STATE_PATH="$(dirname "${quick_dir}")/STATE.md"` — the SAME scoped path
+// `planningPaths(cwd).state` resolves, and the same STATE.md the `state`
+// family reads. `routeQuickTasksAppend`/`routeQuickTasksMigrate` previously
+// hard-coded `<cwd>/.planning/STATE.md`, so a scoped run (GSD_PROJECT /
+// GSD_WORKSTREAM) appended the row into a root file no other reader consults
+// — or, when the root file did not exist, failed outright with
+// "STATE.md not found". These drive the real CLI so the resolver cannot
+// silently drift back to a literal root path.
+describe('quick-tasks table resolves through the scoped planning workspace', () => {
+  const { createTempProject, cleanup, runGsdTools } = require('./helpers.cjs');
+
+  const CANONICAL_TABLE = [
+    '---',
+    'progress:',
+    '  total_phases: 1',
+    '  completed_phases: 0',
+    '  total_plans: 1',
+    '  completed_plans: 0',
+    '  percent: 0',
+    '---',
+    '# STATE',
+    '',
+    '### Quick Tasks Completed',
+    '',
+    '| # | Description | Date | Commit | Directory |',
+    '|---|-------------|------|--------|-----------|',
+    '',
+  ].join('\n');
+
+  function writeScopedState(relDir) {
+    const dir = path.join.apply(path, [relDir]);
+    fs.mkdirSync(dir, { recursive: true });
+    const statePath = path.join(dir, 'STATE.md');
+    fs.writeFileSync(statePath, CANONICAL_TABLE);
+    return statePath;
+  }
+
+  test('GSD_PROJECT writes the project STATE.md, not a root one', () => {
+    const tmpDir = createTempProject('gsd-quick-scope-proj-');
+    try {
+      const scoped = writeScopedState(path.join(tmpDir, '.planning', 'pp'));
+      const result = runGsdTools(['quick-tasks-append', '--task', 'Scoped row'], tmpDir, { GSD_PROJECT: 'pp' });
+      assert.ok(result.success, `scoped append should succeed: ${result.error}`);
+      assert.match(fs.readFileSync(scoped, 'utf8'), /Scoped row/, 'the project STATE.md carries the row');
+      assert.equal(
+        fs.existsSync(path.join(tmpDir, '.planning', 'STATE.md')),
+        false,
+        'no root STATE.md is created or written under a project scope',
+      );
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  test('GSD_WORKSTREAM nests under the project scope and is the only file written', () => {
+    const tmpDir = createTempProject('gsd-quick-scope-ws-');
+    try {
+      const scoped = writeScopedState(path.join(tmpDir, '.planning', 'pp', 'workstreams', 'ww'));
+      const result = runGsdTools(['quick-tasks-append', '--task', 'WS row'], tmpDir, {
+        GSD_PROJECT: 'pp', GSD_WORKSTREAM: 'ww',
+      });
+      assert.ok(result.success, `workstream append should succeed: ${result.error}`);
+      assert.match(fs.readFileSync(scoped, 'utf8'), /WS row/);
+      assert.equal(fs.existsSync(path.join(tmpDir, '.planning', 'STATE.md')), false);
+      assert.equal(fs.existsSync(path.join(tmpDir, '.planning', 'pp', 'STATE.md')), false);
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  test('no scope env keeps the root .planning/STATE.md target (unchanged behaviour)', () => {
+    const tmpDir = createTempProject('gsd-quick-scope-root-');
+    try {
+      const rootState = writeScopedState(path.join(tmpDir, '.planning'));
+      const result = runGsdTools(['quick-tasks-append', '--task', 'Root row'], tmpDir, {
+        GSD_PROJECT: undefined, GSD_WORKSTREAM: undefined,
+      });
+      assert.ok(result.success, `root append should succeed: ${result.error}`);
+      assert.match(fs.readFileSync(rootState, 'utf8'), /Root row/);
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  test('quick-tasks-migrate reads the same scoped STATE.md', () => {
+    const tmpDir = createTempProject('gsd-quick-migrate-scope-');
+    try {
+      const scoped = writeScopedState(path.join(tmpDir, '.planning', 'pp'));
+      // A legacy 4-column table (#3730) so migration has real work to do.
+      fs.writeFileSync(scoped, [
+        '# State',
+        '',
+        '## Quick Tasks Completed',
+        '',
+        '| Date | Slug | Scope | Artifacts |',
+        '|------|------|-------|-----------|',
+        '| 2026-04-17 | 260417-abc | bootstrap | roles/x |',
+      ].join('\n') + '\n');
+      const result = runGsdTools(['quick-tasks-migrate'], tmpDir, { GSD_PROJECT: 'pp' });
+      assert.ok(result.success, `scoped migrate should succeed: ${result.error}`);
+      assert.equal(JSON.parse(result.output).migrated, true, 'the scoped legacy table is migrated');
+      assert.equal(fs.existsSync(path.join(tmpDir, '.planning', 'STATE.md')), false);
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+});

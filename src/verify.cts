@@ -40,6 +40,25 @@ const { checkAgentsInstalled, checkCodexModelPosture, checkCodexSandboxPosture }
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
 const { output, error } = ioMod;
+
+/**
+ * Portfolio ownership: bind concrete write targets to the caller's declared
+ * writable scopes BEFORE the first side effect. Enforce refuses a missing /
+ * foreign / stale / out-of-scope descriptor with the stable owner_context_refused
+ * reason; audit is a no-op.
+ */
+function assertOwnerWriteTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
 const { findPhaseInternal } = phaseLocatorMod;
@@ -2299,6 +2318,7 @@ function cmdStampCodebaseMap(cwd: string, raw: boolean, only?: string[]): void {
       emit(skip('no-codebase-dir'));
       return;
     }
+    assertOwnerWriteTargetsBound(cwd, [codebaseDir]);
 
     // `--files` restricts the stamp to the documents a caller actually
     // refreshed. The execute-phase auto-remap path rewrites STRUCTURE.md and
@@ -2362,6 +2382,10 @@ function cmdStampCodebaseMap(cwd: string, raw: boolean, only?: string[]): void {
 
     emit(result);
   } catch (err) {
+    // Portfolio ownership: a pre-write gate refusal is the process-exit seam
+    // (ExitError). Re-throw it so a refused stamp reports owner_context_refused
+    // with a non-zero exit instead of being downgraded to a "skipped" stamp.
+    if (err && typeof err === 'object' && (err as { name?: string }).name === 'ExitError') throw err;
     emit(skip('exception: ' + (err instanceof Error ? err.message : String(err))));
   }
 }

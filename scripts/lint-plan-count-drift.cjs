@@ -164,6 +164,12 @@ const CORE_UTILS_EXEMPT_FUNCTIONS = new Set([
 //     re-derive "is this a plan" — it answers a different, narrower question
 //     (does the canonical 2-digit numbering sequence have a gap) that the
 //     owner's boolean plan/summary classification cannot answer.
+//   - owner-context.cts phasePlanLinkMatches: validates ONE workflow
+//     descriptor's already-resolved `plan` path against its declared phase
+//     (`<phase-dir>/<...>-PLAN.md`), i.e. "is this named file a valid
+//     phase-plan LINKAGE", never a directory listing or a live-plan/summary
+//     count. The canonical owner classifies a DIRECTORY's contents; this asks
+//     whether a single caller-supplied path belongs in the phase directory.
 const FUNCTION_SCOPED_EXEMPTIONS = new Map([
   [CORE_UTILS_FILE, CORE_UTILS_EXEMPT_FUNCTIONS],
   [path.join('src', 'audit.cts'), new Set(['resolveQuickTaskSummaryFile'])],
@@ -172,6 +178,7 @@ const FUNCTION_SCOPED_EXEMPTIONS = new Map([
   [path.join('src', 'roadmap.cts'), new Set(['cmdRoadmapAnnotateDependencies'])],
   [path.join('src', 'worktree-safety.cts'), new Set(['defaultFindSummaryFiles'])],
   [path.join('src', 'planning-snapshot.cts'), new Set(['buildPerPhasePlanScanFields'])],
+  [path.join('src', 'owner-context.cts'), new Set(['phasePlanLinkMatches'])],
 ]);
 
 // Optional `export ` modifier: `collectCalibrationSamples` (estimate-cli.cts)

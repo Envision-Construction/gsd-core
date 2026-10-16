@@ -18,6 +18,9 @@ import io = require('./io.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- config-loader.cjs is an export= CommonJS module
 import configLoader = require('./config-loader.cjs');
 import { findProjectRoot } from './project-root.cjs';
+// #portfolio-ownership: additive owner_context contract (never the frozen
+// state.json contract). Read-only resolution; no provider requests.
+import { ownerContextEnvelopeField } from './owner-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- model-resolver.cjs is an export= CommonJS module
 import modelResolver = require('./model-resolver.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-locator.cjs is an export= CommonJS module
@@ -373,6 +376,10 @@ function getLatestCompletedMilestone(cwd: string): { version: string; name: stri
 
 function withProjectRoot(cwd: string, result: Record<string, unknown>): Record<string, unknown> {
   result['project_root'] = cwd;
+  // Portfolio ownership (additive): the resolved owner_context travels with
+  // every init envelope. Read-only - resolves local git/planning facts only,
+  // never a provider request. The frozen six-key state contract is untouched.
+  result['owner_context'] = ownerContextEnvelopeField(cwd);
   // #3245: the reported agent_runtime gets a host-detection rung below the two explicit sources; every other resolveRuntime caller keeps the old ladder (ADR-2313 scope boundary).
   const activeRuntime = resolveReportedRuntime(cwd);
   const agentStatus = checkAgentsInstalled(activeRuntime, cwd);
@@ -4813,6 +4820,17 @@ function cmdSkillManifest(cwd: string, args: string[], raw: boolean): void {
     const planDir = planningDir(cwd);
     if (fs.existsSync(planDir)) {
       const manifestPath = path.join(planDir, 'skill-manifest.json');
+      // Portfolio ownership: bind the manifest target before the first write.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+      const ocMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+      try {
+        ocMod.assertTargetsAuthorized(cwd, [manifestPath]);
+      } catch (err) {
+        if (err instanceof ocMod.OwnerContextRefusal) {
+          error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+        }
+        throw err;
+      }
       platformWriteSync(manifestPath, JSON.stringify(manifest, null, 2));
     }
   }

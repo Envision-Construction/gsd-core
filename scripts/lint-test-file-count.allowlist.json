@@ -295,6 +295,17 @@
       "issue": "4657",
       "justification": "The ui-consideration-probe cluster gains its workflow-prose contract file (tests/ui-consideration-probe-ui-phase-contract.test.cjs, #4657), mirroring the edge probe's split (edge-probe.test.cjs / edge-probe-docs-fixtures.test.cjs / edge-probe-spec-phase-contract.test.cjs). The contract file reads shipped gsd-core/workflows/ui-phase.md under the source-text-is-the-product exception, which the unit file deliberately does not carry (it asserts typed returns only)."
     },
+    "owner-context": {
+      "files": [
+        "owner-context-classification-drift.test.cjs",
+        "owner-context-nested-mutation.test.cjs",
+        "owner-context-writer-matrix.test.cjs",
+        "owner-context.test.cjs",
+        "owner-context.unit.test.cjs"
+      ],
+      "issue": "TBD",
+      "justification": "Portfolio ownership enforcement splits into genuinely distinct surfaces, each of which the others cannot carry: owner-context.unit.test.cjs pins the pure versioned contract with an injected git seam (spawn-free); owner-context.test.cjs drives the real CLI dispatch boundary and the additive init envelope; owner-context-classification-drift.test.cjs is a registry-parity + routed-command accounting guard whose whole value is that it fails when the command-alias registry and the derived classifier diverge; owner-context-writer-matrix.test.cjs is the per-family negative/positive boundary matrix (missing/wrong-owner/mismatched-scope/valid-fresh plus no-partial-effects snapshots) that the unit file cannot express without spawning the CLI for every writer family; owner-context-nested-mutation.test.cjs (2026-10-10 correction bundle) is the RED/GREEN control set for the nested-write freshness relaxation, the narrowed scope-fingerprint exclusions, canonical-root policy binding, and the flag-supplied writer classification — each case reproduces a confirmed root-review finding, which the unit file cannot express without the real gsd-tools CLI. Folding the drift guard into the unit file would hide its failure mode inside an unrelated suite, and folding the writer matrix into the integration file would make that file's ~50 CLI spawns unmaintainable."
+    },
     "verification": {
       "files": [
         "verification-append-audit.test.cjs",

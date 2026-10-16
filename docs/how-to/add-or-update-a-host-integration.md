@@ -192,6 +192,12 @@ upgrades (multi-event hook bus; negotiated `dispatch.background`) this PR adds.
 The launcher's `_gsd_homes` candidate list is **generated** from each runtime's `configHome`
 descriptor, so a new runtime needs no launcher edit — only a regeneration:
 
+One element is not descriptor-derived: `sync-runtime-launcher.cjs` renders an explicitly exported
+`CODEX_HOME` probe first, ahead of claude. It is the operator's own statement of the live install, so
+it outranks a stale Claude home inside a Codex session; when `CODEX_HOME` is unset or empty the token
+expands to nothing and changes no other host's precedence — the registry's own `codex` default
+(`$HOME/.codex`) keeps its normal id-order slot.
+
 1. Declare `runtime.configHome` on the descriptor (`dot-home`, `dot-home-nested`, `xdg` or
    `generic-agents-root`; `none` contributes nothing).
 2. Run `npm run build:lib && npm run gen:capability-registry && npm run sync:launcher`. The last step

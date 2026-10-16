@@ -1810,6 +1810,8 @@ function rewriteBareGsdToolsCommandsForCodex(content) {
 function convertClaudeToCodexMarkdown(content) {
   let converted = convertSlashCommandsToCodexSkillMentions(filterRuntimeNotesForTarget(content, 'codex'));
   converted = converted.replace(/\$ARGUMENTS\b/g, '{{GSD_ARGS}}');
+  // Resolve the active Codex home before a leftover default installation.
+  converted = converted.replace(/\bCLAUDE_CONFIG_DIR\b/g, 'CODEX_HOME');
   // Remove /clear references — Codex has no equivalent command
   // Handle backtick-wrapped: `\/clear` then: → (removed)
   converted = converted.replace(/`\/clear`\s*,?\s*then:?\s*\n?/gi, '');

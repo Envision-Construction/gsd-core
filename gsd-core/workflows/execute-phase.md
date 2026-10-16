@@ -86,6 +86,26 @@ Load all context in one call:
 
 @~/.claude/gsd-core/references/gsd-run-resolver.md
 
+<!-- OWNERSHIP-RUNTIME-PREFLIGHT v4 -->
+<ownership_preflight>
+Resolve `gsd_run` (this workflow's bootstrap) first, then run
+`gsd_run owner-context preflight` before any mkdir/write/dispatch: STOP on
+`owner_context_refused` (enforce). The core gate re-checks the actual target
+before the first side effect. Paths come from the core init.
+</ownership_preflight>
+<!-- /OWNERSHIP-RUNTIME-PREFLIGHT -->
+
+<!-- JEV-ADVISORY-ENTRY v1 — optional, advisory-only, default-off -->
+<ownership_jev_advisory>
+Optional, default-off. Only for a NAMED synthetic scenario id,
+`gsd_run jev-advisory prepare --scenario <id> --entry <kind>` is OFFLINE (no
+network); `gsd_run jev-advisory evaluate ...` is the single outbound request and
+runs ONLY on an explicit model-answer request. Advisory-only
+(`authorizes_mutation: false`); never changes owner selection or substitutes
+quick. Full fragment: capabilities/jev-advisory/entry-guidance.md.
+</ownership_jev_advisory>
+<!-- /JEV-ADVISORY-ENTRY -->
+
 ```bash
 WAVE_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--wave[[:space:]]+([^[:space:]-][^[:space:]]*) ]]; then WAVE_PARAM="--wave ${BASH_REMATCH[2]}"; fi
 GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)

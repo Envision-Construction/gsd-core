@@ -270,6 +270,22 @@ function cmdTemplateFill(cwd: string, templateType: string | null | undefined, o
     return;
   }
 
+  // Portfolio ownership: bind the generated plan/SUMMARY/VERIFICATION target to
+  // the caller's declared writable scopes BEFORE the first write. Under an
+  // enforce policy a missing/foreign/stale/out-of-scope descriptor refuses with
+  // the stable owner_context_refused reason; audit is a no-op.
+  {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+    const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+    try {
+      oc.assertTargetsAuthorized(cwd, [outPath]);
+    } catch (err) {
+      if (err instanceof oc.OwnerContextRefusal) {
+        error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+      }
+      throw err;
+    }
+  }
   platformWriteSync(outPath, fullContent);
   const relPath = toPosixPath(path.relative(cwd, outPath));
   output({ created: true, path: relPath, template: templateType }, raw, relPath);

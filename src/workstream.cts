@@ -18,6 +18,24 @@ import { realClock } from './clock.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import io = require('./io.cjs');
 const { output, error } = io;
+
+/**
+ * Portfolio ownership: bind this module's direct mutation to the caller's
+ * declared writable scopes (planning root). Full semantic preflight, once at
+ * entry. Audit is a no-op; enforce refuses before the first filesystem mutation.
+ */
+function assertOwnerTargetsBound(cwd: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, [planningRoot(cwd)]);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), io.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtils = require('./core-utils.cjs');
 const { toPosixPath, generateSlugInternal } = coreUtils;
@@ -67,6 +85,7 @@ interface MigrateResult {
  * milestones/, research/, codebase/, todos/) stay in place.
  */
 function migrateToWorkstreams(cwd: string, workstreamName: string): MigrateResult {
+  assertOwnerTargetsBound(cwd);
   try {
     assertValidActiveWorkstreamName(workstreamName, 'Invalid workstream name for migration');
   } catch {
@@ -117,6 +136,7 @@ function migrateToWorkstreams(cwd: string, workstreamName: string): MigrateResul
 // ─── CRUD Commands ────────────────────────────────────────────────────────────
 
 function cmdWorkstreamCreate(cwd: string, name: string | null | undefined, options: WorkstreamCreateOptions, raw: boolean): void {
+  assertOwnerTargetsBound(cwd);
   if (!name) {
     error('workstream name required. Usage: workstream create <name>');
   }
@@ -291,6 +311,7 @@ function cmdWorkstreamStatus(cwd: string, name: string | null | undefined, raw: 
 }
 
 function cmdWorkstreamComplete(cwd: string, name: string | null | undefined, options: Record<string, unknown>, raw: boolean): void {
+  assertOwnerTargetsBound(cwd);
   if (!name) error('workstream name required. Usage: workstream complete <name>');
   try {
     assertValidActiveWorkstreamName(name, INVALID_ACTIVE_WORKSTREAM_NAME_MESSAGE);
@@ -357,6 +378,7 @@ function cmdWorkstreamComplete(cwd: string, name: string | null | undefined, opt
 // ─── Active Workstream Commands ───────────────────────────────────────────────
 
 function cmdWorkstreamSet(cwd: string, name: string | null | undefined, raw: boolean): void {
+  assertOwnerTargetsBound(cwd);
   if (!name || name === '--clear') {
     if (name !== '--clear') {
       error('Workstream name required. Usage: workstream set <name> (or workstream set --clear to unset)');

@@ -567,6 +567,19 @@ function cmdFromGsd2(args: string[], cwd: string, raw: boolean): void {
     return;
   }
 
+  // Portfolio ownership: bind the destination .planning root BEFORE the first
+  // write. `--dry-run` above stays read-only; enforce refuses a missing /
+  // foreign / out-of-scope descriptor with owner_context_refused.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ocMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    ocMod.assertTargetsAuthorized(cwd, [planningRoot]);
+  } catch (err) {
+    if (err instanceof ocMod.OwnerContextRefusal) {
+      ioMod.error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
   writePlanningDir(artifacts, planningRoot);
 
   output({

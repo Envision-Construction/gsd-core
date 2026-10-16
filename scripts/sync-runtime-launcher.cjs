@@ -25,6 +25,21 @@ const WORKFLOWS_DIR = path.join(__dirname, '..', 'gsd-core', 'workflows');
 const AGENTS_DIR = path.join(__dirname, '..', 'agents');
 const SNIPPET_FILE = path.join(WORKFLOWS_DIR, '_runtime-launcher.snippet.sh');
 
+/**
+ * The explicit-Codex-home probe rendered FIRST into `_gsd_homes`.
+ *
+ * An exported CODEX_HOME is the operator's own statement of which install is
+ * live, so it outranks every descriptor default. When CODEX_HOME is unset or
+ * empty this token expands to the empty string, which the loop skips, so the
+ * descriptor list below keeps its normal precedence — including the registry's
+ * own `codex` entry (`${CODEX_HOME:-$HOME/.codex}`), which stays in id order
+ * rather than being hoisted. Required by the ownership bundle's Codex-home
+ * precedence acceptance item; pinned by
+ * `tests/launcher-homes-derivation.test.cjs` and
+ * `tests/ownership-preflight-projection.test.cjs`.
+ */
+const EXPLICIT_CODEX_HOME_PROBE = '${CODEX_HOME:-}';
+
 // Read canonical preamble (full content of snippet file)
 function loadPreamble() {
   const raw = fs.readFileSync(SNIPPET_FILE, 'utf8');
@@ -496,6 +511,17 @@ function renderHomesFunction(registry, legacyHomes) {
   const ids = Object.keys(registry.runtimes).sort((a, b) =>
     a === 'claude' ? -1 : b === 'claude' ? 1 : a < b ? -1 : a > b ? 1 : 0);
   const exprs = [];
+  // #ownership-v4: an EXPLICITLY-SET CODEX_HOME takes precedence over a stale
+  // Claude home inside a Codex install (the shared resolver reference is not
+  // converted by convertClaudeToCodexMarkdown, so the inline-launcher rewrite
+  // never reached it). The probe element below is EMPTY when CODEX_HOME is
+  // unset or blank, and the rendered loop SKIPS empty candidates before it
+  // builds a probe path — without that skip `"$_h/gsd-core/bin/…"` collapses
+  // to the filesystem-root path `/gsd-core/bin/gsd-tools.cjs`, a real
+  // directory on some images. Every other host's precedence is therefore
+  // unchanged, and the registry's own `codex` entry still appears in its
+  // normal id-order position below.
+  exprs.push(EXPLICIT_CODEX_HOME_PROBE);
   for (const id of ids) {
     const configHome = registry.runtimes[id].runtime && registry.runtimes[id].runtime.configHome;
     if (configHome) exprs.push(...shellHomeExpr(configHome));
@@ -511,7 +537,7 @@ function renderHomesFunction(registry, legacyHomes) {
   // lint-workflow-shellcheck's #4109 structural check flags any `for x in` list that
   // contains a `$`, without parsing the quoting around it.
   const homes = [...new Set(exprs)].map((e) => `"${e}"`).join(' ');
-  return `${HOMES_START}set -- ${homes}; for _h; do _gsd_at "$_h/gsd-core/bin/\${_GSD_SHIM_NAME}" && return 0; done; return 1; }`;
+  return `${HOMES_START}set -- ${homes}; for _h; do [ -n "$_h" ] || continue; _gsd_at "$_h/gsd-core/bin/\${_GSD_SHIM_NAME}" && return 0; done; return 1; }`;
 }
 
 /** Locate the `_gsd_homes` function text inside the snippet's single line. */
@@ -629,4 +655,5 @@ module.exports = {
   refreshSnippetHomes,
   replaceResolverLines,
   PREAMBLE_LINE_RE,
+  EXPLICIT_CODEX_HOME_PROBE,
 };

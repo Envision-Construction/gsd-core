@@ -2258,6 +2258,16 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
     return { dryRun: true };
   }
 
+  // Portfolio ownership: bind this real (non-dry-run) migration to the caller's
+  // declared writable scopes (planning root) before the first rename/write.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const ownerContextMod = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  // Authorized-operation scope: the migration writes phase files, ROADMAP.md and
+  // PROJECT.md directly, then rewrites STATE.md through readModifyWriteStateMd.
+  // Without the scope the nested STATE.md gate would re-check the planning
+  // snapshot the migration is itself mutating and refuse half-applied.
+  return ownerContextMod.withOwnedOperation(cwd, [planningWorkspace.planningPaths(cwd).planning], () => {
+
   // ── Real run: verify clean working tree ───────────────────────────────────
   let gitStatus: string;
   try {
@@ -2458,6 +2468,7 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
   }
 
   return { applied: true, renamedDirs, editedFiles };
+  });
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────

@@ -11,12 +11,31 @@ interface CommandAlias {
   aliases: string[];
   subcommand: string;
   mutation: boolean;
+  /**
+   * Conditional writers: the subcommand mutates ONLY when one of these flags is
+   * present (e.g. `state prune --dry-run` is read-only and must not require an
+   * owner descriptor). Absent means the `mutation` flag is unconditional.
+   */
+  mutationFlags?: string[];
+  /**
+   * Read-only opt-outs: the subcommand mutates UNLESS one of these flags is
+   * present (e.g. `state prune --dry-run` and `state sync --verify` write
+   * nothing and must not require an owner descriptor). The inverse of
+   * `mutationFlags`; a row uses at most one of the two.
+   */
+  readOnlyFlags?: string[];
 }
 
 interface NonFamilyCommandAlias {
   canonical: string;
   aliases: string[];
   mutation: boolean;
+  /**
+   * Conditional writers: the invocation mutates ONLY when one of these flags
+   * is present (e.g. `effort sync` is a read-only dry run by default and only
+   * writes with `--apply`). Absent means the `mutation` flag is unconditional.
+   */
+  mutationFlags?: string[];
 }
 
 export const STATE_COMMAND_ALIASES: CommandAlias[] = [
@@ -41,6 +60,14 @@ export const STATE_COMMAND_ALIASES: CommandAlias[] = [
     ],
     "subcommand": "get",
     "mutation": false
+  },
+  {
+    "canonical": "state.complete-phase",
+    "aliases": [
+      "state complete-phase"
+    ],
+    "subcommand": "complete-phase",
+    "mutation": true
   },
   {
     "canonical": "state.update",
@@ -160,7 +187,10 @@ export const STATE_COMMAND_ALIASES: CommandAlias[] = [
       "state sync"
     ],
     "subcommand": "sync",
-    "mutation": true
+    "mutation": true,
+    "readOnlyFlags": [
+      "--verify"
+    ]
   },
   {
     "canonical": "state.prune",
@@ -168,7 +198,10 @@ export const STATE_COMMAND_ALIASES: CommandAlias[] = [
       "state prune"
     ],
     "subcommand": "prune",
-    "mutation": true
+    "mutation": true,
+    "readOnlyFlags": [
+      "--dry-run"
+    ]
   },
   {
     "canonical": "state.rebuild",
@@ -176,7 +209,10 @@ export const STATE_COMMAND_ALIASES: CommandAlias[] = [
       "state rebuild"
     ],
     "subcommand": "rebuild",
-    "mutation": true
+    "mutation": true,
+    "readOnlyFlags": [
+      "--dry-run"
+    ]
   },
   {
     "canonical": "state.milestone-switch",
@@ -696,6 +732,11 @@ export const ROADMAP_COMMAND_ALIASES: CommandAlias[] = [
 
 export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
   {
+    "canonical": "agent-skills",
+    "aliases": [],
+    "mutation": false
+  },
+  {
     "canonical": "agent.classify-failure",
     "aliases": [
       "agent classify-failure"
@@ -703,9 +744,84 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": false
   },
   {
+    "canonical": "assumption-delta",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "capability.disable",
+    "aliases": [
+      "capability disable"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "capability.enable",
+    "aliases": [
+      "capability enable"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "capability.install",
+    "aliases": [
+      "capability install"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "capability.list",
+    "aliases": [
+      "capability list"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "capability.outdated",
+    "aliases": [
+      "capability outdated"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "capability.remove",
+    "aliases": [
+      "capability remove"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "capability.set",
+    "aliases": [
+      "capability set"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "capability.state",
+    "aliases": [
+      "capability state"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "capability.trust",
+    "aliases": [
+      "capability trust"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "capability.update",
+    "aliases": [
+      "capability update"
+    ],
+    "mutation": true
+  },
+  {
     "canonical": "check-commit",
     "aliases": [],
-    "mutation": true
+    "mutation": false
   },
   {
     "canonical": "check.decision-coverage-plan",
@@ -719,6 +835,11 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "aliases": [
       "check decision-coverage-verify"
     ],
+    "mutation": false
+  },
+  {
+    "canonical": "classify-confidence",
+    "aliases": [],
     "mutation": false
   },
   {
@@ -751,9 +872,19 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": true
   },
   {
+    "canonical": "config-get",
+    "aliases": [],
+    "mutation": false
+  },
+  {
     "canonical": "config-new-project",
     "aliases": [],
     "mutation": true
+  },
+  {
+    "canonical": "config-path",
+    "aliases": [],
+    "mutation": false
   },
   {
     "canonical": "config-set",
@@ -766,7 +897,77 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": true
   },
   {
+    "canonical": "context-predicates",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "current-timestamp",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "detect-custom-files",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "dispatch-capacity",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "dispatch-isolation",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "dispatch-should-flatten",
+    "aliases": [],
+    "mutation": false
+  },
+  {
     "canonical": "docs-init",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "drift-guard",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "effort.sync",
+    "aliases": [
+      "effort sync"
+    ],
+    "mutationFlags": [
+      "--apply"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "estimate-calibrate",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "estimate-calibration",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "estimate-check",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "find-phase",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "from-gsd2",
     "aliases": [],
     "mutation": true
   },
@@ -790,7 +991,12 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "aliases": [
       "frontmatter validate"
     ],
-    "mutation": true
+    "mutation": false
+  },
+  {
+    "canonical": "gap-analysis",
+    "aliases": [],
+    "mutation": false
   },
   {
     "canonical": "generate-claude-md",
@@ -806,6 +1012,28 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "canonical": "generate-dev-preferences",
     "aliases": [],
     "mutation": true
+  },
+  {
+    "canonical": "generate-slug",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "git.base-branch",
+    "aliases": [
+      "git base-branch"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "history-digest",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "inspect-dispatch-isolation",
+    "aliases": [],
+    "mutation": false
   },
   {
     "canonical": "learnings.copy",
@@ -829,11 +1057,58 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": true
   },
   {
+    "canonical": "list-seeds",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "list-todos",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "loop",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "migrate-config",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "milestone.archive-quick",
+    "aliases": [
+      "milestone archive-quick"
+    ],
+    "mutation": true
+  },
+  {
     "canonical": "milestone.complete",
     "aliases": [
       "milestone complete"
     ],
     "mutation": true
+  },
+  {
+    "canonical": "normalize-test-command",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "owner-context",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "package-legitimacy",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "phase-plan-index",
+    "aliases": [],
+    "mutation": false
   },
   {
     "canonical": "phase.mvp-mode",
@@ -843,11 +1118,46 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": false
   },
   {
+    "canonical": "planning",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "pr-subrepo",
+    "aliases": [],
+    "mutation": true
+  },
+  {
     "canonical": "progress.bar",
     "aliases": [
       "progress bar"
     ],
     "mutation": false
+  },
+  {
+    "canonical": "project-instruction-file",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "prompt-budget",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "quick-tasks-append",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "quick-tasks-migrate",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "record-dispatch-isolation",
+    "aliases": [],
+    "mutation": true
   },
   {
     "canonical": "requirements.mark-complete",
@@ -871,6 +1181,102 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": true
   },
   {
+    "canonical": "research-plan",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "research-store.get",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "research-store.put",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "resolve-agent",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "resolve-dispatch-type",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "resolve-execution",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "resolve-granularity",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "resolve-model",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "restore-custom-files",
+    "aliases": [],
+    "mutation": false,
+    "mutationFlags": [
+      "--apply"
+    ]
+  },
+  {
+    "canonical": "review-lane",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "runtime-identity",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "scaffold",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "select-revert-commits",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "skill-manifest",
+    "aliases": [],
+    "mutationFlags": [
+      "--write"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "skills-root",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "smart-entry",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "stamp-codebase-map",
+    "aliases": [],
+    "mutation": true
+  },
+  {
+    "canonical": "state-snapshot",
+    "aliases": [],
+    "mutation": false
+  },
+  {
     "canonical": "stats.json",
     "aliases": [
       "stats json"
@@ -878,10 +1284,20 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": false
   },
   {
+    "canonical": "summary-extract",
+    "aliases": [],
+    "mutation": false
+  },
+  {
     "canonical": "task.is-behavior-adding",
     "aliases": [
       "task is-behavior-adding"
     ],
+    "mutation": false
+  },
+  {
+    "canonical": "teams-status",
+    "aliases": [],
     "mutation": false
   },
   {
@@ -894,7 +1310,7 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "aliases": [
       "template select"
     ],
-    "mutation": true
+    "mutation": false
   },
   {
     "canonical": "todo.complete",
@@ -925,12 +1341,90 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": false
   },
   {
+    "canonical": "update-context",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "user-story.validate",
+    "aliases": [
+      "user-story validate"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "verification.append-audit",
+    "aliases": [
+      "verification append-audit"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "verification.fingerprint",
+    "aliases": [
+      "verification fingerprint"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "verification.resolve-file",
+    "aliases": [
+      "verification resolve-file"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "verification.status",
+    "aliases": [
+      "verification status"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "verify-path-exists",
+    "aliases": [],
+    "mutation": false
+  },
+  {
     "canonical": "verify-summary",
     "aliases": [
       "verify.summary",
       "verify summary"
     ],
     "mutation": false
+  },
+  {
+    "canonical": "websearch",
+    "aliases": [],
+    "mutation": false
+  },
+  {
+    "canonical": "windows.append",
+    "aliases": [
+      "windows append"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "windows.fixed",
+    "aliases": [
+      "windows fixed"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "windows.status",
+    "aliases": [
+      "windows status"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "windows.waive",
+    "aliases": [
+      "windows waive"
+    ],
+    "mutation": true
   },
   {
     "canonical": "workstream.complete",
@@ -958,12 +1452,26 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "aliases": [
       "workstream progress"
     ],
-    "mutation": true
+    "mutation": false
   },
   {
     "canonical": "workstream.set",
     "aliases": [
       "workstream set"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "worktree.cleanup-wave",
+    "aliases": [
+      "worktree cleanup-wave"
+    ],
+    "mutation": true
+  },
+  {
+    "canonical": "worktree.reap-orphans",
+    "aliases": [
+      "worktree reap-orphans"
     ],
     "mutation": true
   },
@@ -974,6 +1482,86 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
   }
 ];
 
+// quick-batch coordination verbs (#3676). `resume` is deliberately
+// non-mutating at the registry level: a resume with no pending transitions is
+// read-only, so the writer binds its BATCH.json target at the transition write
+// (src/quick-batch.cts) instead of refusing every read-only resume under an
+// enforce policy.
+export const QUICK_BATCH_COMMAND_ALIASES: CommandAlias[] = [
+  {
+    "canonical": "quick-batch.create",
+    "aliases": ["quick-batch create"],
+    "subcommand": "create",
+    "mutation": true
+  },
+  {
+    "canonical": "quick-batch.update",
+    "aliases": ["quick-batch update"],
+    "subcommand": "update",
+    "mutation": true
+  },
+  {
+    "canonical": "quick-batch.resume",
+    "aliases": ["quick-batch resume"],
+    "subcommand": "resume",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.complete",
+    "aliases": ["quick-batch complete"],
+    "subcommand": "complete",
+    "mutation": true
+  },
+  {
+    "canonical": "quick-batch.effective-concurrency",
+    "aliases": ["quick-batch effective-concurrency"],
+    "subcommand": "effective-concurrency",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.merge-eligible",
+    "aliases": ["quick-batch merge-eligible"],
+    "subcommand": "merge-eligible",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.spawn-plan",
+    "aliases": ["quick-batch spawn-plan"],
+    "subcommand": "spawn-plan",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.filter-executed",
+    "aliases": ["quick-batch filter-executed"],
+    "subcommand": "filter-executed",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.verification-routing",
+    "aliases": ["quick-batch verification-routing"],
+    "subcommand": "verification-routing",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.merge-routing",
+    "aliases": ["quick-batch merge-routing"],
+    "subcommand": "merge-routing",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.cleanup-entry",
+    "aliases": ["quick-batch cleanup-entry"],
+    "subcommand": "cleanup-entry",
+    "mutation": false
+  },
+  {
+    "canonical": "quick-batch.parse-args",
+    "aliases": ["quick-batch parse-args"],
+    "subcommand": "parse-args",
+    "mutation": false
+  }
+];
+
 export const STATE_SUBCOMMANDS: string[] = STATE_COMMAND_ALIASES.map((entry) => entry.subcommand);
 export const VERIFY_SUBCOMMANDS: string[] = VERIFY_COMMAND_ALIASES.map((entry) => entry.subcommand);
 export const INIT_SUBCOMMANDS: string[] = INIT_COMMAND_ALIASES.map((entry) => entry.subcommand);
@@ -981,6 +1569,7 @@ export const PHASE_SUBCOMMANDS: string[] = PHASE_COMMAND_ALIASES.map((entry) => 
 export const PHASES_SUBCOMMANDS: string[] = PHASES_COMMAND_ALIASES.map((entry) => entry.subcommand);
 export const VALIDATE_SUBCOMMANDS: string[] = VALIDATE_COMMAND_ALIASES.map((entry) => entry.subcommand);
 export const ROADMAP_SUBCOMMANDS: string[] = ROADMAP_COMMAND_ALIASES.map((entry) => entry.subcommand);
+export const QUICK_BATCH_SUBCOMMANDS: string[] = QUICK_BATCH_COMMAND_ALIASES.map((entry) => entry.subcommand);
 
 export const EVAL_COMMAND_ALIASES: CommandAlias[] = [
   {

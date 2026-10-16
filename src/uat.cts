@@ -14,6 +14,25 @@ import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import io = require('./io.cjs');
 const { output, error, captureStdoutSyncWrites, resolveAtFileOutput } = io;
+
+/**
+ * Portfolio ownership: bind concrete UAT mutation targets to the caller's
+ * declared writable scopes BEFORE the first write. Under an enforce policy a
+ * missing/foreign/stale/out-of-scope descriptor refuses with the stable
+ * owner_context_refused reason; audit is a no-op.
+ */
+function assertOwnerUatTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), io.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import markdownSectionizer = require('./markdown-sectionizer.cjs');
 const { collectSection, withSection, tokenizeHeadings, stripFencedCode, scanFencedBlocks } = markdownSectionizer;
@@ -771,6 +790,10 @@ async function cmdUatCompleteSession(
     error(`UAT file not found: ${uatPathArg}`);
     return;
   }
+  // Portfolio ownership: bind the UAT file (and the STATE.md/commit the session
+  // touches) BEFORE the first write. Enforce refuses a missing/foreign/stale/
+  // out-of-scope descriptor with the stable owner_context_refused reason.
+  assertOwnerUatTargetsBound(cwd, [resolvedPath]);
   const content = fs.readFileSync(resolvedPath, 'utf-8');
   const relPath = toPosixPath(path.relative(cwd, resolvedPath));
   const baseline = readBaselineAtHead(resolvedPath);

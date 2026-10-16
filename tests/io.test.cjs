@@ -696,6 +696,7 @@ const EXPECTED_REASON_OUTCOME_3912 = {
   pick_output_not_json: 'UNAVAILABLE',
   summary_extract_unparseable: 'UNAVAILABLE',
   verification_status_invalid: 'UNAVAILABLE',
+  owner_context_refused: 'UNAVAILABLE',
   usage: 'USAGE',
   unknown: 'FAIL',
 };

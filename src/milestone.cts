@@ -28,6 +28,44 @@ const { resolveQuickTaskSummaryFile } = auditMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
 const { output, error } = ioMod;
+
+/**
+ * Portfolio ownership: bind this module's direct mutation to the caller's
+ * declared writable scopes (planning root). Full semantic preflight, once at
+ * entry. Audit is a no-op; enforce refuses before the first filesystem mutation.
+ */
+function assertOwnerTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Bind all of an operation's targets once, then keep the authorized-operation
+ * scope active while `fn` performs the multi-file mutation. Nested gated writers
+ * inside `fn` (e.g. cmdQuickArchive's STATE.md read-modify-write, which runs
+ * AFTER the quick-task directories have been MOVED) then bind to this operation
+ * instead of re-checking the snapshot the operation is itself rewriting.
+ */
+function withOwnedTargetsOperation<T>(cwd: string, targets: string[], fn: () => T): T {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    return oc.withOwnedOperation(cwd, targets, fn);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ioMod.ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import cliExitMod = require('./cli-exit.cjs');
 const { ExitError } = cliExitMod;
@@ -160,6 +198,7 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
   }
 
   const reqPath = planningPaths(cwd).requirements;
+  assertOwnerTargetsBound(cwd, [reqPath]);
   if (!fs.existsSync(reqPath)) {
     output({ updated: false, reason: 'REQUIREMENTS.md not found', ids: reqIds }, raw, 'no requirements file');
     return;
@@ -477,6 +516,7 @@ function cmdRequirementsRevertPhase(cwd: string, reqIdsRaw: string[], raw: boole
   }
 
   const reqPath = planningPaths(cwd).requirements;
+  assertOwnerTargetsBound(cwd, [reqPath]);
   if (!fs.existsSync(reqPath)) {
     output(
       { reverted: [], unchanged: reqIds, total: reqIds.length, reason: 'REQUIREMENTS.md not found' },
@@ -979,6 +1019,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   // used to run before those checks, so a refused run still left an empty
   // archive directory behind. Reaching this point means the run is
   // committed to mutating.
+  assertOwnerTargetsBound(cwd, [planningPaths(cwd).planning]);
   platformEnsureDir(archiveDir);
 
   // Archive ROADMAP.md
@@ -1394,6 +1435,7 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
     try {
       // #1871: archive phase directories instead of destroying them (shared helper).
       // #2288: thread the explicit --archive-version override (if any) through.
+      assertOwnerTargetsBound(cwd, [planningPaths(cwd).planning]);
       cleared = archivePhaseDirectories(cwd, phasesDir, dirs, archiveVersionOverride).archived;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -1879,6 +1921,11 @@ function cmdQuickArchive(cwd: string, version: string, options: QuickArchiveOpti
     assertVerificationReportsReadable(fs.readFileSync(statePath, 'utf-8'), cwd);
   }
 
+  // The gate opens an AUTHORIZED OPERATION around the archive + STATE.md reset:
+  // the nested readModifyWriteStateMd below runs AFTER the quick-task dirs have
+  // been moved, so an unscoped nested gate would refuse stale_context and leave
+  // the archive half-applied.
+  return withOwnedTargetsOperation(cwd, [planningPaths(cwd).planning], () => {
   const quickArchiveResult = archiveQuickTaskDirectories(cwd, version);
   const warnings: Array<{ field: string; reason: string }> = [];
   let stateUpdated = false;
@@ -1925,6 +1972,7 @@ function cmdQuickArchive(cwd: string, version: string, options: QuickArchiveOpti
     raw,
     `${quickArchiveResult.archived} quick task director${quickArchiveResult.archived === 1 ? 'y' : 'ies'} archived`,
   );
+  });
 }
 
 export = {

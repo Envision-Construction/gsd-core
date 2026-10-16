@@ -72,17 +72,39 @@ describe('_gsd_homes is rendered from the descriptors', () => {
     );
   });
 
-  test('claude is probed first; the legacy non-registry home is probed last', () => {
+  test('an explicit CODEX_HOME is probed first, claude next, the legacy non-registry home last', () => {
     const text = sync.loadDerivedHomes();
     const list = text.slice(text.indexOf('set -- ') + 'set -- '.length, text.indexOf('; for _h; do '));
-    assert.ok(list.startsWith('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "'), 'claude is the first element');
+    // The operator's own CODEX_HOME outranks the descriptor defaults
+    // (#ownership-v4); when it is unset/empty the token expands to the empty
+    // string and is skipped, so claude stays the first REAL home.
+    assert.ok(
+      list.startsWith('"${CODEX_HOME:-}" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "'),
+      'explicit CODEX_HOME, then claude',
+    );
     assert.ok(list.slice(list.lastIndexOf(' "')).includes('GROK_AGENTS_HOME'), 'the legacy home is the last element');
+    // The registry's own codex entry keeps its id-order slot; it is NOT hoisted
+    // (that would change other-host precedence when CODEX_HOME is unset).
+    const claudeDefault = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"';
+    const codexDefault = '"${CODEX_HOME:-$HOME/.codex}"';
+    assert.equal(list.split(codexDefault).length - 1, 1, 'the codex descriptor default appears exactly once');
+    assert.ok(
+      list.indexOf(codexDefault) > list.indexOf(claudeDefault),
+      'the codex descriptor default stays after claude',
+    );
   });
 
   test('the shim suffix is written once, in the loop body, not once per home (the preamble ships in ~240 files)', () => {
     const text = sync.loadDerivedHomes();
     assert.equal(text.split('/gsd-core/bin/').length - 1, 1);
-    assert.ok(text.endsWith('; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }'));
+    // The probe path is built per non-empty home only: an empty candidate (the
+    // unset/blank CODEX_HOME probe) is skipped BEFORE `"$_h/gsd-core/bin/…"` is
+    // constructed, so it can never collapse to `/gsd-core/bin/gsd-tools.cjs`.
+    assert.ok(
+      text.endsWith(
+        '; for _h; do [ -n "$_h" ] || continue; _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }',
+      ),
+    );
     // No `for x in <list>` header: the #4109 structural lint flags any such list containing a `$`.
     assert.ok(!/\bfor\s+\w+\s+in\s/.test(text));
   });
@@ -103,7 +125,12 @@ describe('_gsd_homes is rendered from the descriptors', () => {
   test('a runtime with no file-projected home (kind "none") contributes nothing', () => {
     const fake = { runtimes: { ide: { runtime: { configHome: { kind: 'none', name: 'ide', env: [] } } } } };
     const text = sync.renderHomesFunction(fake, {});
-    assert.equal(text, '_gsd_homes() { set -- ; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }');
+    const list = text.slice(text.indexOf('set -- ') + 'set -- '.length, text.indexOf('; for _h; do '));
+    // The descriptor contributes no home: the only element is the mandated
+    // explicit-CODEX_HOME probe, which expands to the empty string when unset,
+    // so "kind: none" still probes nothing.
+    assert.equal(list, `"${sync.EXPLICIT_CODEX_HOME_PROBE}"`);
+    assert.ok(!text.includes('$HOME'), 'kind "none" must not synthesize a default home');
   });
 
   test('every descriptor value rendered into shell is a plain identifier or path segment (no shell metacharacters)', () => {
@@ -272,5 +299,55 @@ describe('the launcher finds the install the JS resolver resolves, for every run
     } finally {
       cleanup(home);
     }
+  });
+
+  // The explicit-CODEX_HOME probe renders an element that is EMPTY when
+  // CODEX_HOME is unset or blank. `"$_h/gsd-core/bin/…"` would then collapse to
+  // the filesystem-root probe `/gsd-core/bin/gsd-tools.cjs`, which is a real
+  // directory on some images. This test records the ACTUAL candidate paths the
+  // loop attempts, so the bogus root probe is caught even though `/gsd-core`
+  // does not exist on the test host (an existence probe could never see it).
+  test('unset/empty CODEX_HOME never attempt a filesystem-root /gsd-core candidate', { skip: skipShell }, () => {
+    const attempted = (env) => {
+      const script = [
+        homesPrefix,
+        '_gsd_at() { for _p; do printf \'%s\\n\' "$_p"; done; return 1; }',
+        '_gsd_homes || true',
+      ].join('\n');
+      const result = spawnSync('sh', ['-c', script], {
+        cwd: os.tmpdir(),
+        encoding: 'utf8',
+        timeout: PROBE_TIMEOUT_MS,
+        env: {
+          HOME: '/nonexistent-gsd-home',
+          USERPROFILE: '/nonexistent-gsd-home',
+          PATH: process.env.PATH || '/usr/bin:/bin',
+          ...env,
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.split('\n').filter(Boolean);
+    };
+
+    const claudeCandidate = path.join('/nonexistent-gsd-home', '.claude', 'gsd-core', 'bin', 'gsd-tools.cjs');
+    for (const [label, env] of [['unset', {}], ['empty', { CODEX_HOME: '' }]]) {
+      const paths = attempted(env);
+      assert.ok(paths.length > 0, `${label}: _gsd_homes must still attempt the descriptor homes`);
+      for (const p of paths) {
+        assert.notEqual(p, '/gsd-core/bin/gsd-tools.cjs', `${label}: empty home collapsed to the filesystem-root probe`);
+        assert.ok(!p.startsWith('/gsd-core/'), `${label}: filesystem-root candidate leaked: ${p}`);
+        assert.ok(!p.includes('//'), `${label}: malformed doubled-slash candidate: ${p}`);
+      }
+      assert.equal(paths[0], claudeCandidate, `${label}: claude remains the first real candidate`);
+    }
+
+    // A SET CODEX_HOME is still attempted first, before claude.
+    const codex = path.join(os.tmpdir(), 'gsd-codex-home-fixture');
+    const withCodex = attempted({ CODEX_HOME: codex });
+    assert.equal(
+      withCodex[0],
+      path.join(codex, 'gsd-core', 'bin', 'gsd-tools.cjs'),
+      'an explicit CODEX_HOME must remain the first attempted candidate',
+    );
   });
 });

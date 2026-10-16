@@ -4336,6 +4336,14 @@ describe('init section manifest', () => {
       delete real.section_manifest;
       delete missing.section_manifest;
       delete malformed.section_manifest;
+      // owner_context.generated_at is a per-invocation timestamp (each call
+      // resolves the envelope live), so it is the ONE field that legitimately
+      // differs across two init invocations. Normalise it before the byte
+      // comparison; every other field — including the rest of owner_context —
+      // must still be identical, which is what this gate asserts.
+      for (const bundle of [real, missing, malformed]) {
+        if (bundle.owner_context) bundle.owner_context.generated_at = '<normalized>';
+      }
       assert.deepStrictEqual(missing, real, 'every other init-bundle field must be unaffected by a missing manifest artifact');
       assert.deepStrictEqual(malformed, real, 'every other init-bundle field must be unaffected by a malformed manifest artifact');
     });

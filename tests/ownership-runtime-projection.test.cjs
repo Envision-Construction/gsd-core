@@ -1,0 +1,257 @@
+'use strict';
+
+/**
+ * Ownership-runtime projection, verified against REAL isolated installs.
+ *
+ * The canonical quick/fast/quick-batch sources live in this repo; the runtime
+ * hosts (Claude, OpenCode, Antigravity, Codex, …) receive them through the
+ * existing installer. A marker-only source check cannot prove the emitted
+ * surface actually carries the ownership block, so these tests run the real
+ * installer into a sandboxed HOME and read the emitted files back.
+ *
+ * Gemini note (#1928): the Gemini CLI runtime was removed and `--gemini` is a
+ * redirect stub with no runtime surface; Antigravity CLI is its successor. The
+ * last test pins that so a future "verify Gemini" claim cannot silently pass
+ * against a runtime that does not exist.
+ */
+
+const { test, describe, after } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const {
+  runMinimalInstall,
+  RUNTIME_META,
+  INSTALL_SCRIPT,
+  installerEnv,
+} = require('./helpers/install-shared.cjs');
+const { runNode, runHook } = require('./helpers/process-seam.cjs');
+const { loadPreamble } = require('../scripts/sync-runtime-launcher.cjs');
+const { convertClaudeToCodexMarkdown } = require('../gsd-core/bin/lib/runtime-artifact-conversion.cjs');
+const { cleanup } = require('./helpers.cjs');
+const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+
+const WORKFLOWS = [
+  'gsd-core/workflows/quick.md',
+  'gsd-core/workflows/fast.md',
+  'gsd-core/workflows/quick-batch.md',
+  'gsd-core/workflows/plan-phase.md',
+  'gsd-core/workflows/execute-phase.md',
+];
+// The optional JEV advisory fragment is projected only for the quick/fast/plan/
+// execute carriers.
+const JEV_WORKFLOWS = [
+  'gsd-core/workflows/quick.md',
+  'gsd-core/workflows/fast.md',
+  'gsd-core/workflows/execute-phase.md',
+  'gsd-core/workflows/execute-plan.md',
+];
+const MARKER = /<!-- OWNERSHIP-RUNTIME-PREFLIGHT v(\d+)/;
+const JEV_MARKER = /<!-- JEV-ADVISORY-ENTRY v(\d+)/;
+
+function assertCompleteBlock(text, label) {
+  const m = text.match(MARKER);
+  assert.ok(m, `${label}: ownership-preflight marker absent`);
+  assert.equal(m[1], '4', `${label}: expected the core-authored v4 marker`);
+  assert.ok(text.includes(`<!-- /OWNERSHIP-RUNTIME-PREFLIGHT -->`), `${label}: end marker absent`);
+  assert.ok(text.includes('<ownership_preflight>'), `${label}: open tag absent`);
+  assert.ok(text.includes('</ownership_preflight>'), `${label}: close tag absent`);
+  assert.ok(/gsd_run owner-context preflight/.test(text), `${label}: preflight invocation absent`);
+  assert.ok(text.includes('owner_context_refused'), `${label}: refusal signal absent`);
+  assert.ok(text.includes('Resolve `gsd_run` (this workflow'), `${label}: bootstrap ordering absent`);
+}
+
+// One install per runtime, reused across the assertions below.
+const emitted = new Map();
+
+describe('configured Codex home wins in the emitted resolver', () => {
+  for (const withClaudeHome of [false, true]) {
+    test(`configured Codex home before default and Claude homes (${withClaudeHome})`, () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-codex-home-'));
+      try {
+        const configured = path.join(root, 'custom-codex');
+        const claude = path.join(root, 'custom-claude');
+        const homeRoot = path.join(root, 'home');
+        const project = path.join(root, 'project');
+        fs.mkdirSync(project);
+        for (const home of [configured, claude, path.join(homeRoot, '.codex')]) {
+          const tools = path.join(home, 'gsd-core', 'bin', 'gsd-tools.cjs');
+          fs.mkdirSync(path.dirname(tools), { recursive: true });
+          fs.writeFileSync(tools, 'console.log(JSON.stringify({packageName:"@opengsd/gsd-core"}));');
+        }
+        const env = { PATH: process.env.PATH, HOME: homeRoot, CODEX_HOME: configured, RUNTIME_DIR: project };
+        if (withClaudeHome) env.CLAUDE_CONFIG_DIR = claude;
+        const shell = convertClaudeToCodexMarkdown(loadPreamble().join('\n')) + '\nprintf "%s" "$GSD_TOOLS"';
+        const result = runHook('-c', [shell], { interpreter: 'bash', cwd: project, env });
+        assert.equal(result.exitCode, 0, result.stderr);
+        // Separator-insensitive: on Windows the resolver's bash prints git's
+        // forward-slash form while `path.join` yields backslashes; the path is
+        // the same, so normalize both sides before comparing.
+        const forward = (p) => p.replace(/\\/g, '/');
+        assert.equal(
+          forward(result.stdout),
+          forward(path.join(configured, 'gsd-core', 'bin', 'gsd-tools.cjs')),
+        );
+      } finally {
+        cleanup(root);
+      }
+    });
+  }
+});
+
+function installFor(runtime) {
+  if (emitted.has(runtime)) return emitted.get(runtime);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-ownproj-${runtime}-`));
+  let rec;
+  try {
+    runMinimalInstall({ runtime, scope: 'global', root });
+    rec = {
+      root,
+      base: path.join(root, RUNTIME_META[runtime].globalSuffix),
+    };
+  } catch (err) {
+    cleanup(root);
+    throw err;
+  }
+  emitted.set(runtime, rec);
+  return rec;
+}
+
+// These install roots are OWNED fixtures this file created — clean them up so a
+// full run does not leak six temp trees. A failed-inspection run can preserve
+// them by setting GSD_OWNPROJ_KEEP_ARTIFACTS=1 (the roots are printed).
+after(() => {
+  const keep = process.env.GSD_OWNPROJ_KEEP_ARTIFACTS === '1';
+  for (const rec of emitted.values()) {
+    if (keep) process.stdout.write(`ownership-runtime-projection: kept fixture ${rec.root}\n`);
+    else cleanup(rec.root);
+  }
+  emitted.clear();
+});
+
+describe('ownership-runtime projection reaches real emitted surfaces', () => {
+  test('the installed distribution includes the compiled owner-context module and the dispatch gate', () => {
+    for (const runtime of ['claude', 'opencode', 'antigravity', 'codex', 'cursor', 'pi']) {
+      const { base } = installFor(runtime);
+      const modulePath = path.join(base, 'gsd-core', 'bin', 'lib', 'owner-context.cjs');
+      assert.ok(fs.existsSync(modulePath), `${runtime}: compiled owner-context.cjs not installed`);
+      // allow-test-rule: the installed gsd-tools.cjs IS the product surface under test (#4) — reading the emitted file is the assertion
+      const tools = fs.readFileSync(path.join(base, 'gsd-core', 'bin', 'gsd-tools.cjs'), 'utf8');
+      // allow-test-rule: asserting the emitted dispatch gate is present (#4) — the installed text is the product
+      assert.ok(/assertOwnerContextForWrite/.test(tools),
+        `${runtime}: installed gsd-tools.cjs has no owner-context dispatch gate`);
+      // allow-test-rule: asserting the emitted classifier is present (#4) — the installed text is the product
+      assert.ok(/isMutatingCommand/.test(tools),
+        `${runtime}: installed gsd-tools.cjs has no mutating-command classifier`);
+    }
+  });
+
+  for (const runtime of ['opencode', 'antigravity', 'codex', 'cursor', 'pi']) {
+    test(`${runtime}: emitted quick/fast/quick-batch carry the complete ownership block`, () => {
+      const { base } = installFor(runtime);
+      for (const rel of WORKFLOWS) {
+        const file = path.join(base, rel);
+        assert.ok(fs.existsSync(file), `${runtime}: ${rel} not emitted`);
+        assertCompleteBlock(fs.readFileSync(file, 'utf8'), `${runtime}:${rel}`);
+      }
+    });
+  }
+
+  for (const runtime of ['opencode', 'antigravity', 'codex', 'cursor', 'pi']) {
+    test(`${runtime}: emitted quick/fast/plan/execute carry the JEV advisory fragment, and only those`, () => {
+      const { base } = installFor(runtime);
+      const expected = [...new Set([...WORKFLOWS, ...JEV_WORKFLOWS])];
+      for (const rel of expected) {
+        const file = path.join(base, rel);
+        if (!fs.existsSync(file)) continue;
+        const text = fs.readFileSync(file, 'utf8');
+        const wantJev = JEV_WORKFLOWS.includes(rel);
+        const m = text.match(JEV_MARKER);
+        assert.equal(Boolean(m), wantJev, `${runtime}:${rel}: JEV fragment placement`);
+        if (!wantJev) continue;
+        assert.equal(m[1], '1', `${runtime}:${rel}: JEV fragment version`);
+        assert.ok(
+          text.includes('gsd_run jev-advisory prepare --scenario <id> --entry <'),
+          `${runtime}:${rel}: exact supported prepare spelling`,
+        );
+        assert.ok(text.includes('advisory'), `${runtime}:${rel}: advisory-only authority`);
+        assert.ok(
+          text.indexOf('<!-- JEV-ADVISORY-ENTRY') > text.indexOf('<!-- /OWNERSHIP-RUNTIME-PREFLIGHT -->'),
+          `${runtime}:${rel}: JEV fragment must follow the ownership block`,
+        );
+      }
+    });
+  }
+
+  test('emitted workflow bodies no longer hard-code a root .planning/quick path', () => {
+    for (const runtime of ['opencode', 'antigravity', 'codex', 'cursor', 'pi']) {
+      const { base } = installFor(runtime);
+      for (const rel of WORKFLOWS) {
+        const text = fs.readFileSync(path.join(base, rel), 'utf8');
+        // The one allowed mention is the block's own explanatory sentence
+        // ("A hard-coded `.planning/quick` bypasses …"), which is inside the
+        // ownership block. Strip it, then assert no CODE-shaped literal
+        // remains — prose in <purpose> may still describe where quick tasks
+        // live, but no execution path may read or list the literal dir.
+        const withoutBlock = text.replace(
+          /<!-- OWNERSHIP-RUNTIME-PREFLIGHT[\s\S]{0,4000}?<!-- \/OWNERSHIP-RUNTIME-PREFLIGHT -->/g,
+          '',
+        );
+        for (const bad of [
+          'ls -d .planning/quick',
+          'frontmatter.get .planning/quick',
+          'Plan file: .planning/quick',
+          'Resuming: .planning/quick',
+        ]) {
+          assert.ok(!withoutBlock.includes(bad),
+            `${runtime}:${rel} still reaches a literal path via "${bad}"`);
+        }
+      }
+    }
+  });
+
+  test('installed surfaces: default entry is offline; JEV prepare is the only offline-documented entry path', () => {
+    const orig = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = () => { calls += 1; throw new Error('no network during install/read'); };
+    try {
+      const { base } = installFor('claude');
+      for (const rel of [...new Set([...WORKFLOWS, ...JEV_WORKFLOWS])]) {
+        const file = path.join(base, rel);
+        if (fs.existsSync(file)) fs.readFileSync(file, 'utf8');
+      }
+      for (const rel of JEV_WORKFLOWS) {
+        const file = path.join(base, rel);
+        if (!fs.existsSync(file)) continue;
+        const text = fs.readFileSync(file, 'utf8');
+        assert.match(
+          text,
+          /prepare --scenario <id> --entry <[^>]+>[\s\S]{0,48}OFFLINE/i,
+          `${rel}: the JEV prepare path must be documented OFFLINE`,
+        );
+      }
+    } finally {
+      globalThis.fetch = orig;
+    }
+    assert.equal(calls, 0, 'installing/reading the default entry must make zero provider requests');
+  });
+
+  test('--gemini is a redirect stub: no gemini runtime surface is produced', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ownproj-gemini-'));
+    try {
+      const result = runNode([INSTALL_SCRIPT, '--gemini', '--global'], {
+        cwd: root,
+        env: installerEnv({ HOME: root, USERPROFILE: root }),
+        timeoutMs: INSTALL_TIMEOUT_MS,
+      });
+      assert.notEqual(result.exitCode, 0, '--gemini alone must not silently install');
+      assert.match(result.stderr || '', /Antigravity/i, 'redirect notice names the successor runtime');
+      assert.equal(fs.existsSync(path.join(root, '.gemini', 'commands', 'gsd')), false,
+        'no gemini commands surface is created');
+    } finally {
+      cleanup(root);
+    }
+  });
+});

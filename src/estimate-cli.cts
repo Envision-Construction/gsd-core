@@ -34,6 +34,25 @@ import phaseLocator = require('./phase-locator.cjs');
 import planningScopeMod = require('./planning-scope.cjs');
 
 const { output, error, ERROR_REASON } = io;
+
+/**
+ * Portfolio ownership: bind concrete write targets to the caller's declared
+ * writable scopes BEFORE the first side effect. Enforce refuses a missing /
+ * foreign / stale / out-of-scope descriptor with owner_context_refused; audit
+ * is a no-op.
+ */
+function assertOwnerWriteTargetsBound(cwd: string, targets: string[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- owner-context.cjs is an export= CommonJS module
+  const oc = require('./owner-context.cjs') as typeof import('./owner-context.cjs');
+  try {
+    oc.assertTargetsAuthorized(cwd, targets);
+  } catch (err) {
+    if (err instanceof oc.OwnerContextRefusal) {
+      error('owner-context refused (' + err.verdict + '): ' + err.reasons.join('; '), ERROR_REASON.OWNER_CONTEXT_REFUSED);
+    }
+    throw err;
+  }
+}
 const { planningDir } = planningWorkspace;
 const { CONFIG_DEFAULTS } = configLoader;
 const { listMilestonePhaseDirs } = phaseLocator;
@@ -325,6 +344,7 @@ export function cmdEstimateCalibrate(cwd: string, _args: string[], raw: boolean)
   const calibration = estimation.computeCalibration(samples);
 
   const target = path.join(planningDir(cwd), CALIBRATION_FILENAME);
+  assertOwnerWriteTargetsBound(cwd, [target]);
   let written = true;
   let writeError: string | null = null;
   try {

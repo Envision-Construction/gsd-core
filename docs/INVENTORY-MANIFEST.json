@@ -513,6 +513,7 @@
       "observability/logger.cjs",
       "observability/redaction.cjs",
       "onboard-projection.cjs",
+      "owner-context.cjs",
       "package-identity.cjs",
       "package-legitimacy.cjs",
       "pattern.cjs",
