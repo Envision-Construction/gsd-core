@@ -125,7 +125,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
     ].join('\n');
     const spawned = runNode(['-e', script], {
       cwd,
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
     });
     assert.strictEqual(
       spawned.exitCode, 0,
@@ -147,6 +147,60 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
       ]);
       runEffortSync({ cwd, home, configDir, runtime: 'opencode', dryRun: false });
       const content = fs.readFileSync(filePath, 'utf8');
+      assert.match(content, /^variant: xhigh$/m);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('native 2.x form: the effort suffix on `model:` is rewritten and no `variant:` key is added (#5338)', () => {
+    // OpenCode 2.x carries the effort on the model reference (`provider/model#variant`).
+    const { root, cwd, configDir, agentsDir, home } = makeSandbox();
+    try {
+      writeProjectEffortConfig(cwd, { agent_overrides: { 'gsd-executor': 'xhigh' } });
+      const filePath = writeAgent(agentsDir, 'gsd-executor.md', [
+        '---', 'name: gsd-executor', 'description: x', 'mode: subagent', 'model: anthropic/claude-x#low', '---', '', 'Body.',
+      ]);
+      const result = runEffortSync({ cwd, home, configDir, runtime: 'opencode', dryRun: false });
+      const content = fs.readFileSync(filePath, 'utf8');
+      assert.match(content, /^model: anthropic\/claude-x#xhigh$/m);
+      assert.doesNotMatch(content, /^variant:/m, 'no second effort channel is written');
+      assert.deepStrictEqual(result.changes, [{ agent: 'gsd-executor', from: 'low', to: 'xhigh' }]);
+      // Already in sync: a second run is a no-op.
+      const again = runEffortSync({ cwd, home, configDir, runtime: 'opencode', dryRun: false });
+      assert.strictEqual(again.synced, 0);
+      assert.strictEqual(again.skipped, 1);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('native 2.x form: `inherit` strips the suffix back to the bare model (#5338)', () => {
+    const { root, cwd, configDir, agentsDir, home } = makeSandbox();
+    try {
+      writeProjectEffortConfig(cwd, undefined);
+      const filePath = writeAgent(agentsDir, 'gsd-executor.md', [
+        '---', 'name: gsd-executor', 'description: x', 'mode: subagent', 'model: "anthropic/claude-x#high"', '---', '', 'Body.',
+      ]);
+      runEffortSync({ cwd, home, configDir, runtime: 'opencode', dryRun: false });
+      const content = fs.readFileSync(filePath, 'utf8');
+      assert.match(content, /^model: anthropic\/claude-x$/m);
+      assert.doesNotMatch(content, /#high/);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('a bare model with no suffix keeps using the 1.x `variant:` key (#5338)', () => {
+    const { root, cwd, configDir, agentsDir, home } = makeSandbox();
+    try {
+      writeProjectEffortConfig(cwd, { agent_overrides: { 'gsd-executor': 'xhigh' } });
+      const filePath = writeAgent(agentsDir, 'gsd-executor.md', [
+        '---', 'name: gsd-executor', 'description: x', 'mode: subagent', 'model: anthropic/claude-x', '---', '', 'Body.',
+      ]);
+      runEffortSync({ cwd, home, configDir, runtime: 'opencode', dryRun: false });
+      const content = fs.readFileSync(filePath, 'utf8');
+      assert.match(content, /^model: anthropic\/claude-x$/m);
       assert.match(content, /^variant: xhigh$/m);
     } finally {
       cleanup(root);
@@ -213,7 +267,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -557,7 +611,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
 
       const jsonRun = runNode(['-e', makeScript(false)], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         jsonRun.exitCode, 0,
@@ -575,7 +629,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
 
       const rawRun = runNode(['-e', makeScript(true)], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         rawRun.exitCode, 0,
@@ -622,7 +676,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
 
       const jsonRun = runNode(['-e', makeScript(false)], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         jsonRun.exitCode, 0,
@@ -646,7 +700,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
 
       const rawRun = runNode(['-e', makeScript(true)], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         rawRun.exitCode, 0,
@@ -697,7 +751,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
 
       const jsonRun = runNode(['-e', makeScript(false)], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         jsonRun.exitCode, 0,
@@ -712,7 +766,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
 
       const rawRun = runNode(['-e', makeScript(true)], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         rawRun.exitCode, 0,
@@ -827,7 +881,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -883,7 +937,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -933,7 +987,7 @@ describe('#3706: effort sync maintains OpenCode variant: frontmatter', () => {
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -990,7 +1044,7 @@ describe('#3243: effort sync strips Anthropic-flavored model pins from Codex age
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -1044,7 +1098,7 @@ describe('#3243: effort sync strips Anthropic-flavored model pins from Codex age
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -1092,7 +1146,7 @@ describe('#3243: effort sync strips Anthropic-flavored model pins from Codex age
       ].join('\n');
       const spawned = runNode(['-e', script], {
         cwd,
-        env: { ...process.env, HOME: home, USERPROFILE: home },
+        env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
       });
       assert.strictEqual(
         spawned.exitCode, 0,
@@ -1137,7 +1191,7 @@ describe('#3706: frontmatter line editors are scoped to the matched block', () =
     ].join('\n');
     const spawned = runNode(['-e', script], {
       cwd,
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: { ...process.env, HOME: home, USERPROFILE: home, GSD_HOME: home },
     });
     assert.strictEqual(
       spawned.exitCode, 0,

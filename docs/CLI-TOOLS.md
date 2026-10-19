@@ -108,15 +108,28 @@ node gsd-tools.cjs state update-progress
 node gsd-tools.cjs state add-decision --summary "..." [--phase N] [--rationale "..."]
 # Or from files:
 node gsd-tools.cjs state add-decision --summary-file path [--rationale-file path]
+# Text-file inputs (--summary-file, --rationale-file, --text-file, --note-file) are
+# read once and copied into STATE.md, so any readable regular file of up to 256 KiB is
+# accepted, including one in a temp/scratch directory outside the project; a relative
+# path resolves against the project root. A file that cannot be read, a FIFO, device
+# or directory, a file over 256 KiB, a required field left blank (an empty or
+# whitespace-only --summary, --text or --note, inline or as a file), or a missing
+# STATE.md is refused on stderr with a non-zero exit (reason "usage") and STATE.md is
+# not touched. A blank rationale, inline or file, just means no rationale.
+# (add-decision, add-blocker and add-roadmap-evolution only.)
 
 # Add/resolve blockers
 node gsd-tools.cjs state add-blocker --text "..."
+node gsd-tools.cjs state add-blocker --text-file path
 node gsd-tools.cjs state resolve-blocker --text "..."
 
 # Record session continuity (at least one of --stopped-at / --resume-file is required)
 node gsd-tools.cjs state record-session --stopped-at "..." [--resume-file path]
 
-# Phase start — update STATE.md Status/Last activity for a new phase
+# Phase start — update STATE.md Status/Last activity for a new phase. When some of the phase's plans
+# already have summaries (a gap-closure re-entry), Current Plan and `Plan: N of M` start at the first
+# plan still to run instead of 1, and a **Current focus:** value that wraps onto further lines is
+# replaced whole.
 node gsd-tools.cjs state begin-phase --phase N --name SLUG --plans COUNT
 
 # Agent-discoverable blocker signalling (used by discuss-phase / UI flows)
@@ -900,12 +913,12 @@ Reads the phase's `*-VERIFICATION.md` frontmatter and answers with one member of
 | `passed` | Report says `passed` and its covered-input fingerprint is current | `""` (continue) |
 | `gaps_found` | Report says `gaps_found` | `plan-phase` (`next_command` carries `--gaps`) |
 | `human_needed` | Report says `human_needed` | `verify-work` |
-| `stale` | Covered source changed after the verifier ran | `execute-phase` (its shared verification step re-runs the verifier) |
+| `stale` | Covered source changed after the verifier ran, or (older v1/v2 reports) a current plan/summary was never declared in `covered_files` | `execute-phase` (its shared verification step re-runs the verifier) |
 | `missing` | Phase directory exists but holds no report, or the report has no `status` | `execute-phase` (resumes at the verification gates) |
 | `unparseable` | The report's frontmatter is not YAML | `""` (fix the report itself) |
 | `phase_dir_not_found` | There is no phase directory at that path | `""` (a usage error — see below) |
 
-The JSON result carries `status`, `next_action`, `next_command` (the route projected for the project's runtime, for example `/gsd-execute-phase 3` or `$gsd-execute-phase 3` on Codex), and — additive since #5118 — `route`, the bare command from the same table entry, so the two can never disagree. `message` is present only where a usage error needs one. `staleCheckIndeterminate` is unchanged. The `init *` bundles expose the same bare command as `verification_route` beside `verification_next_command`, and each `planning inspect` phase carries `verification.route` beside `verification.status`.
+The JSON result carries `status`, `next_action`, `next_command` (the route projected for the project's runtime, for example `/gsd-execute-phase 3` or `$gsd-execute-phase 3` on Codex), and — additive since #5118 — `route`, the bare command from the same table entry, so the two can never disagree. `message` is present only where a usage error needs one. `uncovered_artifacts` (#4817) is present only on a `stale` result for an older v1/v2 report that never declared some current plan or summary in `covered_files`: it lists those file names, and `next_action` names them and says whether a covered file also changed, so "a covered file changed" and "an artifact was never covered" read differently. The remedy and route are the same. A report written by the current fingerprint verb (v3) cannot reach that state: it covers the phase's own artifacts itself. `moved_files` (#4857) is present on a `stale` result whose digest moved and names the declared covered files modified after the report was written (by clean commit time, or mtime for an uncommitted edit; report paths and shared planning documents are excluded exactly as the digest excludes them), so an edit to a covered file reads differently from a missing artifact or a self-covering report. It is advisory: the digest alone decides staleness, and a stale report that carries no `moved_files` was not invalidated by an edit to a file it covers. `staleCheckIndeterminate` is unchanged. The `init *` bundles expose the same bare command as `verification_route` beside `verification_next_command`, and each `planning inspect` phase carries `verification.route` beside `verification.status`.
 
 - **`phase_dir_not_found`** is a usage error, not a verification state: nothing was there to look in (a dangling symlink and a path that is a regular file both read this way). It has no next command — re-running `execute-phase` could re-run a phase already archived under `.planning/milestones/`. Resolve the directory with `find-phase`.
 - **`unknown` no longer exists.** A `status` outside the set used to route as `unknown` to `execute-phase`; that is now the hard error below, and no command emits `unknown`.

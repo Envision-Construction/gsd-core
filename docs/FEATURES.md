@@ -1296,7 +1296,7 @@ fix(03-01): correct auth token expiry
 - Codex emits `service_tier: flex` for light-tier agents; GSD skills appear in the Codex `/skills` picker via `SKILL.md` (no `agents/openai.yaml` sidecar is emitted — doing so caused duplicate autocomplete entries, #1326)
 
 **Native packaging:**
-- **Claude Code:** GSD Core ships a `.claude-plugin/plugin.json` manifest, enabling installation and lifecycle management via `claude plugin install|enable|disable|update gsd-core`. Commands load under the `/gsd-core:` namespace (e.g. `/gsd-core:plan-phase`), avoiding slash-command collisions with the classic npm installer which uses `/gsd:`. Always-on guard and update hooks are wired automatically via `hooks/hooks.json`. The plugin path is additive — the npm installer (`npx @opengsd/gsd-core`) remains fully supported.
+- **Claude Code:** GSD Core ships a `.claude-plugin/plugin.json` manifest, enabling installation and lifecycle management via `claude plugin install|enable|disable|update gsd-core`. Workflows load as skills under the `/gsd-core:` namespace (e.g. `/gsd-core:gsd-plan-phase`), avoiding slash-command collisions with the classic npm installer which uses `/gsd:`. Each workflow is registered once, as its `gsd-<name>` skill — the same name workflows use to invoke one another — so the always-on listing carries no duplicate entries (#4860). Always-on guard and update hooks are wired automatically via `hooks/hooks.json`. The plugin path is additive — the npm installer (`npx @opengsd/gsd-core`) remains fully supported.
 
 ---
 
@@ -1311,7 +1311,7 @@ fix(03-01): correct auth token expiry
 - REQ-HOOK-04: All hooks MUST respect `CLAUDE_CONFIG_DIR` env var
 - REQ-HOOK-05: All hooks MUST include 3-second stdin timeout guard
 - REQ-HOOK-06: All hooks MUST fail silently on any error
-- REQ-HOOK-07: Context usage MUST normalize for autocompact buffer (16.5% reserved)
+- REQ-HOOK-07: The context meter's 100% MUST be the token count at which Claude Code auto-compacts — the window from `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else the `autoCompactWindow` setting `/autocompact` saves (per model under `modelSettings`, or top-level), else the model window, minus the 33k auto-compact buffer and lowered by `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` — and MUST be the model window when auto-compact is off (`autoCompactEnabled: false` in settings, or `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT`). The bridge's `remaining_percentage` MUST count down to the same point, so the context monitor warns before compaction
 - REQ-HOOK-08: Update banner MUST be opt-in and silent unless an update is available (PR #2795)
 
 **Statusline Display:**
@@ -2302,6 +2302,8 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 - REQ-COMMUNITY-03: `gsd-session-state.sh` MUST track session state transitions
 - REQ-COMMUNITY-04: `gsd-phase-boundary.sh` MUST enforce phase boundary checks
 
+**Hosts:** Claude Code and the other settings-file runtimes register these hooks natively. On OpenCode (1.x and 2.x) the GSD plugin runs `gsd-validate-commit.sh` (before `bash`/`shell` calls), `gsd-phase-boundary.sh` (after `write`/`edit`) and `gsd-session-state.sh` (once per session, handed to the model with its first request); `gsd-graphify-update.sh` runs after `bash`/`shell` calls when `graphify.auto_update` is on. Kilo does not run them.
+
 **Config:**
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -2968,8 +2970,8 @@ With `features.global_learnings: true`, phase completion runs the extraction for
 
 `check tdd-red-evidence` selects a parser by the captured report format. Node's
 built-in runner and Vitest (`tap` and `tap-flat`) share the TAP adapter; Maven
-Surefire and Failsafe share the JUnit XML adapter; `swift test` (swift-testing)
-and Python `unittest` text output have their own adapters. The command name does not
+Surefire and Failsafe share the JUnit XML adapter; `swift test` (swift-testing),
+Python `unittest` and `go test` text output have their own adapters. The command name does not
 select or bypass validation. Reports from other producers can use these same
 formats. Unsupported or malformed reports return `INVALID_RED` with
 `evidence.report_errors`; configure a supported reporter before proceeding.
@@ -2983,7 +2985,8 @@ No runner-specific TAP summary counters are required.
 The gate rejects incomplete plans/documents, bailouts, skipped/TODO/cancelled targets,
 and ambiguous names. Qualify repeated TAP names with their suite path, and
 repeated JUnit class names with their package, and repeated `unittest` methods
-with their `module.Class.method` id. A swift-testing target is its display name
+with their `module.Class.method` id, and a `go test` name that fails in two packages
+with `import/path.TestName`. A swift-testing target is its display name
 or its function name; repeated swift-testing names cannot be qualified and
 block GREEN. Evidence counts are individual
 tests, excluding suite-closing TAP points; a `unittest` method with failing
@@ -2991,6 +2994,16 @@ subTests or a parameterized swift-testing test counts once. `evidence.matched_te
 persisted `failing_test` identify the target failure rather than an unrelated
 first failure. Report freshness and whether the assertion tests the intended
 behavior still require executor inspection; the parser cannot establish them.
+
+A `go test` package that does not compile or load (`FAIL <pkg> [build failed]` or
+`[setup failed]`) asserted nothing, usually because the test names a symbol that does
+not exist yet. The whole run is refused as `build_failure`, ahead of the generic
+`invalid_record`, even if another package genuinely failed.
+
+Which paths count as test files is one list, `src/tdd-test-files.cts`, shared by the
+behavior-adding check and the RED-commit pathspec in `execute-phase.md` (a test pins the
+two together): `*.test.*`, `*.spec.*`, `tests/` or `test/` and `__tests__/` directories,
+`*_test.go`, `test_*.py`, `*_test.py`, `*_test.exs`, `*_spec.rb` and `*_test.rb`.
 
 The upstream parsers (`tap-parser` and `saxes`) ship as reproducible bundles,
 including license notices, so installed runtimes need no `node_modules`.

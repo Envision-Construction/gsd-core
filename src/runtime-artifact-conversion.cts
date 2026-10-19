@@ -309,6 +309,60 @@ function buildKiloAgentPermissionBlock(claudeTools) {
   return lines;
 }
 
+// OpenCode agent tool restrictions (#5338, ADR-5331 D4). Claude's `tools:` allowlist and
+// `disallowedTools:` denylist become OpenCode `permission:` entries. The V1 `permission` form is the one
+// written because OpenCode 2.x translates it automatically ("legacy agent frontmatter … is translated"),
+// so one form serves both generations — verified: a `permission: {edit: deny, bash: deny}` agent drops the
+// edit/write/shell tools from the model's tool list on 1.18.29 and 2.0.27. Only denials are emitted: an
+// allowed tool keeps the user's own configured default instead of being forced to `allow`, and MCP tool
+// entries are not restricted.
+const claudeToOpencodePermission = {
+  Read: 'read',
+  Write: 'edit',
+  Edit: 'edit',
+  MultiEdit: 'edit',
+  NotebookEdit: 'edit',
+  Bash: 'bash',
+  Grep: 'grep',
+  Glob: 'glob',
+  WebFetch: 'webfetch',
+  WebSearch: 'websearch',
+  Task: 'task',
+  Agent: 'task',
+  Skill: 'skill',
+  SlashCommand: 'skill',
+  TodoWrite: 'todowrite',
+};
+
+const opencodeAgentPermissionOrder = ['read', 'edit', 'bash', 'grep', 'glob', 'webfetch', 'websearch', 'task', 'skill', 'todowrite'];
+
+/**
+ * `permission:` frontmatter lines for an OpenCode agent, or `[]` when the agent declares no tool
+ * restriction (an agent with neither `tools` nor `disallowedTools` inherits everything, as in Claude).
+ */
+function buildOpencodeAgentPermissionBlock(allowedTools, disallowedTools) {
+  const allowed = new Set<string>();
+  for (const tool of allowedTools) {
+    const mapped = claudeToOpencodePermission[tool];
+    if (mapped) allowed.add(mapped);
+  }
+  const denied = new Set<string>();
+  if (allowedTools.length > 0) {
+    for (const permission of opencodeAgentPermissionOrder) {
+      if (!allowed.has(permission)) denied.add(permission);
+    }
+  }
+  for (const tool of disallowedTools) {
+    const mapped = claudeToOpencodePermission[tool];
+    if (mapped) denied.add(mapped);
+  }
+  const lines = [];
+  for (const permission of opencodeAgentPermissionOrder) {
+    if (denied.has(permission)) lines.push(`  ${permission}: deny`);
+  }
+  return lines.length > 0 ? ['permission:', ...lines] : [];
+}
+
 function replaceRelativePathReference(content, fromPath, toPath) {
   const escapedPath = escapeRegExp(fromPath);
   return content.replace(
@@ -2079,7 +2133,11 @@ function convertClaudeToOpencodeFrontmatter(content, { isAgent = false, modelOve
   const newLines = [];
   let inAllowedTools = false;
   let inSkippedArray = false;
+  let inAgentTools = false;
+  let inDisallowedTools = false;
   const allowedTools = [];
+  const agentTools = [];
+  const agentDisallowed = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -2095,11 +2153,30 @@ function convertClaudeToOpencodeFrontmatter(content, { isAgent = false, modelOve
       continue;
     }
 
+    // Agents: collect the `tools:` allowlist and `disallowedTools:` denylist (block-list continuation
+    // lines) so they can be rendered as `permission:` entries below.
+    if (isAgent && (inAgentTools || inDisallowedTools)) {
+      if (trimmed.startsWith('- ')) {
+        const tool = decodeToolScalar(trimmed.substring(2));
+        if (tool !== null) (inAgentTools ? agentTools : agentDisallowed).push(tool);
+        continue;
+      }
+      if (trimmed && !trimmed.startsWith('-')) {
+        inAgentTools = false;
+        inDisallowedTools = false;
+      }
+    }
+
     // Detect inline tools: field (comma-separated string)
     if (trimmed.startsWith('tools:')) {
       if (isAgent) {
-        // Agents: strip tools entirely (not supported in OpenCode agent frontmatter)
-        inSkippedArray = true;
+        const toolsValue = trimmed.substring(6).trim();
+        // A comment-only value (`tools: # note`) is not inline content: read the block list instead.
+        if (toolsValue && !toolsValue.startsWith('#')) {
+          agentTools.push(...splitToolScalars(toolsValue).map(decodeToolScalar).filter((tool) => tool !== null));
+        } else {
+          inAgentTools = true;
+        }
         continue;
       }
       const toolsValue = trimmed.substring(6).trim();
@@ -2111,8 +2188,18 @@ function convertClaudeToOpencodeFrontmatter(content, { isAgent = false, modelOve
       continue;
     }
 
-    // For agents: strip skills:, color:, memory:, maxTurns:, permissionMode:, disallowedTools:
-    if (isAgent && /^(skills|color|memory|maxTurns|permissionMode|disallowedTools):/.test(trimmed)) {
+    if (isAgent && trimmed.startsWith('disallowedTools:')) {
+      const value = trimmed.substring(16).trim();
+      if (value && !value.startsWith('#')) {
+        agentDisallowed.push(...splitToolScalars(value).map(decodeToolScalar).filter((tool) => tool !== null));
+      } else {
+        inDisallowedTools = true;
+      }
+      continue;
+    }
+
+    // For agents: strip skills:, color:, memory:, maxTurns:, permissionMode:
+    if (isAgent && /^(skills|color|memory|maxTurns|permissionMode):/.test(trimmed)) {
       inSkippedArray = true;
       continue;
     }
@@ -2201,6 +2288,7 @@ function convertClaudeToOpencodeFrontmatter(content, { isAgent = false, modelOve
     if (variant) {
       newLines.push(frontmatterScalar('variant:', variant));
     }
+    newLines.push(...buildOpencodeAgentPermissionBlock(agentTools, agentDisallowed));
   }
 
   // For commands: add tools object if we had allowed-tools or tools
@@ -3044,8 +3132,13 @@ function computePathPrefix({
   // See DEFECT.WINDOWS-PATH-LEAK-IN-MARKDOWN-CONTENT in CONTEXT.md.
   const posixTarget = posixNormalize(String(resolvedTarget));
   const posixHome = homeDir ? posixNormalize(String(homeDir)) : homeDir;
-  if (isGlobal && posixTarget.startsWith(posixHome) && !isOpencode) {
-    return '$HOME' + posixTarget.slice(posixHome.length) + '/';
+  // #5123: `startsWith` alone treats a SIBLING directory whose name begins with
+  // the home path (`/home/u2/cfg` under `/home/u`) as under home and yields the
+  // broken `$HOMEu2/cfg/`. Require a path boundary.
+  const underHome = typeof posixHome === 'string' && posixHome.length > 0
+    && (posixTarget === posixHome || posixTarget.startsWith(posixHome.endsWith('/') ? posixHome : `${posixHome}/`));
+  if (isGlobal && underHome && !isOpencode) {
+    return '$HOME' + posixTarget.slice(posixHome.length).replace(/^(?!\/)(?=.)/, '/') + '/';
   }
   if (!isGlobal && projectRelative) {
     // An explicit local config dir need not be the descriptor's conventional
@@ -3057,6 +3150,48 @@ function computePathPrefix({
     if (relative) return relative;
   }
   return `${posixTarget}/`;
+}
+
+/**
+ * #5123: retarget an installed artifact's `@` includes to the REAL install root.
+ * Driven by the runtime descriptor's hostBehaviors, never by a runtime name:
+ *
+ * - `defaultHomeIncludeRoot` (Copilot, Antigravity): their converters hard-code
+ *   the DEFAULT home into includes, so with `--config-dir` the payload lives
+ *   elsewhere and `@~/<root>/gsd-core/…` points at nothing. `@~/<root>/` and
+ *   `@$HOME/<root>/` become `@<pathPrefix>`. A default install (pathPrefix is
+ *   already `$HOME/<root>/`) is returned unchanged, so it stays byte-identical.
+ * - `retargetsGsdCoreProsePath` (Kimi): Kimi has no `@` include, so its prompt
+ *   converter turns `~/.claude/gsd-core` into the prose "GSD core", leaving
+ *   `@GSD core/x.md` pointing nowhere. A `GSD core/<path>` reference followed
+ *   by a path segment becomes the real `<pathPrefix>gsd-core/<path>`, with the
+ *   unsupported `@` dropped. Bare prose "GSD core" is not followed by `/`.
+ *
+ * `pathPrefix` is the install root as computePathPrefix derives it
+ * (`$HOME/…/` under HOME, otherwise absolute), with a trailing slash. Pure and
+ * idempotent: a second pass finds none of the literals it rewrites.
+ */
+function retargetInstalledIncludes(
+  content: string,
+  behaviors: { defaultHomeIncludeRoot?: unknown; retargetsGsdCoreProsePath?: unknown } | null | undefined,
+  pathPrefix: string,
+): string {
+  if (typeof content !== 'string' || content.length === 0) return content;
+  if (typeof pathPrefix !== 'string' || !pathPrefix.endsWith('/')) return content;
+  if (!behaviors) return content;
+  let result = content;
+
+  if (behaviors.retargetsGsdCoreProsePath === true) {
+    result = result.replace(/@?GSD core\/(?=[a-z])/g, `${pathPrefix}gsd-core/`);
+  }
+
+  const home = behaviors.defaultHomeIncludeRoot;
+  if (typeof home === 'string' && home.length > 0 && pathPrefix !== `$HOME/${home}/`) {
+    result = result
+      .split(`@~/${home}/`).join(`@${pathPrefix}`)
+      .split(`@$HOME/${home}/`).join(`@${pathPrefix}`);
+  }
+  return result;
 }
 
 /** Return a safe project-relative prefix for a resolved install target. */
@@ -4088,6 +4223,7 @@ export = {
   convertClaudeToOpencodeFrontmatter,
   convertClaudeToKiloFrontmatter,
   _decodeToolScalar: decodeToolScalar,
+  _buildOpencodeAgentPermissionBlock: buildOpencodeAgentPermissionBlock,
   _splitToolScalars: splitToolScalars,
   readGsdCommandNames,
   transformContentToHyphen,
@@ -4155,4 +4291,6 @@ export = {
   _negotiatedDispatchIsolation,
   // #1521: canonical non-Claude runtime list for test files and tooling
   NON_CLAUDE_RUNTIMES,
+  // #5123: post-install include retarget (config-dir aware; Kimi prose path)
+  retargetInstalledIncludes,
 };

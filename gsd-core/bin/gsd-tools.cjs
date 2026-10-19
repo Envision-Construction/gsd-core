@@ -312,6 +312,7 @@ try {
 } catch { /* advisory — never block */ }
 
 const { resolveActiveWorkstream, applyResolvedWorkstreamEnv, peekActiveWorkstream } = require('./lib/active-workstream-store.cjs');
+const { planningDir, planningRoot } = require('./lib/planning-workspace.cjs');
 const state = require('./lib/state.cjs');
 const phase = require('./lib/phase.cjs');
 const roadmap = require('./lib/roadmap.cjs');
@@ -1445,8 +1446,12 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // Silent no-op when the section is absent or the table is already canonical
     // — the quick/fast workflows call this before their first append, so the
     // migration runs exactly once, on the first quick run, unprompted otherwise.
-    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    const planningPath = planningDir(cwd);
+    const statePath = path.join(planningPath, 'STATE.md');
     if (!fs.existsSync(statePath)) {
+      if (planningPath !== planningRoot(cwd)) {
+        throw new ExitError(1, `quick-tasks-migrate: STATE.md not found at ${statePath}`);
+      }
       output({ ok: true, migrated: false, reason: `STATE.md not found at ${statePath}` }, raw);
       return;
     }
@@ -1519,7 +1524,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             || (qtaQuickId && qtaSlug ? `[${qtaQuickId}-${qtaSlug}](./quick/${qtaQuickId}-${qtaSlug}/)` : undefined);
           const qtaStatus = qtaParsed['status'] || undefined;
 
-          const statePath = path.join(cwd, '.planning', 'STATE.md');
+          const statePath = path.join(planningDir(cwd), 'STATE.md');
           if (!fs.existsSync(statePath)) {
             error(`quick-tasks-append: STATE.md not found at ${statePath}`, ERROR_REASON.USAGE);
           }
@@ -1593,7 +1598,16 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     const fsx = require('node:fs');
     const os = require('node:os');
     const { REVIEWER_LANES, mergeReviewerLanes } = require('./lib/review-lane-descriptor.cjs');
-    const { resolveLanePlan, resolveLaneEffort, resolveLaneBudget } = require('./lib/review-lane-invocation.cjs');
+    const { resolveLanePlan: resolveLanePlanBase, resolveLaneEffort, resolveLaneBudget, applyPromptOverride } = require('./lib/review-lane-invocation.cjs');
+    // OpenCode 2.x argv differs from 1.x (no --variant; effort rides on the model as `#variant`;
+    // ADR-5331 D5/D8). The generation is probed lazily, only when the opencode lane is resolved.
+    const resolveLanePlan = (laneInput) => {
+      if (!laneInput || !laneInput.lane || laneInput.lane.slug !== 'opencode') return resolveLanePlanBase(laneInput);
+      const ocv = require('./lib/opencode-version.cjs');
+      const adapted = ocv.adaptLaneInputForGeneration(laneInput, ocv.detectOpencodeGeneration().generation);
+      for (const w of adapted.warnings) process.stderr.write('gsd: ' + w + '\n');
+      return ocv.adaptLanePlanForGeneration(resolveLanePlanBase(adapted.input), ocv.detectOpencodeGeneration().generation);
+    };
     const modelCatalog = require('./lib/model-catalog.cjs');
     const runner = require('./lib/review-lane-runner.cjs');
     const cfgLoader = require('./lib/config-loader.cjs');
@@ -1936,7 +1950,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       const dispatchResult = await dispatchReviewerLanes(
         {
           trait,
-          selection: { explicitFlags, detected: rosterSlugs },
+          selection: { explicitFlags, detected: rosterSlugs, lanes: mergedLanes },
           repoRoot,
           paths,
           depth,
@@ -2088,14 +2102,11 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     }
 
     // `--prompt-file` lets the caller substitute a budget-trimmed prompt. Applied to whichever
-    // channel this lane actually reads from, so one flag serves both transports.
+    // channel this lane actually reads from (stdin, argv, an argv-embedded file reference, or the
+    // http promptPath), so one flag serves every lane (#5049).
     const promptOverride = flag('--prompt-file');
     if (promptOverride) {
-      if (entry.plan.transport === 'spawn') {
-        if (entry.plan.stdin) entry.plan.stdin = promptOverride;
-      } else {
-        entry.plan.promptPath = promptOverride;
-      }
+      entry.plan = applyPromptOverride(entry.plan, promptOverride, repoRoot);
     }
 
     // ADR-2782 D5 rule 4: re-resolve the consented destination at INVOCATION. `undefined` (no
@@ -2675,8 +2686,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
               'gsd-executor', readGsdEffectiveModelOverrides(cwd), null);
             model = resolveDispatchModelPin('gsd-executor', pinned);
           }
+          let orchestratorExec = runtimeEntry?.runtime?.orchestratorExec;
+          if (orchestratorExec && orchestratorExec.cwdFlag === '--dir' && runtimeId === 'opencode') {
+            // OpenCode 2.x `run` has no --dir: bind the worktree through the process cwd (ADR-5331 D5).
+            const ocv = require('./lib/opencode-version.cjs');
+            orchestratorExec = ocv.adaptOrchestratorExecForGeneration(orchestratorExec, ocv.detectOpencodeGeneration().generation);
+          }
           const resolution = hostIntegration.resolveOrchestratorExec(
-            runtimeEntry?.runtime?.orchestratorExec,
+            orchestratorExec,
             cwdTarget,
             promptArg,
             model,
@@ -3007,7 +3024,12 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           const jsonIdx = args.indexOf('--json');
           const agentSkillsJsonMode = jsonIdx !== -1;
           if (agentSkillsJsonMode) args.splice(jsonIdx, 1);
-          init.cmdAgentSkills(cwd, args[1], raw, agentSkillsJsonMode);
+          // #5122: the agent's own self-load asks for configured skills only,
+          // never the persona fallback served to orchestrator-side injection.
+          const skillsOnlyIdx = args.indexOf('--skills-only');
+          const agentSkillsOnly = skillsOnlyIdx !== -1;
+          if (agentSkillsOnly) args.splice(skillsOnlyIdx, 1);
+          init.cmdAgentSkills(cwd, args[1], raw, agentSkillsJsonMode, agentSkillsOnly);
   }
 
   function routeSkillManifest({ args, cwd, raw, error }) {

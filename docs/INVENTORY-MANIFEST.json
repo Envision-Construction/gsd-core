@@ -491,9 +491,11 @@
       "installer-migrations/008-cursor-retire-commands-surface.cjs",
       "installer-migrations/009-pi-retire-reserved-hooks-dir.cjs",
       "installer-migrations/010-antigravity-retire-confighome-artifacts.cjs",
+      "installer-migrations/011-opencode-mcp-no-prompts.cjs",
       "intel-command-router.cjs",
       "intel.cjs",
       "io.cjs",
+      "jsonc-edit.cjs",
       "learnings.cjs",
       "legacy-cleanup.cjs",
       "loop-host-contract.cjs",
@@ -513,6 +515,8 @@
       "observability/logger.cjs",
       "observability/redaction.cjs",
       "onboard-projection.cjs",
+      "opencode-mcp-entry.cjs",
+      "opencode-version.cjs",
       "package-identity.cjs",
       "package-legitimacy.cjs",
       "pattern.cjs",
@@ -593,6 +597,7 @@
       "task-command-router.cjs",
       "task-content-resolution.cjs",
       "tdd-red-evidence.cjs",
+      "tdd-test-files.cjs",
       "teams-status.cjs",
       "template.cjs",
       "text-lines.cjs",
@@ -710,6 +715,7 @@
       "new-project/steps/auto-mode-detection.md",
       "new-project/steps/codebase-map-offer.md",
       "plan-phase/steps/adr-ingest-express-path.md",
+      "plan-phase/steps/auto-advance-check.md",
       "plan-phase/steps/chunked-planning-mode.md",
       "plan-phase/steps/closed-phase-gate.md",
       "plan-phase/steps/prd-express-gate.md",
@@ -751,6 +757,7 @@
       "verify-work/detail/elaboration.md"
     ],
     "workflow_templates": [
+      "autonomous/templates/minimal-context.md",
       "discuss-phase/templates/context.md",
       "discuss-phase/templates/discussion-log.md"
     ]

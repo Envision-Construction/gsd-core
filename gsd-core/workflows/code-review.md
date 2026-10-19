@@ -19,6 +19,10 @@ Read all files referenced by the invoking prompt's execution_context before star
 Parse arguments and load project state:
 
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
 _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { set -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}" "$HOME/.gemini/antigravity-ide" "$HOME/.gemini/antigravity-cli" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}" "${CLINE_CONFIG_DIR:-$HOME/.cline}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}" "${CODEX_HOME:-$HOME/.codex}" "${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}" "${HERMES_HOME:-$HOME/.hermes}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}" "${KIMI_CONFIG_DIR:-$HOME/.config/agents}" "$HOME/.agents" "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}" "${TRAE_CONFIG_DIR:-$HOME/.trae}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}" "${ZCODE_CONFIG_DIR:-$HOME/.zcode}" "${GROK_AGENTS_HOME:-$HOME/.agents}"; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 PHASE_ARG="${1}"
 
@@ -47,7 +51,7 @@ FILES_OVERRIDE=$(echo "$FLAGS_JSON" | node -e "process.stdout.write(JSON.parse(r
 FIX_PARAM=""
 if [ "$FIX_FLAG" = "true" ]; then FIX_PARAM="--fix"; fi
 
-GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
 INIT=$(gsd_run query init.code-review ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE_ARG}" $FIX_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_REVIEWER=$(gsd_run query agent-skills gsd-code-reviewer ${GSD_WS:+--ws=${GSD_WS##* }})
@@ -750,6 +754,19 @@ if [ -n "$FALLOW_JSON_PATH" ] && [ -f "$FALLOW_JSON_PATH" ]; then
 fi
 ```
 
+Gather the capability review rules addressed to this reviewer (#4790): active `contribution` hooks with `into: code-reviewer`,
+read from the loop point the review step is registered at (`workflow.code_review_point`, default `execute:post`). This is
+advisory by construction: any failure leaves the prompt without them and never blocks the review. The fragments are handed over once,
+below, beside — never instead of — `${AGENT_SKILLS_REVIEWER}`:
+```bash
+REVIEWER_POINT=$(gsd_run query config-get workflow.code_review_point --raw 2>/dev/null) || REVIEWER_POINT="execute:post"
+case "$REVIEWER_POINT" in execute:post|execute:wave:post) ;; *) REVIEWER_POINT="execute:post" ;; esac
+REVIEWER_HOOKS_JSON=$(gsd_run loop render-hooks "${REVIEWER_POINT}" --raw 2>/dev/null) || REVIEWER_HOOKS_JSON=""
+if [[ "$REVIEWER_HOOKS_JSON" == @file:* ]]; then REVIEWER_HOOKS_JSON=$(cat "${REVIEWER_HOOKS_JSON#@file:}" 2>/dev/null || true); fi
+# A literal closing tag inside a fragment is escaped so third-party text cannot end the block early.
+REVIEWER_CONTRIBUTIONS=$(printf '%s' "$REVIEWER_HOOKS_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const h=(JSON.parse(s).activeHooks||[]).filter(x=>x&&x.kind==="contribution"&&x.into==="code-reviewer"&&x.fragment&&typeof x.fragment.inline==="string"&&x.fragment.inline!=="").map(x=>x.fragment.inline.split("</capability_review_rules>").join("<\\/capability_review_rules>"));if(h.length)process.stdout.write("<capability_review_rules>\n"+h.join("\n\n")+"\n</capability_review_rules>")}catch(e){}})' 2>/dev/null || true)
+```
+
 Spawn the gsd-code-reviewer agent:
 
 Print: `◆ Spawning code reviewer... (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)`
@@ -783,7 +800,9 @@ ${CONFIG_FILES}
 
 Review the listed source files at ${REVIEW_DEPTH} depth. Write findings to ${REVIEW_PATH}.
 Do NOT commit the output — the orchestrator handles that.
-${AGENT_SKILLS_REVIEWER}")
+${AGENT_SKILLS_REVIEWER}
+
+${REVIEWER_CONTRIBUTIONS}")
 ```
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.

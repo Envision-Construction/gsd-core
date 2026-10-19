@@ -68,6 +68,202 @@ function assertBlocked(r, label, { code = 'secret-read', tool, path: expectedPat
   return out;
 }
 
+describe('gsd-secret-read-guard: command-valued git config (#5045)', () => {
+  // Oracle: #5045 requires the two reported command strings to get the same
+  // secret-read verdict as a direct shell script. Adjacent syntax comes from
+  // git(1)'s -c option, not from the guard's parser or current output.
+  const blocks = [
+    ["git -c alias.x='!cat .env' x", '.env'],
+    ["git -c diff.external='cat .env' diff", '.env'],
+    ["git.exe -c alias.x='!cat .env' x", '.env'],
+    ["GIT.EXE -c diff.external='cat .env' diff", '.env'],
+    ['"C:/Program Files/Git/bin/git.exe" -c alias.x=\'!cat .env\' x', '.env'],
+    ["git --literal-pathspecs -c alias.x='!cat .env' x", '.env'],
+    ["git --glob-pathspecs -c alias.x='!cat .env' x", '.env'],
+    ["git --noglob-pathspecs -c diff.external='cat .env' diff", '.env'],
+    ["git --icase-pathspecs -c diff.external='cat .env' diff", '.env'],
+    ["git --exec-path=. -c alias.x='!cat .env' x", '.env'],
+    ["git --attr-source=HEAD -c diff.external='cat .env' diff", '.env'],
+    ["git --attr-source HEAD -c alias.x='!cat .env' x", '.env'],
+    ["git -c alias.x='!echo safe' show HEAD:.env", 'HEAD:.env'],
+    ["git -c user.name=Example show HEAD:.env", 'HEAD:.env'],
+    ["git -c ALIAS.X='!cat .env' x", '.env'],
+    ["git -c DiFf.ExTeRnAl='cat .env' diff", '.env'],
+    ["git -c alias.x='!cat config/.env.production' x", 'config/.env.production'],
+    ["git -c diff.external='cat .secrets' diff", '.secrets'],
+    ["git -C repo --no-pager -c alias.x='!cat .env' x", '.env'],
+    ["git --git-dir=repo/.git -c diff.external='cat .env' diff", '.env'],
+    ["git --work-tree repo -c alias.x='!cat .env' x", '.env'],
+    ["git --config-env=user.name=GIT_NAME -c alias.x='!cat .env' x", '.env'],
+    ["git -c user.name=Example -c alias.x='!cat .env' x", '.env'],
+    ["git -c alias.x='!echo safe' -c alias.x='!cat .env' x", '.env'],
+    ["git -c alias.x='!echo safe' -c diff.external='cat .env' diff", '.env'],
+    ["git -c alias.x='!echo safe; cat .env' x", '.env'],
+    ["git -c alias.x='!bash -c \"cat .env\"' x", '.env'],
+    ["git -c diff.external='cat < .env' diff", '.env'],
+    // --shallow-file <path> is a hidden git global option (git.c
+    // handle_options); git 2.49 runs the alias behind it.
+    ["git --shallow-file x -c alias.x='!cat .env' x", '.env'],
+    // An option the walker does not know has an unknown arity, so the -c scan
+    // must keep going past it, and past a word that may be its value.
+    ["git --frobnicate -c alias.x='!cat .env' x", '.env'],
+    ["git --frobnicate value -c diff.external='cat .env' diff", '.env'],
+    ["git --frobnicate -c user.name=Example -c alias.x='!cat .env' x", '.env'],
+    // ...while the #4856 pathspec exemption still withdraws behind it.
+    ['git --frobnicate ls-files --error-unmatch .env', '.env'],
+    ["env TRACE=on git -c alias.x='!cat .env' x", '.env'],
+    ["cd repo && git -c alias.x='!cat .env' x", '.env'],
+    ["git -c alias.x='!cat .env' ls-files .env", '.env'],
+    ["git -c diff.external='cat .env' diff\r\n", '.env'],
+  ];
+  for (const [cmd, expectedPath] of blocks) {
+    test(`blocks ${JSON.stringify(cmd)}`, () => {
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: expectedPath });
+    });
+  }
+
+  const allows = [
+    'git status',
+    "git -c core.pager='cat .env' log",
+    "git -c user.name='cat .env' log",
+    "git.exe -c user.name='cat .env' log",
+    "git -c diff.externalCommand='cat .env' diff",
+    "git -c aliasx.read='!cat .env' status",
+    "git -c alias.x='status' x",
+    "git -c alias.x='echo .env' x", // no leading !: not a shell script
+    "git -c alias.x='!echo .env' x",
+    "git -c diff.external='echo .env' diff",
+    "git -c alias.x='!cat .env.example' x",
+    "git -c diff.external='cat .env.local.example' diff",
+    "git -c alias.x='!cat README.md' x",
+    "git -c diff.external='cat README.md' diff",
+    'git -c',
+    "git -c '' status",
+    'git -c alias.x status',
+    "git -c alias.x='' x",
+    "git -c diff.external='' diff",
+    "git -C '-calias.x=!cat .env' status",
+    "git --git-dir='-calias.x=!cat .env' status",
+    "git log -c 'alias.x=!cat .env'",
+    // git has no attached -c form: git 2.49 answers "unknown option:
+    // -calias.x=!cat .env" (exit 129) and runs nothing.
+    "git -calias.x='!cat .env' x",
+    "git -cdiff.external='cat .env' diff",
+    "echo \"git -c alias.x='!cat .env' x\"",
+    "echo -c 'alias.x=!cat .env'",
+    "printf '%s' -c 'diff.external=cat .env'",
+    // Unknown leading option: only a command-valued key reading a secret blocks.
+    "git --frobnicate -c user.name='cat .env' log",
+    "git --frobnicate -c alias.x='!echo safe' x",
+  ];
+  for (const cmd of allows) {
+    test(`allows ${JSON.stringify(cmd)}`, () => {
+      assertAllowed(runHook(bash(cmd)), cmd);
+    });
+  }
+
+  // The existing shell scanner documents a depth-3 limit. A Git config
+  // script consumes one frame, exactly like an interpreter's script.
+  for (const [evalFrames, shouldBlock] of [[1, true], [2, true], [3, false]]) {
+    test(`Git config script respects scan-depth boundary: ${evalFrames + 1}`, () => {
+      let script = 'cat .env';
+      for (let k = 0; k < evalFrames; k++) script = 'eval ' + JSON.stringify(script);
+      const cmd = 'git -c alias.x=' + JSON.stringify('!' + script) + ' x';
+      const result = runHook(bash(cmd));
+      if (shouldBlock) assertBlocked(result, cmd, { tool: 'Bash', path: '.env' });
+      else assertAllowed(result, cmd);
+    });
+    test(`Git config behind shells respects scan-depth boundary: ${evalFrames + 1}`, () => {
+      let cmd = "git -c alias.x='!cat .env' x";
+      for (let k = 0; k < evalFrames; k++) cmd = 'eval ' + JSON.stringify(cmd);
+      const result = runHook(bash(cmd));
+      if (shouldBlock) assertBlocked(result, cmd, { tool: 'Bash', path: '.env' });
+      else assertAllowed(result, cmd);
+    });
+  }
+
+  // Independent argv vocabularies, fixed seed, real JSON-stdin hook.
+  // A global option and its value are one fragment so generation preserves
+  // the boundary rather than accidentally treating the value as a command.
+  // Every global option git 2.49 accepts before a subcommand that does not
+  // exit on its own (git(1) plus git.c's hidden --shallow-file), in each
+  // value form git accepts — confirmed by running them in front of an alias.
+  const GLOBAL_FORMS = [
+    '-C repo', '-c user.name=Example', '--exec-path=.',
+    '-p', '--paginate', '-P', '--no-pager',
+    '--no-replace-objects', '--no-lazy-fetch', '--no-optional-locks', '--no-advice', '--bare',
+    '--git-dir=repo/.git', '--git-dir repo/.git', '--work-tree=repo', '--work-tree repo',
+    '--namespace=ns', '--namespace ns',
+    '--config-env=user.name=GIT_NAME', '--config-env user.name=GIT_NAME',
+    '--attr-source=HEAD', '--attr-source HEAD', '--shallow-file x',
+    '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs',
+  ];
+  const GLOBALS = fc.array(fc.constantFrom(...GLOBAL_FORMS), { maxLength: 3 });
+
+  // Each form on its own, so no option depends on the sampler drawing it: the
+  // walk must step over it to the subcommand, where log's -c argument is data
+  // and ls-files' pathspec is a name (#4856 parity).
+  for (const form of GLOBAL_FORMS) {
+    test(`global ${JSON.stringify(form)} ends at the subcommand for the -c scan and the pathspec exemption`, () => {
+      const logCmd = `git ${form} log -c 'alias.x=!cat .env'`;
+      assertAllowed(runHook(bash(logCmd)), logCmd);
+      const lsCmd = `git ${form} ls-files --error-unmatch .env`;
+      assertAllowed(runHook(bash(lsCmd)), lsCmd);
+    });
+  }
+  const SECRET = fc.constantFrom('.env', '.env.local', '.secrets', 'config/.env.production');
+  const OPTIONS = { seed: 5045, numRuns: 40 };
+
+  test('property: global option permutations cannot hide a command-valued secret read', () => {
+    fc.assert(fc.property(
+      GLOBALS, SECRET, fc.constantFrom('cat', 'grep KEY'),
+      fc.constantFrom('alias.x', 'diff.external'),
+      (globals, secret, reader, key) => {
+        const script = `${key === 'alias.x' ? '!' : ''}${reader} ${secret}`;
+        const cmd = `git ${globals.join(' ')} -c ${key}='${script}' ${key === 'alias.x' ? 'x' : 'diff'}`;
+        assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: secret });
+      },
+    ), OPTIONS);
+  });
+
+  // An option outside git's vocabulary (a future or mistyped one), with or
+  // without a value word, anywhere among the globals: the -c scan fails closed.
+  const UNKNOWN_GLOBAL = fc.constantFrom('--frobnicate', '--frobnicate value', '--future-opt=x', '-Z');
+  test('property: an unknown global option cannot hide a command-valued secret read', () => {
+    fc.assert(fc.property(
+      GLOBALS, UNKNOWN_GLOBAL, fc.nat(), SECRET, fc.constantFrom('alias.x', 'diff.external'),
+      (globals, unknown, at, secret, key) => {
+        const words = [...globals];
+        words.splice(at % (words.length + 1), 0, unknown);
+        const script = `${key === 'alias.x' ? '!' : ''}cat ${secret}`;
+        const cmd = `git ${words.join(' ')} -c ${key}='${script}' ${key === 'alias.x' ? 'x' : 'diff'}`;
+        assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: secret });
+      },
+    ), OPTIONS);
+  });
+
+  test('property: ordinary config values mentioning secret reads are still data', () => {
+    fc.assert(fc.property(
+      GLOBALS, fc.constantFrom('.env', '.env.local', '.secrets'),
+      fc.constantFrom('core.pager', 'user.name', 'diff.externalCommand'),
+      (globals, secret, key) => {
+        const cmd = `git ${globals.join(' ')} -c ${key}='cat ${secret}' log`;
+        assertAllowed(runHook(bash(cmd)), cmd);
+      },
+    ), OPTIONS);
+  });
+
+  // Parity with #4856: git parses its global options once, whatever follows,
+  // so the same global prefix that cannot hide a -c script must also reach
+  // the name-only pathspec exemption (`git ls-files` prints names only).
+  test('property: the #4856 pathspec exemption walks the same global options', () => {
+    fc.assert(fc.property(GLOBALS, SECRET, (globals, secret) => {
+      const cmd = `git ${globals.join(' ')} ls-files --error-unmatch ${secret}`;
+      assertAllowed(runHook(bash(cmd)), cmd);
+    }), OPTIONS);
+  });
+});
+
 describe('gsd-secret-read-guard: Read', () => {
   const blocks = ['.env', '/proj/.env', '.env.local', '/p/.env.production', '.secrets', 'C:\\proj\\.env', '/p/.secrets/',
     // Case-insensitive: these ARE the secret file on macOS/Windows.
@@ -802,5 +998,83 @@ describe('gsd-secret-read-guard: name-only git pathspecs and copy destinations (
       const cmd = words.join(' ');
       assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: secret });
     }), PROPERTY_RUNS);
+  });
+});
+
+// #5214: the debug session manager is told to spawn gsd-debugger with
+// Agent(run_in_background=false), but on a real 1.15.0 run it routed around that
+// literal and shelled out to `claude --agent gsd-debugger` through Bash with
+// run_in_background:true, so the checkpoint never advanced. The spawn contract
+// cannot be enforced by prose; this Bash hook is the only deterministic seam that
+// sees the call. The three commands below are the ones the reporter captured.
+describe('gsd-secret-read-guard: gsd-debugger CLI spawn (#5214)', () => {
+  const DEBUGGER_BLOCKS = [
+    ['captured spawn 1 (prompt file, exit echo)',
+      'claude -p "$(cat /tmp/gsd-debug-main-app-audio-silent-prompt.md)" --agent gsd-debugger --model opus --permission-mode bypassPermissions --no-session-persistence > /tmp/run1.out 2>/tmp/run1.err; echo "exit=$?"'],
+    ['captured spawn 2 (heredoc prompt)',
+      "claude -p --agent gsd-debugger --model opus --permission-mode bypassPermissions --no-session-persistence --output-format text > /tmp/run1.out 2>&1 <<'PROMPT'\n<resume_directive>\ncontinue the investigation\n</resume_directive>\nPROMPT"],
+    ['captured spawn 3 (flags before the agent)',
+      'claude --agent gsd-debugger --model opus -p "$(cat /tmp/gsd-dbg-iter1.md)" --output-format text --dangerously-skip-permissions > /tmp/i1.out 2> /tmp/i1.err; echo "exit=$?"'],
+    ['--agent=VALUE form', 'claude -p hi --agent=gsd-debugger'],
+    ['quoted agent value', 'claude --agent "gsd-debugger" -p hi'],
+    ['single-quoted agent value', "claude --agent 'gsd-debugger' -p hi"],
+    ['plugin-namespaced agent name', 'claude --agent gsd:gsd-debugger -p hi'],
+    ['absolute path to the binary', '/usr/local/bin/claude --agent gsd-debugger -p hi'],
+    ['claude.exe', 'claude.exe --agent gsd-debugger -p hi'],
+    ['behind timeout', 'timeout 600 claude --agent gsd-debugger -p hi'],
+    ['behind nohup and env assignments', 'nohup env FOO=1 claude --agent gsd-debugger -p hi &'],
+    ['second command of a compound', 'cd /tmp && claude --agent gsd-debugger -p hi'],
+    ['inside $( )', 'out=$(claude --agent gsd-debugger -p hi); echo "$out"'],
+    ['inside bash -c', "bash -c 'claude --agent gsd-debugger -p hi'"],
+    ['inside eval', 'eval "claude --agent gsd-debugger -p hi"'],
+    ['piped', 'echo go | claude --agent gsd-debugger -p'],
+  ];
+
+  for (const [label, command] of DEBUGGER_BLOCKS) {
+    test(`blocks: ${label}`, () => {
+      assertBlocked(runHook(bash(command)), label, { code: 'debugger-cli-spawn', tool: 'Bash' });
+    });
+  }
+
+  const DEBUGGER_ALLOWS = [
+    ['another agent', 'claude --agent gsd-executor -p hi'],
+    ['no agent flag', 'claude -p "summarize this"'],
+    ['a version probe', 'claude --version'],
+    ['an agent that only starts with the name', 'claude --agent gsd-debugger-extra -p hi'],
+    ['the name in a quoted echo argument', 'echo "claude --agent gsd-debugger"'],
+    ['the name in a commit message', 'git commit -m "docs: never run claude --agent gsd-debugger from Bash"'],
+    ['searching for the text', 'grep -rn "agent gsd-debugger" agents/'],
+    ['reading the agent file', 'cat agents/gsd-debugger.md'],
+    ['the name in a heredoc body', "cat <<'EOF'\nclaude --agent gsd-debugger\nEOF"],
+    ['a different binary that ends in claude', 'myclaude --agent gsd-debugger -p hi'],
+    ['the gsd-tools model lookup the manager really runs', 'gsd_run query resolve-model gsd-debugger'],
+  ];
+
+  for (const [label, command] of DEBUGGER_ALLOWS) {
+    test(`allows: ${label}`, () => {
+      assertAllowed(runHook(bash(command)), label);
+    });
+  }
+
+  test('the Kimi Shell vocabulary is covered too', () => {
+    assertBlocked(
+      runHook({ hook_event_name: 'PreToolUse', tool_name: 'Shell', tool_input: { command: 'claude --agent gsd-debugger -p hi' } }),
+      'kimi shell',
+      { code: 'debugger-cli-spawn', tool: 'Bash' },
+    );
+  });
+
+  test('the denial names the Agent tool and the foreground flag so the model can recover', () => {
+    const out = assertBlocked(runHook(bash('claude --agent gsd-debugger -p hi')), 'reason', { code: 'debugger-cli-spawn' });
+    assert.match(out.reason, /Agent/);
+    assert.match(out.reason, /run_in_background/);
+  });
+
+  test('a secret read in the same command still reports the secret code', () => {
+    assertBlocked(runHook(bash('cat .env && claude --agent gsd-debugger -p hi')), 'both', { code: 'secret-read' });
+  });
+
+  test('a non-Bash tool with the same text is never inspected', () => {
+    assertAllowed(runHook({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'notes-claude-agent-gsd-debugger.md' } }), 'read');
   });
 });

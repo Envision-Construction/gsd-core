@@ -338,12 +338,14 @@ const DOCS_GUARD_TESTS = {
   // (no-pending-3212-markers.test.cjs:37-46), which includes all of docs/ —
   // cannot be resolved to a fixed docs/ path set.
   'tests/no-pending-3212-markers.test.cjs': ['*'],
+  'tests/pause-work-improvements.test.cjs': ['docs/zh-CN/references/git-integration.md'],
   'tests/phase6-capability-docs.test.cjs': ['docs/how-to/develop-a-capability.md', 'docs/README.md'],
   'tests/phase6-review-capabilities.test.cjs': [
     'docs/reference/review-verification-capabilities.md',
     'docs/how-to/develop-a-capability.md',
     'docs/README.md',
   ],
+  'tests/plan-authoring-verification-gaps.test.cjs': ['docs/reference/plan-md.md'],
   'tests/plan-checker-coupling.test.cjs': ['docs/AGENTS.md'],
   'tests/plan-phase-drift-guard.test.cjs': [
     'docs/CONFIGURATION.md',
