@@ -14,6 +14,8 @@ Invoke this Pi skill with `/skill:gsd-onboard`.
 
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
+**Project selection:** if the arguments include `--project <name>`, the user is targeting the named project in `.planning/<name>/`. In the first shell command you run for this command (once `gsd_run` is defined), run `gsd_run query project.set <name>` and stop if it fails; then treat the remaining arguments as if `--project <name>` were absent. The selection holds for the rest of the session, including subagents.
+
 
 
 <objective>
@@ -21,7 +23,7 @@ Guide brownfield onboarding for an existing codebase by routing through the exis
 
 **Creates or confirms:**
 - `.planning/codebase/` — evidence-backed codebase map from `/skill:gsd-map-codebase`
-- `.planning/PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md` — project setup from `/skill:gsd-new-project` or `/skill:gsd-ingest-docs`
+- `.planning/[<project>/]PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md` — project setup from `/skill:gsd-new-project` or `/skill:gsd-ingest-docs`
 - `.planning/onboarding/SUMMARY.md` — lightweight index of what was learned and the next command
 
 **Non-goals:** This command does not execute phases, ship work, or overwrite existing planning artifacts without an explicit gate.

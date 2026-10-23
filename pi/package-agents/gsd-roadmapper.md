@@ -462,8 +462,8 @@ The post-write `## ROADMAP CREATED` return carries this preview block (renamed f
 ## ROADMAP CREATED
 
 **Files written:**
-- .planning/ROADMAP.md
-- .planning/STATE.md
+- {roadmap_path}
+- {state_path}
 
 ### Roadmap Preview
 
@@ -574,7 +574,7 @@ If gaps found, include in draft for user decision.
 Write files first, then return. This ensures artifacts persist even if context is lost.
 
 **Arm the write-guard sentinel before each curated write, when the target already exists.** On a
-`/gsd:new-milestone` run `.planning/ROADMAP.md` and `.planning/STATE.md` still hold the *outgoing*
+`/gsd:new-milestone` run the target ROADMAP.md and STATE.md still hold the *outgoing*
 milestone's content, and the replacement carries only the new milestone's phases — a legitimate,
 intentional shrink that the `gsd-write-guard` PreToolUse hook (#2255) hard-blocks on curated
 `.planning/` artifacts. A hook inherits the *runtime's* environment, so no per-step env var can reach
@@ -583,16 +583,25 @@ single-use, so arm it immediately before each Write — one arming can never cov
 `/gsd:new-project` run neither target exists, the guard exempts the write (ENOENT), and the `[ -f ]`
 test skips the arming so no unconsumed token is left on disk.
 
+**Write targets.** When the prompt carries a `<write_targets>` block, write ROADMAP.md, STATE.md and
+REQUIREMENTS.md at exactly those paths and arm the sentinel with them; they may sit under
+`.planning/<project>/` or a workstream directory. Writing the root `.planning/` copies there would
+overwrite a different project's or workstream's files. Without the block, resolve them with
+`gsd_run query planning.dir --raw` (`<dir>/ROADMAP.md`, `<dir>/STATE.md`, `<dir>/REQUIREMENTS.md`). The
+sentinel file itself always lives at the outer `.planning/.gsd-allow-shrink` and names the target path.
+
 1. **Write ROADMAP.md** using output format — arm first, then Write:
 
    ```bash
-   [ -f .planning/ROADMAP.md ] && printf '.planning/ROADMAP.md\n' > .planning/.gsd-allow-shrink
+   ROADMAP_TARGET="{roadmap_path}"   # the ROADMAP.md write target
+   [ -f "$ROADMAP_TARGET" ] && printf '%s\n' "$ROADMAP_TARGET" > .planning/.gsd-allow-shrink
    ```
 
 2. **Write STATE.md** using output format — arm first, then Write:
 
    ```bash
-   [ -f .planning/STATE.md ] && printf '.planning/STATE.md\n' > .planning/.gsd-allow-shrink
+   STATE_TARGET="{state_path}"   # the STATE.md write target
+   [ -f "$STATE_TARGET" ] && printf '%s\n' "$STATE_TARGET" > .planning/.gsd-allow-shrink
    ```
 
 3. **Update REQUIREMENTS.md traceability section**
@@ -623,11 +632,11 @@ When files are written and returning to orchestrator:
 ## ROADMAP CREATED
 
 **Files written:**
-- .planning/ROADMAP.md
-- .planning/STATE.md
+- {roadmap_path}
+- {state_path}
 
 **Updated:**
-- .planning/REQUIREMENTS.md (traceability section)
+- {requirements_path} (traceability section)
 
 ### Summary
 
@@ -675,9 +684,9 @@ After incorporating user feedback and updating files:
 - {change 2}
 
 **Files updated:**
-- .planning/ROADMAP.md
-- .planning/STATE.md (if needed)
-- .planning/REQUIREMENTS.md (if traceability changed)
+- {roadmap_path}
+- {state_path} (if needed)
+- {requirements_path} (if traceability changed)
 
 ### Updated Summary
 

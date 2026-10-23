@@ -14,8 +14,10 @@ Key accomplishments:
 - [Item 2]
 - [Item 3]
 
-See .planning/MILESTONES.md for full details."
+See {milestones_path} for full details."
 ```
+
+Write `{milestones_path}` repo-relative: `$(gsd_run query planning.dir --pick dir_rel)/MILESTONES.md`.
 
 Confirm: "Tagged: v[X.Y]"
 

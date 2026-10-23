@@ -338,9 +338,9 @@ Output: [Artifacts created]
 </execution_context>
 
 <context>
-@.planning/PROJECT.md
-@.planning/ROADMAP.md
-@.planning/STATE.md
+@{project_dir_rel}/PROJECT.md
+@{dir_rel}/ROADMAP.md
+@{dir_rel}/STATE.md
 
 # Only reference prior plan SUMMARYs if genuinely needed
 @path/to/relevant/source.ts
@@ -385,7 +385,7 @@ Threat IDs are unique within a phase. Before numbering, read the `<threat_model>
 </success_criteria>
 
 <output>
-Create `.planning/phases/XX-name/{padded_phase}-{plan}-SUMMARY.md` when done
+Create `{dir_rel}/phases/XX-name/{padded_phase}-{plan}-SUMMARY.md` when done
 </output>
 ```
 
@@ -412,6 +412,8 @@ Wave numbers are pre-computed during planning. Execute-phase reads `wave` direct
 See `gsd-core/references/planner-interface-context.md` for the full interface extraction guide.
 
 ## Context Section Rules
+
+PLAN.md is committed, so every path in it is repo-relative, never absolute. Init's `*_path` and `phase_dir` fields are absolute: never write them into a PLAN.md. Fill `{dir_rel}` from `gsd_run query planning.dir --pick dir_rel` and `{project_dir_rel}` from `--pick project_dir_rel` (`.planning` for the root project, `.planning/<project>` for a named one); the phase directory is `{dir_rel}/phases/<phase dir name>`.
 
 Only include prior plan SUMMARY references if genuinely needed (uses types/exports from prior plan, or prior plan made decision affecting this one).
 
@@ -570,7 +572,7 @@ INIT=$(gsd_run query init.plan-phase "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
-Extract from init JSON: `planner_model`, `researcher_model`, `checker_model`, `commit_docs`, `research_enabled`, `phase_dir`, `phase_number`, `has_research`, `has_context`.
+Extract from init JSON: `planner_model`, `researcher_model`, `checker_model`, `commit_docs`, `research_enabled`, `phase_dir`, `phase_number`, `has_research`, `has_context`, `state_path`, `roadmap_path` (scoped to the selected project/workstream).
 
 Also load planning state (position, decisions, blockers) via the SDK — **use `node` to invoke the CLI** (not `npx`):
 ```bash
@@ -623,8 +625,9 @@ without graph context.
 
 <step name="identify_phase">
 ```bash
-cat .planning/ROADMAP.md
-ls .planning/phases/
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+cat "$PLANNING_DIR/ROADMAP.md"
+ls "$PLANNING_DIR/phases/"
 ```
 
 If multiple phases available, ask which to plan. If obvious (first incomplete), proceed.
@@ -658,7 +661,8 @@ Select top 2-4 phases. Skip phases with no relevance signal.
 
 **Step 3 — Read full SUMMARYs for selected phases:**
 ```bash
-_SUMMARIES=( .planning/phases/{selected-phase}/*-SUMMARY.md )
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+_SUMMARIES=( "$PLANNING_DIR"/phases/{selected-phase}/*-SUMMARY.md )
 if [ -e "${_SUMMARIES[0]}" ]; then cat "${_SUMMARIES[@]}"; fi
 ```
 
@@ -679,7 +683,7 @@ For phases not selected, retain from digest:
 
 **From RETROSPECTIVE.md (if exists):**
 ```bash
-cat .planning/RETROSPECTIVE.md 2>/dev/null | tail -100
+cat "$(gsd_run query planning.dir --pick project_dir)/RETROSPECTIVE.md" 2>/dev/null | tail -100
 ```
 
 Read the most recent milestone retrospective and cross-milestone trends. Extract:
@@ -801,7 +805,7 @@ Use template structure for each PLAN.md.
 
 **Write contract (hard rules — must follow):**
 
-These PLAN.md files are the canonical output of this agent. The orchestrator reads each `.planning/phases/{padded_phase}-{slug}/{padded_phase}-{NN}-PLAN.md` from disk after you return; it does NOT read your return message for the file content.
+These PLAN.md files are the canonical output of this agent. The orchestrator reads each `{phase_dir}/{padded_phase}-{NN}-PLAN.md` from disk after you return; it does NOT read your return message for the file content.
 
 **Write is for net-new PLAN.md only.** For any existing file (`ROADMAP.md`, `.planning/` files) use `Edit` (scoped replacement), never `Write`. See `update_roadmap`.
 
@@ -834,7 +838,7 @@ The filename MUST follow the exact pattern: `{padded_phase}-{NN}-PLAN.md`
 - ❌ `plan-01.md`
 - ❌ `01-01-plan.md` (lowercase)
 
-Full write path: `.planning/phases/{padded_phase}-{slug}/{padded_phase}-{NN}-PLAN.md`
+Full write path: `{phase_dir}/{padded_phase}-{NN}-PLAN.md` (`phase_dir` from init)
 
 Include all frontmatter fields.
 </step>
@@ -869,7 +873,7 @@ Update ROADMAP.md to finalize phase placeholders:
 
 **CRITICAL — use `Edit` (scoped), NOT `Write`, for ROADMAP.md.** A whole-file `Write` destroys all phase entries outside your diff window. Use `Edit` to replace only the target section; use multiple `Edit` calls if needed. NEVER pass the entire ROADMAP.md content to `Write`.
 
-1. Read `.planning/ROADMAP.md`
+1. Read `{roadmap_path}` (from init)
 2. Find phase entry (`### Phase {N}:`)
 3. Update placeholders using `Edit` (scoped replacement only):
 
@@ -892,8 +896,9 @@ Plans:
 
 <step name="git_commit">
 ```bash
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
 gsd_run query commit "docs($PHASE): create phase plan" --files \
-  .planning/phases/$PHASE-*/$PHASE-*-PLAN.md .planning/ROADMAP.md
+  "$PLANNING_DIR"/phases/$PHASE-*/$PHASE-*-PLAN.md "$PLANNING_DIR/ROADMAP.md"
 ```
 </step>
 

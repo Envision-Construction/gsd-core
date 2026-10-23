@@ -360,8 +360,9 @@ describe('planning-command-router', () => {
     };
   }
 
-  test('PLANNING_SUBCOMMANDS is exactly ["inspect"]', () => {
-    assert.deepStrictEqual(PLANNING_SUBCOMMANDS, ['inspect']);
+  // `dir` resolves the scoped planning directories for workflow fences (#3749).
+  test('PLANNING_SUBCOMMANDS is exactly ["inspect", "dir"]', () => {
+    assert.deepStrictEqual(PLANNING_SUBCOMMANDS, ['inspect', 'dir']);
   });
 
   test('dispatches "planning inspect" and forwards cwd/raw verbatim', () => {
@@ -379,13 +380,58 @@ describe('planning-command-router', () => {
     assert.deepStrictEqual(mod.calls, [{ cwd: '/other', raw: false }]);
   });
 
+  // `planning dir` (#3749): the scoped directories a workflow fence uses instead of a literal `.planning/`.
+  function withScope(env, fn) {
+    const saved = { GSD_PROJECT: process.env.GSD_PROJECT, GSD_WORKSTREAM: process.env.GSD_WORKSTREAM };
+    for (const [k, v] of Object.entries(env)) { if (v == null) delete process.env[k]; else process.env[k] = v; }
+    try { return fn(); } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v == null) delete process.env[k]; else process.env[k] = v; }
+    }
+  }
+  function runDir(env, args = ['planning', 'dir']) {
+    const error = mockError();
+    const emitted = [];
+    const cwd = path.join(path.sep, 'repo');
+    withScope(env, () => routePlanningCommand({ args, cwd, raw: false, error, _output: (value, raw, rawValue) => emitted.push({ value, rawValue }) }));
+    return { error, emitted, cwd };
+  }
+
+  test('"planning dir" at the root reports .planning for both dirs, absolute and relative', () => {
+    const { error, emitted, cwd } = runDir({ GSD_PROJECT: null, GSD_WORKSTREAM: null });
+    assert.deepStrictEqual(error.calls, []);
+    assert.deepStrictEqual(emitted, [{
+      value: { dir: path.join(cwd, '.planning'), project_dir: path.join(cwd, '.planning'), dir_rel: '.planning', project_dir_rel: '.planning', project: null, workstream: null },
+      rawValue: path.join(cwd, '.planning'),
+    }]);
+  });
+
+  test('"planning dir" under a named project and workstream scopes dir to both, project_dir to the project', () => {
+    const { emitted, cwd } = runDir({ GSD_PROJECT: 'beta', GSD_WORKSTREAM: 'api' });
+    assert.strictEqual(emitted.length, 1);
+    const { value } = emitted[0];
+    assert.strictEqual(value.dir, path.join(cwd, '.planning', 'beta', 'workstreams', 'api'));
+    assert.strictEqual(value.project_dir, path.join(cwd, '.planning', 'beta'));
+    assert.strictEqual(value.dir_rel, '.planning/beta/workstreams/api');
+    assert.strictEqual(value.project_dir_rel, '.planning/beta');
+    assert.strictEqual(value.project, 'beta');
+    assert.strictEqual(value.workstream, 'api');
+  });
+
+  test('"planning dir" with an extra argument is a usage error and emits nothing', () => {
+    const { error, emitted } = runDir({ GSD_PROJECT: null, GSD_WORKSTREAM: null }, ['planning', 'dir', 'extra']);
+    assert.strictEqual(error.calls.length, 1);
+    assert.strictEqual(error.calls[0].reason, 'usage');
+    assert.match(error.calls[0].message, /planning dir takes no arguments; got: extra/);
+    assert.deepStrictEqual(emitted, []);
+  });
+
   test('a missing subcommand yields sdk_unknown_command and never calls the mock', () => {
     const error = mockError();
     const mod = mockInspect();
     routePlanningCommand({ args: ['planning'], cwd: '/x', raw: false, error, _planningInspect: mod });
     assert.strictEqual(error.calls.length, 1);
     assert.strictEqual(error.calls[0].reason, 'sdk_unknown_command');
-    assert.strictEqual(error.calls[0].message, 'Unknown planning subcommand. Available: inspect');
+    assert.strictEqual(error.calls[0].message, 'Unknown planning subcommand. Available: inspect, dir');
     assert.deepStrictEqual(mod.calls, []);
   });
 

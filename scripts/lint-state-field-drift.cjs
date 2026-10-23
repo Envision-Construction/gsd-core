@@ -681,7 +681,7 @@ const PROMPT_LAYER_EXEMPTIONS = new Map([
     path.join('gsd-core', 'workflows', 'smart-entry.md'),
     new Map([
       [
-        "- Read `.planning/STATE.md` (frontmatter + body) with the Read tool. Extract: `status` (frontmatter `status:` or body `**Status:**`), `Phase:` from the body, `total_phases`/`percent` from a nested `progress:` frontmatter object if present, and any `## Blockers` items.",
+        "- Read the selected scope's STATE.md (frontmatter + body) with the Read tool: `.planning/[<project>/][workstreams/<ws>/]STATE.md` for the project/workstream selected by `--project`/`GSD_PROJECT` and `--ws`/`GSD_WORKSTREAM` (with neither, the one directly in `.planning/`). Extract: `status` (frontmatter `status:` or body `**Status:**`), `Phase:` from the body, `total_phases`/`percent` from a nested `progress:` frontmatter object if present, and any `## Blockers` items.",
         'gsd-tools-down fallback (smart-entry.md Fallback step 1): runs only when gsd-tools itself cannot run, so it cannot call the canonical owner it substitutes for — permanent by construction, not removable debt.',
       ],
     ]),

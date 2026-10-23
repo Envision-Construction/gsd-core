@@ -429,7 +429,8 @@ describe('#3135: gsd-core/workflows/add-backlog.md', () => {
   test('creates a .planning/phases/ directory', () => {
     const src = fs.readFileSync(WORKFLOW, 'utf8');
     assert.ok(
-      src.includes('.planning/phases') || src.includes('planning/phases'),
+      // The phase dir is the selected project's ($PLANNING_DIR/phases; `.planning/phases` for the root project).
+      src.includes('.planning/phases') || src.includes('planning/phases') || src.includes('$PLANNING_DIR/phases'),
       'add-backlog.md must create a phase directory under .planning/phases/',
     );
   });

@@ -22,7 +22,7 @@ claim about the tree, and two defects are invisible to reading and take one comm
 have a shell when you author the plan, so run each such gate against the **current tree** and write
 the pre-change result next to it as its baseline (`# baseline at HEAD: 0`):
 
-- **It already passes at HEAD.** `grep -c "Agent" .planning/PROJECT.md` returned `6` before any work
+- **It already passes at HEAD.** `grep -c "Agent" PROJECT.md` returned `6` before any work
   existed, because the word sat in an unrelated row — the gate measures nothing and passes whether
   or not the work happens. Fix the gate: anchor it to the new heading, key, or line the task
   creates, or assert a delta from the recorded baseline.

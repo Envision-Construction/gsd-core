@@ -43,7 +43,7 @@ AGENT_SKILLS_SYNTHESIZER=$(gsd_run query agent-skills gsd-research-synthesizer)
 AGENT_SKILLS_ROADMAPPER=$(gsd_run query agent-skills gsd-roadmapper)
 ```
 
-Parse JSON for: `researcher_model`, `synthesizer_model`, `roadmapper_model`, `commit_docs`, `project_exists`, `has_codebase_map`, `planning_exists`, `has_existing_code`, `has_package_file`, `is_brownfield`, `needs_codebase_map`, `has_git`, `git_worktree_root`, `in_nested_subdir`, `project_path`, `agents_installed`, `missing_agents`, `agent_runtime`, `agents_dir`, `required_agents`, `required_agents_installed`, `missing_required_agents`, `agent_skill_payloads_available`, `agent_skill_payload_agents`, `requirements_exists`, `init_incomplete`, `requirements_path`, `roadmap_path`, `config_path`, `research_dir`, `response_language`.
+Parse JSON for: `researcher_model`, `synthesizer_model`, `roadmapper_model`, `commit_docs`, `project_exists`, `has_codebase_map`, `planning_exists`, `has_existing_code`, `has_package_file`, `is_brownfield`, `needs_codebase_map`, `has_git`, `git_worktree_root`, `in_nested_subdir`, `project_path`, `agents_installed`, `missing_agents`, `agent_runtime`, `agents_dir`, `required_agents`, `required_agents_installed`, `missing_required_agents`, `agent_skill_payloads_available`, `agent_skill_payload_agents`, `requirements_exists`, `init_incomplete`, `requirements_path`, `roadmap_path`, `state_path`, `config_path`, `research_dir`, `planning_project`, `response_language`.
 
 **If `response_language` is set:** All user-facing output of this workflow — narration between tool calls, status updates, progress notes, findings, questions, prompts, and explanations — MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
 
@@ -100,7 +100,22 @@ All subsequent references to the project instruction file use `$INSTRUCTION_FILE
 
 **If `project_exists` is true and `init_incomplete` is true (#4040 — interrupted bootstrap):** Resume initialization instead of erroring. `.planning/` exists but initialization stopped before all core artifacts landed. Keep the existing `PROJECT.md` and any already-created artifacts (`REQUIREMENTS.md` if present, `config.json`); skip the steps that would recreate them and continue the flow from the first missing artifact in init order — `REQUIREMENTS.md` → `ROADMAP.md` + `STATE.md` — until all exist. Do not error and do not bounce the user back to `/gsd:progress` (that routing loop is the #4040 bug).
 
-**If `project_exists` is true and `init_incomplete` is false:** Error — project already initialized. Use `/gsd:progress`.
+**If `project_exists` is true and `init_incomplete` is false and `planning_project` is set:** this session already has project `{planning_project}` selected and it exists. If the user asked for a different project (`--project <slug>` in `$ARGUMENTS`, or a new initiative), run `gsd_run query project.set "<slug>"`, re-read init, and continue from step 2 of the branch below. Otherwise stop: `{planning_project}` is already initialized — use `/gsd:progress` to continue it, or `gsd_run query project.set --clear` to return this session to the root project.
+
+**If `project_exists` is true and `init_incomplete` is false and `planning_project` is null — start a separate project:** the repository already has a root project, and this run creates a new one beside it in `.planning/<slug>/`. It never becomes a milestone, phase, or quick task of the existing project; continuing that project is `/gsd:new-milestone` or `/gsd:progress`.
+
+1. Choose `<slug>` (lowercase, hyphenated, short): the value of `--project <slug>` in `$ARGUMENTS` if present; in auto mode, derived from the provided document's title; otherwise ask Step 3's opening question ("What do you want to build?") now, derive the slug from the answer, and use that answer as Step 3's opening response.
+2. Select it for this session and re-read init:
+   ```bash
+   gsd_run query project.set "<slug>" || { echo "project.set failed; do not continue against the root project" >&2; exit 1; }
+   AUTO_PARAM=""  # each fence is a new shell: set "--auto" here again in auto mode
+   INIT=$(gsd_run query init.new-project ${AUTO_PARAM:+"$AUTO_PARAM"})
+   if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
+   ```
+   If `project.set` fails, stop: continuing would write into the root project. It rejects names GSD reserves and directories that are not projects (pick another slug), and fails when the runtime exposes no session identity (re-run with `GSD_SESSION_KEY` set). Re-parse every field from the new `INIT`. `planning_project` is now `<slug>` and every path resolves under `.planning/<slug>/`. If `project_exists` is still true, the slug names an existing project; choose another one, or stop and route to `/gsd:progress` if the user meant that project.
+3. Continue with Git init below. Every later GSD command in this session, including subagents, resolves to this project automatically. A later session, or this one after `/clear`, selects it by adding `--project <slug>` to any GSD command (`gsd_run query project.list` lists the repository's projects).
+
+**Paths:** every PROJECT.md, config.json, REQUIREMENTS.md, ROADMAP.md, STATE.md and research directory named in this workflow means the path init returned (`project_path`, `config_path`, `requirements_path`, `roadmap_path`, `state_path`, `research_dir`). Use those values for every read, write and commit. For a named project they live under `.planning/<slug>/`, and writing the literal root path would overwrite the root project.
 
 **Git init (#3491 — never nest `.git` inside an existing worktree):**
 
@@ -146,7 +161,7 @@ Ask inline (freeform, NOT AskUserQuestion):
 
 Wait for their response. This gives you the context needed to ask intelligent follow-up questions.
 
-**Research-before-questions mode:** Check if `workflow.research_before_questions` is enabled in `.planning/config.json` (or the config from init context). When enabled, before asking follow-up questions about a topic area:
+**Research-before-questions mode:** Check if `workflow.research_before_questions` is enabled in `{config_path}` (the config from init context). When enabled, before asking follow-up questions about a topic area:
 
 1. Do a brief web search for best practices related to what the user described
 2. Mention key findings naturally as you ask questions (e.g., "Most projects like this use X — is that what you're thinking, or something different?")
@@ -196,7 +211,7 @@ Loop until "Create PROJECT.md" selected.
 
 **If auto mode:** Synthesize from provided document. No "Ready?" gate was shown — proceed directly to commit.
 
-Synthesize all context into `.planning/PROJECT.md` using the template from `templates/project.md`.
+Synthesize all context into `{project_path}` using the template from `templates/project.md`.
 
 **For greenfield projects:**
 
@@ -295,8 +310,8 @@ Do not compress. Capture everything gathered.
 **Commit PROJECT.md:**
 
 ```bash
-mkdir -p .planning
-gsd_run query commit "docs: initialize project" --files .planning/PROJECT.md
+mkdir -p "$(dirname "{project_path}")"
+gsd_run query commit "docs: initialize project" --files "{project_path}"
 ```
 
 ## 5. Workflow Preferences
@@ -618,7 +633,7 @@ Recommended options:
 - `Success Metrics & Release Criteria`
 - `Stakeholder Review & Approval`
 
-Create `.planning/config.json` with all settings (CLI fills in remaining defaults automatically):
+Create `{config_path}` with all settings (CLI fills in remaining defaults automatically):
 
 ```bash
 mkdir -p .planning
@@ -630,7 +645,7 @@ gsd_run query config-new-project '{"mode":"[yolo|interactive]","granularity":"[s
 **If commit_docs = No:**
 
 - Set `commit_docs: false` in config.json
-- Add `.planning/` to `.gitignore` (create if needed)
+- Add `.planning/` to `.gitignore` (create if needed); for a named project add only `.planning/<slug>/`, so the root project's planning stays tracked
 
 **If commit_docs = Yes:**
 
@@ -639,7 +654,7 @@ gsd_run query config-new-project '{"mode":"[yolo|interactive]","granularity":"[s
 **Commit config.json:**
 
 ```bash
-gsd_run query commit "chore: add project config" --files .planning/config.json
+gsd_run query commit "chore: add project config" --files "{config_path}"
 ```
 
 ## 5.1. Sub-Repo Detection
@@ -671,7 +686,7 @@ Use AskUserQuestion:
 
 - Set `planning.sub_repos` in config.json to the selected directory names array (e.g., `["backend", "frontend"]`)
 - Auto-set `planning.commit_docs` to `false` (planning docs stay local in multi-repo workspaces)
-- Add `.planning/` to `.gitignore` if not already present
+- Add `.planning/` to `.gitignore` if not already present (for a named project, only `.planning/<slug>/`)
 
 Config changes are saved locally — no commit needed since `commit_docs` is `false` in multi-repo mode.
 
@@ -706,7 +721,7 @@ Researching [domain] ecosystem...
 Create research directory:
 
 ```bash
-mkdir -p .planning/research
+mkdir -p "{research_dir}"
 ```
 
 **Determine milestone context:**
@@ -761,10 +776,10 @@ Commit after writing.
 <!-- gsd:protected -->
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
-**Synthesizer output self-heal (#222) — verify SUMMARY.md materialized:** The synthesizer's canonical output is `.planning/research/SUMMARY.md` on disk; its brief structured return (`## SYNTHESIS COMPLETE` plus a few `###` confirmation lines) is NOT the file content. The restriction is not always fabricated: Claude Code refuses a subagent's `Write` to a few exact basenames — `SUMMARY.md` among them — with `Subagents should return findings as text, not write report files` (observed on Claude Code 2.1.301), and the synthesizer is told to return the full document inline when its `Write` hits that error; the refusal is real, not fabricated. It depends on the exact basename (`SUMMARY.md`, `REPORT.md`, `FINDINGS.md`, `ANALYSIS.md`, case-insensitive; a prefixed name such as `01-01-SUMMARY.md` and other agents' files write fine), so do not tell other agents to avoid `Write`. Either cause lands in step 2. A known LLM false-refusal (issue #222) sometimes makes the agent return the full SUMMARY.md document inline — fabricating a write restriction (e.g. "the runtime is blocking file writes") — instead of writing the file. Prompt hardening alone does not fully eliminate it, so the orchestrator MUST absorb either cause deterministically before spawning `gsd-roadmapper`:
+**Synthesizer output self-heal (#222) — verify SUMMARY.md materialized:** The synthesizer's canonical output is `{research_dir}/SUMMARY.md` on disk; its brief structured return (`## SYNTHESIS COMPLETE` plus a few `###` confirmation lines) is NOT the file content. The restriction is not always fabricated: Claude Code refuses a subagent's `Write` to a few exact basenames — `SUMMARY.md` among them — with `Subagents should return findings as text, not write report files` (observed on Claude Code 2.1.301), and the synthesizer is told to return the full document inline when its `Write` hits that error; the refusal is real, not fabricated. It depends on the exact basename (`SUMMARY.md`, `REPORT.md`, `FINDINGS.md`, `ANALYSIS.md`, case-insensitive; a prefixed name such as `01-01-SUMMARY.md` and other agents' files write fine), so do not tell other agents to avoid `Write`. Either cause lands in step 2. A known LLM false-refusal (issue #222) sometimes makes the agent return the full SUMMARY.md document inline — fabricating a write restriction (e.g. "the runtime is blocking file writes") — instead of writing the file. Prompt hardening alone does not fully eliminate it, so the orchestrator MUST absorb either cause deterministically before spawning `gsd-roadmapper`:
 
-1. Verify `.planning/research/SUMMARY.md` exists AND is substantive — non-empty, and free of any leftover `<!-- gsd:write-continue -->` continuation sentinel (which marks a truncated/incomplete write). You may validate with `gsd_run verify-summary .planning/research/SUMMARY.md` — it exits 0 regardless, so check its JSON `passed` field (`"passed": false` means missing or invalid), not the process exit code. If it passes, continue normally.
-2. If it is MISSING or invalid AND the synthesizer's return message contains the FULL SUMMARY.md document — recognizable by the template's top-level markers `# Project Research Summary`, `## Key Findings`, `## Implications for Roadmap`, and `## Sources`, not merely the brief `## SYNTHESIS COMPLETE` confirmation — the synthesizer returned the document inline (the #222 false-refusal, or the runtime's real refusal of the name `SUMMARY.md`): write that returned document to `.planning/research/SUMMARY.md` with the Write tool, then commit ALL research artifacts the synthesizer owns (it commits on behalf of the four researchers) with `gsd_run query commit "docs: complete project research" --files .planning/research/` unless they are already committed. Log `⚠ #222 self-heal: synthesizer returned SUMMARY.md inline without writing it; orchestrator persisted the file.`
+1. Verify `{research_dir}/SUMMARY.md` exists AND is substantive — non-empty, and free of any leftover `<!-- gsd:write-continue -->` continuation sentinel (which marks a truncated/incomplete write). You may validate with `gsd_run verify-summary "{research_dir}/SUMMARY.md"` — it exits 0 regardless, so check its JSON `passed` field (`"passed": false` means missing or invalid), not the process exit code. If it passes, continue normally.
+2. If it is MISSING or invalid AND the synthesizer's return message contains the FULL SUMMARY.md document — recognizable by the template's top-level markers `# Project Research Summary`, `## Key Findings`, `## Implications for Roadmap`, and `## Sources`, not merely the brief `## SYNTHESIS COMPLETE` confirmation — the synthesizer returned the document inline (the #222 false-refusal, or the runtime's real refusal of the name `SUMMARY.md`): write that returned document to `{research_dir}/SUMMARY.md` with the Write tool, then commit ALL research artifacts the synthesizer owns (it commits on behalf of the four researchers) with `gsd_run query commit "docs: complete project research" --files "{research_dir}/"` unless they are already committed. Log `⚠ #222 self-heal: synthesizer returned SUMMARY.md inline without writing it; orchestrator persisted the file.`
 3. If it is MISSING or invalid AND the return is only a brief confirmation (no full SUMMARY document to recover), the synthesizer genuinely failed — surface the error and stop; do NOT spawn `gsd-roadmapper` against a missing or incomplete SUMMARY.md.
 
 This guarantees `gsd-roadmapper` (which lists SUMMARY.md as required reading) never runs against a missing or truncated SUMMARY.md.
@@ -782,7 +797,7 @@ Display research complete banner and key findings:
 **Table Stakes:** [from SUMMARY.md]
 **Watch Out For:** [from SUMMARY.md]
 
-Files: `.planning/research/`
+Files: `{research_dir}/`
 ```
 
 **If "Skip research":** Continue to Step 7.
@@ -885,7 +900,7 @@ Cross-check requirements against Core Value from PROJECT.md. If gaps detected, s
 
 **Generate REQUIREMENTS.md:**
 
-Create `.planning/REQUIREMENTS.md` with:
+Create `{requirements_path}` with:
 
 - v1 Requirements grouped by category (checkboxes, REQ-IDs)
 - v2 Requirements (deferred)
@@ -936,7 +951,7 @@ If "adjust": Return to scoping.
 **Commit requirements:**
 
 ```bash
-gsd_run query commit "docs: define v1 requirements" --files .planning/REQUIREMENTS.md
+gsd_run query commit "docs: define v1 requirements" --files "{requirements_path}"
 ```
 
 ## 7.5. Project Structure Mode
@@ -1009,6 +1024,12 @@ Create roadmap:
 
 Write files first, then return. This ensures artifacts persist even if context is lost.
 </instructions>
+
+<write_targets>
+- ROADMAP.md: {roadmap_path}
+- STATE.md: {state_path}
+- REQUIREMENTS.md: {requirements_path}
+</write_targets>
 ", subagent_type="gsd-roadmapper", model="{roadmapper_model}", description="Create roadmap")
 ```
 
@@ -1097,6 +1118,12 @@ Use AskUserQuestion:
   Update the roadmap based on feedback. Edit files in place.
   Return ROADMAP REVISED with changes made.
   </revision>
+
+  <write_targets>
+  - ROADMAP.md: {roadmap_path}
+  - STATE.md: {state_path}
+  - REQUIREMENTS.md: {requirements_path}
+  </write_targets>
   ", subagent_type="gsd-roadmapper", model="{roadmapper_model}", description="Revise roadmap")
   ```
 
@@ -1105,7 +1132,7 @@ Use AskUserQuestion:
 - Present revised roadmap
 - Loop until user approves
 
-**If "Review full file":** Display raw `cat .planning/ROADMAP.md`, then re-ask.
+**If "Review full file":** Display raw `cat "{roadmap_path}"`, then re-ask.
 
 **Generate or refresh project instruction file before final commit:**
 
@@ -1118,7 +1145,7 @@ This ensures new projects get the default GSD workflow-enforcement guidance and 
 **Commit roadmap (after approval or auto mode):**
 
 ```bash
-gsd_run query commit "docs: create roadmap ([N] phases)" --files .planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md "$INSTRUCTION_FILE"
+gsd_run query commit "docs: create roadmap ([N] phases)" --files "{roadmap_path}" "{state_path}" "{requirements_path}" "$INSTRUCTION_FILE"
 ```
 
 ## 9. Done
@@ -1132,11 +1159,11 @@ Present completion summary:
 
 | Artifact       | Location                    |
 |----------------|-----------------------------|
-| Project        | `.planning/PROJECT.md`      |
-| Config         | `.planning/config.json`     |
-| Research       | `.planning/research/`       |
-| Requirements   | `.planning/REQUIREMENTS.md` |
-| Roadmap        | `.planning/ROADMAP.md`      |
+| Project        | `{project_path}`      |
+| Config         | `{config_path}`       |
+| Research       | `{research_dir}/`     |
+| Requirements   | `{requirements_path}` |
+| Roadmap        | `{roadmap_path}`      |
 | Project guide  | `$INSTRUCTION_FILE`         |
 
 **[N] phases** | **[X] requirements** | Ready to build ✓
@@ -1181,6 +1208,8 @@ PHASE1_HAS_UI=$(echo "$PHASE1_SECTION" | grep -qi "UI hint.*yes" && echo "true" 
 ---
 ```
 
+**For a named project (`planning_project` set):** add this line under the **Next Up** heading of whichever block you show: `Project {planning_project} is selected for this session. After /clear or in a new session, add --project {planning_project} to the command, e.g. /gsd:discuss-phase 1 --project {planning_project}`.
+
 **If Phase 1 has no UI:**
 
 ```
@@ -1206,17 +1235,17 @@ PHASE1_HAS_UI=$(echo "$PHASE1_SECTION" | grep -qi "UI hint.*yes" && echo "true" 
 
 <output>
 
-- `.planning/PROJECT.md`
-- `.planning/config.json`
-- `.planning/research/` (if research selected)
+- `{project_path}`
+- `{config_path}`
+- `{research_dir}/` (if research selected)
   - `STACK.md`
   - `FEATURES.md`
   - `ARCHITECTURE.md`
   - `PITFALLS.md`
   - `SUMMARY.md`
-- `.planning/REQUIREMENTS.md`
-- `.planning/ROADMAP.md`
-- `.planning/STATE.md`
+- `{requirements_path}`
+- `{roadmap_path}`
+- `{state_path}`
 - `$INSTRUCTION_FILE` (runtime-derived via the shared `getProjectInstructionFile` policy: `AGENTS.md` for codex/opencode/kilo/kimi, `.github/copilot-instructions.md` for copilot, `GEMINI.md` for antigravity, `.claude/CLAUDE.md` for claude)
 
 </output>

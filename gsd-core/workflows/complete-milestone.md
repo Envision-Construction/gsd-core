@@ -8,9 +8,7 @@ Mark a shipped version (v1.0, v1.1, v2.0) as complete. Creates historical record
 
 1. templates/milestone.md
 2. templates/milestone-archive.md
-3. `.planning/ROADMAP.md`
-4. `.planning/REQUIREMENTS.md`
-5. `.planning/PROJECT.md`
+3. The ROADMAP.md, REQUIREMENTS.md and PROJECT.md whose paths `verify_readiness` prints (scoped via `gsd_run query planning.dir`; never the root copies when a project or workstream is selected)
 
 </required_reading>
 
@@ -18,8 +16,8 @@ Mark a shipped version (v1.0, v1.1, v2.0) as complete. Creates historical record
 
 When a milestone completes:
 
-1. Extract full milestone details to `.planning/milestones/v[X.Y]-ROADMAP.md`
-2. Archive requirements to `.planning/milestones/v[X.Y]-REQUIREMENTS.md`
+1. Extract full milestone details to `milestones/v[X.Y]-ROADMAP.md` in the planning directory
+2. Archive requirements to `milestones/v[X.Y]-REQUIREMENTS.md` in the planning directory
 3. Update ROADMAP.md — overwrite in place with milestone grouping (preserve Backlog section)
 4. Safety commit archive files + updated ROADMAP.md, then `git rm REQUIREMENTS.md` (fresh for next milestone)
 5. Perform full PROJECT.md evolution review (flat mode only — skipped under an active workstream, #5195)
@@ -84,12 +82,20 @@ GSD_ARGS=${GSD_ARGS%$'\n'}
 GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
 INIT_MANAGER=$(gsd_run query init.manager ${GSD_WS:+--ws=${GSD_WS##* }})
 if [[ "$INIT_MANAGER" == @file:* ]]; then INIT_MANAGER=$(cat "${INIT_MANAGER#@file:}"); fi
+PLANNING_DIR=$(gsd_run query planning.dir --raw ${GSD_WS:+--ws=${GSD_WS##* }}) || exit 1
+PROJECT_DIR=$(gsd_run query planning.dir --pick project_dir ${GSD_WS:+--ws=${GSD_WS##* }}) || exit 1
+echo "Planning dir:    $PLANNING_DIR"
+echo "ROADMAP.md:      $PLANNING_DIR/ROADMAP.md"
+echo "REQUIREMENTS.md: $PLANNING_DIR/REQUIREMENTS.md"
+echo "PROJECT.md:      $PROJECT_DIR/PROJECT.md"
 ```
 
 This returns all phases with implementation and verification projection. Use this to verify:
 - Which phases belong to this milestone?
 - `all_phases_verified`: all milestone phases have `phase_complete === true` and `verification_status === 'passed'`.
 - `progress_percent` should be 100%.
+
+**Scoped paths.** Every later step reads and edits the files printed above (and `phases/`, `quick/`, `milestones/` under the printed planning dir), never a root `.planning/` path: under a named project or workstream the root copies belong to another project.
 
 Compute readiness from `INIT_MANAGER`, not from roadmap counts:
 
@@ -109,7 +115,7 @@ Only set `closeout_type=verified_closeout` when `ALL_PHASES_VERIFIED` is `true`.
 
 **Requirements completion check (REQUIRED before presenting):**
 
-Parse REQUIREMENTS.md traceability table:
+Parse the traceability table of the REQUIREMENTS.md printed above:
 - Count total v1 requirements vs checked-off (`[x]`) requirements
 - Identify any non-Complete rows in the traceability table
 
@@ -149,7 +155,8 @@ If user selects "Proceed anyway": set `closeout_type=override_closeout`; note in
 <config-check>
 
 ```bash
-cat .planning/config.json 2>/dev/null || true
+echo "mode: $(gsd_run query config-get mode --raw 2>/dev/null || true)"
+echo "gates.confirm_milestone_scope: $(gsd_run query config-get gates.confirm_milestone_scope --raw 2>/dev/null || true)"
 ```
 
 </config-check>
@@ -217,7 +224,13 @@ Extract one-liners from SUMMARY.md files using summary-extract:
 shopt -s nullglob 2>/dev/null; setopt NULL_GLOB 2>/dev/null
 
 # For each phase in milestone, extract one-liner
-for summary in .planning/phases/*-*/*-SUMMARY.md; do
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+PLANNING_DIR=$(gsd_run query planning.dir --raw ${GSD_WS:+--ws=${GSD_WS##* }}) || exit 1
+for summary in "$PLANNING_DIR"/phases/*-*/*-SUMMARY.md; do
   [ -e "$summary" ] || continue
   gsd_run query summary-extract "$summary" --fields one_liner --pick one_liner
 done
@@ -265,13 +278,13 @@ If the line above printed `PROJECT_MD_REVIEW=run` (the manifest is `null` or lis
 
 **Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Antigravity, etc.) where `AskUserQuestion` is not available.
 
-**Quick-task archival (opt-in — NOT symmetrical with phase archival below, #2142):** unlike phase archival, quick-task archival is **opt-in, default OFF**. Doing nothing leaves `.planning/quick/` untouched, exactly like today's behavior. Decide this BEFORE calling `milestone complete` below, so the flag can be folded into that single invocation rather than issuing a second, redundant call.
+**Quick-task archival (opt-in — NOT symmetrical with phase archival below, #2142):** unlike phase archival, quick-task archival is **opt-in, default OFF**. Doing nothing leaves `quick/` (in the planning dir) untouched, exactly like today's behavior. Decide this BEFORE calling `milestone complete` below, so the flag can be folded into that single invocation rather than issuing a second, redundant call.
 
-If `.planning/quick/` contains at least one directory, ask:
+If `quick/` in the planning dir printed by `verify_readiness` contains at least one directory, ask:
 
 AskUserQuestion: "Archive completed quick tasks into this milestone too?" with options: "Yes — archive quick tasks into v[X.Y]" | "Skip"
 
-If "Yes": set `ARCHIVE_QUICK_FLAG="--archive-quick"`. If "Skip" (or `.planning/quick/` is empty): set `ARCHIVE_QUICK_FLAG=""`.
+If "Yes": set `ARCHIVE_QUICK_FLAG="--archive-quick"`. If "Skip" (or `quick/` is empty): set `ARCHIVE_QUICK_FLAG=""`.
 
 **Delegate archival to `gsd_run query milestone.complete`:**
 
@@ -285,21 +298,21 @@ workflow has already gathered the user's explicit intent by this step, so passin
 correct; `--dry-run` previews the exact move list without mutating if a preview is ever needed first.
 
 The CLI handles:
-- Creating `.planning/milestones/` directory
+- Creating the planning dir's `milestones/` directory
 - Archiving ROADMAP.md to `milestones/v[X.Y]-ROADMAP.md`
 - Archiving REQUIREMENTS.md to `milestones/v[X.Y]-REQUIREMENTS.md` with archive header
 - Moving audit file to milestones if it exists
 - Creating/appending MILESTONES.md entry with accomplishments from SUMMARY.md files
 - Updating STATE.md (status, last activity)
-- When `ARCHIVE_QUICK_FLAG` is `--archive-quick`: moving every directory under `.planning/quick/` into `.planning/milestones/v[X.Y]-quick/`, writing a `README.md` index into that archive directory (generated by scanning the archive directory itself), and clearing the data rows of STATE.md's `### Quick Tasks Completed` table — preserving the table's header and whichever column variant (with/without a Status column) was detected
+- When `ARCHIVE_QUICK_FLAG` is `--archive-quick`: moving every directory under `quick/` into `milestones/v[X.Y]-quick/` (both in the planning dir), writing a `README.md` index into that archive directory (generated by scanning the archive directory itself), and clearing the data rows of STATE.md's `### Quick Tasks Completed` table — preserving the table's header and whichever column variant (with/without a Status column) was detected
 
 Extract from result: `version`, `date`, `phases`, `plans`, `tasks`, `accomplishments`, `archived`.
 
-Verify: `✅ Milestone archived to .planning/milestones/`
+Verify: `✅ Milestone archived to {planning dir}/milestones/`
 
-**Known limit (quick-task archival):** there is no on-disk provenance recording which milestone a given quick task belonged to. Archival buckets **all** remaining `.planning/quick/*` into the completing milestone — a quick task that predates an earlier, unarchived milestone lands in the current bucket regardless.
+**Known limit (quick-task archival):** there is no on-disk provenance recording which milestone a given quick task belonged to. Archival buckets **all** remaining `quick/*` into the completing milestone — a quick task that predates an earlier, unarchived milestone lands in the current bucket regardless.
 
-Verify after `--archive-quick` was passed: `✅ Quick tasks archived to .planning/milestones/v[X.Y]-quick/`
+Verify after `--archive-quick` was passed: `✅ Quick tasks archived to {planning dir}/milestones/v[X.Y]-quick/`
 
 **Phase archival (default-on):** `milestone complete` archives phase directories to `milestones/v[X.Y]-phases/` by default (#1871), so the next `/gsd:new-milestone` never inherits un-archived dirs. No manual `mkdir`/`mv` or `--archive-phases` flag is needed.
 
@@ -309,12 +322,12 @@ If the user explicitly wants to keep phase directories in place as raw execution
 gsd_run query milestone complete v[X.Y] --no-archive-phases --confirm
 ```
 
-Verify after a default (archived) completion: `✅ Phase directories archived to .planning/milestones/v[X.Y]-phases/`
+Verify after a default (archived) completion: `✅ Phase directories archived to {planning dir}/milestones/v[X.Y]-phases/`
 
 After archival, the AI still handles:
 - Reorganizing ROADMAP.md with milestone grouping (requires judgment) — overwrite in place after extracting Backlog section, with the write-guard's single-use sentinel armed first (a per-step env var cannot reach a hook — see the reorganize step for the sentinel mechanics)
 - Full PROJECT.md evolution review (requires understanding; flat mode only — skipped under `--ws`)
-- Safety commit of archive files + updated ROADMAP.md, then `git rm .planning/REQUIREMENTS.md`
+- Safety commit of archive files + updated ROADMAP.md, then `git rm` of the scoped REQUIREMENTS.md (`requirements_path`)
 - These are NOT fully delegated because they require AI interpretation of content
 
 </step>
@@ -363,7 +376,7 @@ printf '%s\n' "$ROADMAP_PATH" > .planning/.gsd-allow-shrink
 echo "Write target: $ROADMAP_PATH"
 ```
 
-2. Compose the full new ROADMAP.md content (template below) and overwrite the file at **`$ROADMAP_PATH`** (the "Write target" path printed above — under an active workstream this is the workstream-scoped roadmap, NOT the literal `.planning/ROADMAP.md`) with the **Write tool** — the normal path. The guard allows this one shrink and deletes the sentinel. If the Write is blocked anyway, the sentinel was stale or consumed — re-run the `printf` and retry the Write.
+2. Compose the full new ROADMAP.md content (template below) and overwrite the file at **`$ROADMAP_PATH`** (the "Write target" path printed above — under a named project or active workstream this is the scoped roadmap, NOT the root one) with the **Write tool** — the normal path. The guard allows this one shrink and deletes the sentinel. If the Write is blocked anyway, the sentinel was stale or consumed — re-run the `printf` and retry the Write.
 
 Template for the composed content:
 
@@ -414,7 +427,7 @@ gsd_run query commit "chore: archive v[X.Y] milestone files" --files "${ARCHIVE_
 
 This creates a durable checkpoint in git history. If anything fails after this point, the working tree can be reconstructed from git.
 
-MILESTONES.md is workstream-scoped the same way STATE.md/ROADMAP.md are (`planningPaths(cwd).planning`) — under an active workstream this commits the actual files `milestone complete` wrote, not the root copies. PROJECT.md is NOT: it is shared across workstreams, so under an active workstream it is neither reviewed nor staged here (#5195).
+MILESTONES.md is scoped like STATE.md/ROADMAP.md (project and workstream; `planningPaths(cwd).planning`) — under an active workstream this commits the actual files `milestone complete` wrote, not the root copies. PROJECT.md is per project and shared across that project's workstreams, so under an active workstream it is neither reviewed nor staged here (#5195).
 
 **Remove REQUIREMENTS.md via git rm** (preserves history, stages deletion atomically):
 
@@ -439,12 +452,13 @@ git rm "$REQUIREMENTS_PATH"
 
 Check for existing retrospective:
 ```bash
-ls .planning/RETROSPECTIVE.md 2>/dev/null || true
+PROJECT_DIR=$(gsd_run query planning.dir --pick project_dir) || exit 1
+ls "$PROJECT_DIR/RETROSPECTIVE.md" 2>/dev/null || true  # one retrospective per project
 ```
 
 **If exists:** Read the file, append new milestone section before the "## Cross-Milestone Trends" section.
 
-**If doesn't exist:** Create from template at `~/.claude/gsd-core/templates/retrospective.md`.
+**If doesn't exist:** Create `$PROJECT_DIR/RETROSPECTIVE.md` from template at `~/.claude/gsd-core/templates/retrospective.md`.
 
 **Gather retrospective data:**
 
@@ -489,7 +503,7 @@ If the "## Cross-Milestone Trends" section exists, update the tables with new da
 
 **Commit:**
 ```bash
-gsd_run query commit "docs: update retrospective for v${VERSION}" --files .planning/RETROSPECTIVE.md
+gsd_run query commit "docs: update retrospective for v${VERSION}" --files "$(gsd_run query planning.dir --pick project_dir)/RETROSPECTIVE.md"
 ```
 
 </step>
@@ -503,11 +517,13 @@ Most STATE.md updates were handled by `milestone complete`, but verify and updat
 ```markdown
 ## Project Reference
 
-See: .planning/PROJECT.md (updated [today])
+See: {project_path} (updated [today])
 
 **Core value:** [Current core value from PROJECT.md]
 **Current focus:** [Next milestone or "Planning next milestone"]
 ```
+
+Write `{project_path}` repo-relative: `$(gsd_run query planning.dir --pick project_dir_rel)/PROJECT.md`.
 
 **Accumulated Context:**
 - Clear decisions summary (full log in PROJECT.md)
@@ -558,7 +574,7 @@ Archived:
 - milestones/v[X.Y]-ROADMAP.md
 - milestones/v[X.Y]-REQUIREMENTS.md
 
-Summary: .planning/MILESTONES.md
+Summary: {milestones_path}
 Tag: v[X.Y]
 
 ---

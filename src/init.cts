@@ -35,6 +35,8 @@ import worktreeSafety = require('./worktree-safety.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 import planningWorkspace = require('./planning-workspace.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import activeProjectStore = require('./active-project-store.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningScopeMod = require('./planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 type Scope = planningScopeMod.Scope;
@@ -384,7 +386,9 @@ function buildPhaseCompletionProjection(
 }
 
 function getLatestCompletedMilestone(cwd: string): { version: string; name: string } | null {
-  const milestonesPath = path.join(planningRoot(cwd), 'MILESTONES.md');
+  // Read where `milestone complete` writes it (planningPaths(cwd).planning): the
+  // active workstream's or named project's MILESTONES.md, not the root project's.
+  const milestonesPath = path.join(planningDir(cwd), 'MILESTONES.md');
   const content = platformReadSync(milestonesPath);
   if (content === null) return null;
 
@@ -1597,6 +1601,9 @@ function cmdInitNewProject(cwd: string, raw: boolean, options: Record<string, un
     // read these instead of hardcoding '.planning/...' literals.
     requirements_path: toPosixPath(path.join(planningDir(cwd), 'REQUIREMENTS.md')),
     roadmap_path: toPosixPath(path.join(planningDir(cwd), 'ROADMAP.md')),
+    state_path: toPosixPath(path.join(planningDir(cwd), 'STATE.md')),
+    // Named project (.planning/<project>/) this run targets; null for the root project.
+    planning_project: process.env['GSD_PROJECT']?.trim() || null,
     // #4456 correction: an isolated review pass initially "fixed" this to
     // planningDir(cwd, null) on the assumption that config.json is shared
     // like PROJECT.md (workstream-flag.md's directory diagram marks it
@@ -1609,7 +1616,8 @@ function cmdInitNewProject(cwd: string, raw: boolean, options: Record<string, un
     // workstream-aware planningDir(cwd), matching the established,
     // ADR-governed, tested contract.
     config_path: toPosixPath(path.join(planningDir(cwd), 'config.json')),
-    research_dir: toPosixPath(path.join(planningRoot(cwd), 'research')),
+    // Project-scoped (GSD_PROJECT) so a second project's research never overwrites the root's.
+    research_dir: toPosixPath(path.join(planningDir(cwd, null), 'research')),
   };
 
   // #2992 (Phase 6.1): additive, optional field — degrades to null, never throws.
@@ -1648,13 +1656,15 @@ function cmdInitNewMilestone(cwd: string, raw: boolean, options: Record<string, 
     // placeholder as literal, un-substituted text.
     current_milestone: milestone['version'] ?? null,
     current_milestone_name: milestone['name'] ?? null,
+    // Named project (.planning/<project>/) this run targets; null for the root project.
+    planning_project: process.env['GSD_PROJECT']?.trim() || null,
     latest_completed_milestone: latestCompleted?.version || null,
     latest_completed_milestone_name: latestCompleted?.name || null,
     phase_dir_count: phaseDirCount,
     // #2376: absolute — see comment on phase_dir in cmdInitExecutePhase.
     phase_archive_path: latestCompleted
       ? toPosixPath(
-          path.join(planningRoot(cwd), 'milestones', `${latestCompleted.version}-phases`),
+          path.join(planningDir(cwd), 'milestones', `${latestCompleted.version}-phases`),
         )
       : null,
 
@@ -1684,7 +1694,8 @@ function cmdInitNewMilestone(cwd: string, raw: boolean, options: Record<string, 
     // workstream-aware planningDir(cwd), matching the established,
     // ADR-governed, tested contract.
     config_path: toPosixPath(path.join(planningDir(cwd), 'config.json')),
-    research_dir: toPosixPath(path.join(planningRoot(cwd), 'research')),
+    // Project-scoped (GSD_PROJECT) so a second project's research never overwrites the root's.
+    research_dir: toPosixPath(path.join(planningDir(cwd, null), 'research')),
     milestones_path: toPosixPath(path.join(planningDir(cwd), 'MILESTONES.md')),
     // #4456: new-milestone.md's Step 6 stages the phase-archive move
     // (`git add .planning/milestones/ .planning/phases/`) — both
@@ -4045,6 +4056,9 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
     roadmap_path: toPosixPath(path.join(planningDir(cwd), 'ROADMAP.md')),
     // #4455 follow-up: PROJECT.md is shared across workstreams.
     project_path: toPosixPath(path.join(planningDir(cwd, null), 'PROJECT.md')),
+    // Which project this session targets, and the named projects beside the root one.
+    planning_project: process.env['GSD_PROJECT']?.trim() || null,
+    projects: activeProjectStore.listProjects(cwd),
     // #4456 correction: an isolated review pass initially "fixed" this to
     // planningDir(cwd, null) on the assumption that config.json is shared
     // like PROJECT.md (workstream-flag.md's directory diagram marks it

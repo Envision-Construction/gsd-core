@@ -28,9 +28,12 @@ import planningInspect = require('./planning-inspect.cjs');
 import cjsCommandRouterAdapter = require('./cjs-command-router-adapter.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import io = require('./io.cjs');
+import path from 'node:path';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningWorkspace = require('./planning-workspace.cjs');
 
 const { routeCjsCommandFamily } = cjsCommandRouterAdapter;
-const { ERROR_REASON } = io;
+const { ERROR_REASON, output } = io;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,14 +48,17 @@ interface RoutePlanningCommandOptions {
   error: (message: string, reason?: string) => void;
   /** Test seam: inject a mock planning-inspect module. Defaults to the real one. */
   _planningInspect?: PlanningInspectModule;
+  /** Test seam: capture what `planning dir` emits. Defaults to io.output. */
+  _output?: (value: unknown, raw: boolean, rawValue?: unknown) => void;
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
 
-const PLANNING_SUBCOMMANDS = ['inspect'];
+const PLANNING_SUBCOMMANDS = ['inspect', 'dir'];
 
-function routePlanningCommand({ args, cwd, raw, error, _planningInspect }: RoutePlanningCommandOptions): void {
+function routePlanningCommand({ args, cwd, raw, error, _planningInspect, _output }: RoutePlanningCommandOptions): void {
   const mod: PlanningInspectModule = _planningInspect ?? planningInspect;
+  const emit = _output ?? output;
 
   routeCjsCommandFamily({
     args,
@@ -75,6 +81,28 @@ function routePlanningCommand({ args, cwd, raw, error, _planningInspect }: Route
           return;
         }
         mod.cmdPlanningInspect(cwd, raw);
+      },
+      // The scoped planning directory a workflow fence should use instead of a literal
+      // `.planning/`: `dir` holds ROADMAP/STATE/REQUIREMENTS/phases (project and
+      // workstream scoped); `project_dir` holds PROJECT.md and research (project scoped).
+      dir: () => {
+        if (args.length > 2) {
+          error(`planning dir takes no arguments; got: ${args[2]}. Usage: gsd-tools query planning dir`, ERROR_REASON.USAGE);
+          return;
+        }
+        const dir = planningWorkspace.planningDir(cwd);
+        const projectDir = planningWorkspace.planningDir(cwd, null);
+        // Relative to the GSD project root (where `.planning/` literals were anchored), for
+        // prompts read from another checkout such as a worktree executor.
+        const rel = (p: string) => path.relative(cwd, p).split(path.sep).join('/');
+        emit({
+          dir,
+          project_dir: projectDir,
+          dir_rel: rel(dir),
+          project_dir_rel: rel(projectDir),
+          project: process.env['GSD_PROJECT']?.trim() || null,
+          workstream: process.env['GSD_WORKSTREAM']?.trim() || null,
+        }, raw, dir);
       },
     },
   });

@@ -8,7 +8,8 @@ Run prior phases' test suites to catch cross-phase regressions BEFORE verificati
 **Step 1: Discover prior phases' test files**
 ```bash
 # Find all VERIFICATION.md files from prior phases in current milestone
-PRIOR_VERIFICATIONS=$(find .planning/phases/ -name "*-VERIFICATION.md" ! -path "*${PHASE_NUMBER}*" 2>/dev/null)
+_PHASES=$(dirname "{phase_dir}")  # the scoped phases/ dir (named project / workstream)
+PRIOR_VERIFICATIONS=$(find "$_PHASES/" -name "*-VERIFICATION.md" ! -path "$_PHASES/*${PHASE_NUMBER}*" 2>/dev/null)
 # gsd-handoff:begin regression-files-reset
 _GSD_HANDOFF="$( { git rev-parse --absolute-git-dir 2>/dev/null || echo "${TMPDIR:-/tmp}/gsd-$(pwd | cksum | cut -d' ' -f1)"; } )/gsd-handoff"; mkdir -p "$_GSD_HANDOFF"
 rm -f "$_GSD_HANDOFF/regression-files"  # a list left by an earlier run must never reach this gate (#4915)

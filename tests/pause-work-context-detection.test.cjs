@@ -119,6 +119,10 @@ function resolvePosixShell() {
 let contextDetectionBlock;
 let posixShell;
 
+// The block now opens with the gsd_run launcher preamble (it resolves the scoped
+// planning dir via `gsd_run query planning.dir`); RUNTIME_DIR points it at this checkout.
+const BLOCK_ENV = { ...process.env, RUNTIME_DIR: REPO_ROOT };
+
 before(() => {
   const markdown = fs.readFileSync(WORKFLOW_PATH, 'utf8');
   contextDetectionBlock = extractBashBlockAfterHeading(markdown, '## Context Detection');
@@ -133,7 +137,7 @@ function runBlock(setup) {
     const probe = `${contextDetectionBlock}\n` +
       'printf \'phase=%s\\nspike=%s\\nsketch=%s\\ndeliberation=%s\\n\' ' +
       '"$phase" "$spike" "$sketch" "$deliberation"\n';
-    const result = runHook('-c', [probe], { interpreter: 'bash', cwd: tmpDir });
+    const result = runHook('-c', [probe], { interpreter: 'bash', cwd: tmpDir, env: BLOCK_ENV });
     assert.equal(result.outcome, OUTCOME.EXITED, `bash exited abnormally: ${result.stderr}`);
     assert.equal(result.exitCode, 0, `bash exited ${result.exitCode}: ${result.stderr}`);
     const out = {};
@@ -155,7 +159,7 @@ describe('regression #4112: pause-work.md Context Detection block', () => {
         'regression here; this is still proven on the gsd-test Linux bench, where /bin/sh is dash');
       return;
     }
-    const result = runHook('-c', [contextDetectionBlock], { interpreter: posixShell });
+    const result = runHook('-c', [contextDetectionBlock], { interpreter: posixShell, env: BLOCK_ENV });
     assert.equal(result.outcome, OUTCOME.EXITED, `${posixShell} exited abnormally: ${result.stderr}`);
     assert.equal(result.exitCode, 0, `${posixShell} rejected the fixed block: ${result.stderr}`);
   });

@@ -49,7 +49,7 @@ ITEM_COUNT=$(printf '%s' "$BATCH_MANIFEST_JSON" | node -e 'let s="";process.stdi
 Report to user:
 ```
 Creating quick batch ${BATCH_ID}: ${ITEM_COUNT} item(s).
-Manifest: .planning/quick-batches/${BATCH_ID}/BATCH.json
+Manifest: ${quick_batches_dir}/${BATCH_ID}/BATCH.json
 ```
 
 Continue to Step 3 in `quick-batch.md`.

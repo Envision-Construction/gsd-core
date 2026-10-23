@@ -312,6 +312,8 @@ try {
 } catch { /* advisory — never block */ }
 
 const { resolveActiveWorkstream, applyResolvedWorkstreamEnv, peekActiveWorkstream } = require('./lib/active-workstream-store.cjs');
+const activeProjectStore = require('./lib/active-project-store.cjs');
+const { resolveActiveProject } = activeProjectStore;
 const { planningDir, planningRoot } = require('./lib/planning-workspace.cjs');
 const state = require('./lib/state.cjs');
 const phase = require('./lib/phase.cjs');
@@ -3411,6 +3413,19 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           }
   }
 
+  function routeProject({ args, cwd, raw, error }) {
+    const subcommand = args[1];
+    if (subcommand === 'set') {
+      activeProjectStore.cmdProjectSet(cwd, args[2], raw);
+    } else if (subcommand === 'get') {
+      activeProjectStore.cmdProjectGet(cwd, raw);
+    } else if (subcommand === 'list') {
+      activeProjectStore.cmdProjectList(cwd, raw);
+    } else {
+      error('Unknown project subcommand. Available: set, get, list', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+    }
+  }
+
   function routeWorktree({ args, cwd, raw, error }) {
     const subcommand = args[1];
           const worktreeSafety = require('./lib/worktree-safety.cjs');
@@ -4896,6 +4911,7 @@ const HOST_COMMAND_ROUTERS = {
     'summary-extract': routeSummaryExtract,
     'websearch': routeWebsearch,
     'workstream': routeWorkstream,
+    'project': routeProject,
     'worktree': routeWorktree,
     'docs-init': routeDocsInit,
     'learnings': routeLearnings,
@@ -5169,14 +5185,14 @@ function runWithTimeout(argv) {
 // this string and HOST_COMMAND_ROUTERS/SKIP_ROOT_RESOLUTION are three
 // independently hand-maintained sites and nothing previously caught them
 // drifting apart when a query command was added to only one or two.
-const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <field>] [--cwd <path>] [--project-dir <path>] [--ws <name>] [--json-errors] [--exit-contract=<v>]\n' +
+const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <field>] [--cwd <path>] [--project-dir <path>] [--ws <name>] [--project <name>] [--json-errors] [--exit-contract=<v>]\n' +
   'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-docs-guard, commit-to-subrepo, pr-subrepo, ' +
   'config-ensure-section, config-get, config-new-project, config-path, config-set, migrate-config, normalize-test-command, resolve-package-manager, ' +
   'context-predicates, current-timestamp, detect-custom-files, docs-init, drift-guard, effort, extract-messages, find-phase, ' +
   'from-gsd2, frontmatter, gap-analysis, generate-claude-md, generate-claude-profile, ' +
   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, planning, profile-questionnaire, ' +
-  'profile-sample, progress, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
+  'profile-sample, progress, project, project-instruction-file, prompt-budget, quick-batch, quick-tasks-append, quick-tasks-migrate, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, runtime-identity, scaffold, smart-entry, state, ' +
   'config-set-model-profile, dispatch-capacity, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
   'resolve-execution, review-lane, select-revert-commits, skill-manifest, skills-root, stamp-codebase-map, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
@@ -5186,6 +5202,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
   '  --cwd <path>       Override working directory for project-root resolution\n' +
   '  --project-dir <path>  Explicit project root; skips the ancestor walk-up entirely (must already contain .planning/)\n' +
   '  --ws <name>        Override active workstream (or set GSD_WORKSTREAM)\n' +
+  '  --project <name>   Use the named project in .planning/<name>/ (or set GSD_PROJECT; `project set` selects it for the session)\n' +
   '  --json-errors      Emit structured JSON error objects on stderr (or set GSD_JSON_ERRORS=1)\n' +
   '  --exit-contract=<v>  Exit-code contract version: v1 (default) or v2 (or set GSD_EXIT_CONTRACT)\n\n' +
   'For command-specific argument requirements, invoke the command without args ' +
@@ -5442,6 +5459,37 @@ async function main() {
   // state — reproduced in tests/undo-commit-selection-4465.test.cjs's linked-worktree case).
   const preWorktreeRemapCwd = cwd;
   cwd = resolveMainWorktreeCwd(cwd);
+
+  // Optional named-project namespace (.planning/<project>/) for a separate project in the same repo.
+  // Priority: --project flag > GSD_PROJECT env var > session pointer > root project.
+  // Keyed on the walked-up project root so a subdirectory resolves the same pointer.
+  let projectContext = null;
+  try {
+    projectContext = resolveActiveProject(projectDirExplicit ? cwd : findProjectRoot(cwd), args, process.env);
+  } catch (err) {
+    error(err.message || String(err), ERROR_REASON.USAGE);
+  }
+  args = projectContext.args;
+  if (projectContext.project) process.env.GSD_PROJECT = projectContext.project;
+  // A named project whose directory is gitignored exists only in the main worktree. A linked
+  // worktree still has the root project's tracked .planning/, so the remap above did not fire;
+  // follow the selected project there instead of resolving to a directory this checkout lacks.
+  if (projectContext.project && !projectDirExplicit) {
+    const projectRoot = findProjectRoot(cwd);
+    // Only a real project counts locally: a stray file written into a worktree (a handoff, say)
+    // must not hide the main checkout's project.
+    const isProject = (dir) => ['PROJECT.md', 'config.json'].some((f) => fs.existsSync(path.join(dir, '.planning', projectContext.project, f)));
+    if (!isProject(projectRoot)) {
+      const linkage = require('./lib/worktree-safety.cjs').resolveWorktreeLinkage(projectRoot);
+      if (linkage.reason === 'linked_worktree') {
+        // Keep a monorepo sub-project's place: the same path below the main worktree's top level.
+        let top = projectRoot;
+        while (!fs.existsSync(path.join(top, '.git')) && path.dirname(top) !== top) top = path.dirname(top);
+        const mainProjectRoot = path.join(linkage.effectiveRoot, path.relative(top, projectRoot));
+        if (isProject(mainProjectRoot)) cwd = mainProjectRoot;
+      }
+    }
+  }
 
   // Optional workstream override for parallel milestone work.
   // Priority: --ws flag > GSD_WORKSTREAM env var > session/shared pointer > null.

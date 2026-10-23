@@ -1,6 +1,6 @@
 # Milestone Archive Template
 
-This template is used by the complete-milestone workflow to create archive files in `.planning/milestones/`.
+This template is used by the complete-milestone workflow to create archive files in the selected project's milestones directory (`archive_dir` from `init.complete-milestone`; `.planning/[<project>/]milestones/`).
 
 ---
 
@@ -89,7 +89,7 @@ Plans:
 
 ---
 
-_For current project status, see .planning/ROADMAP.md_
+_For current project status, see {{PLANNING_DIR_REL}}/ROADMAP.md_
 
 ---
 
@@ -104,6 +104,7 @@ _For current project status, see .planning/ROADMAP.md_
 **How to fill template:**
 
 - Replace {{PLACEHOLDERS}} with actual values
+- `{{PLANNING_DIR_REL}}` is the repo-relative planning directory (`gsd_run query planning.dir --pick dir_rel`; `.planning` for the root project)
 - Extract phase details from ROADMAP.md
 - Document decimal phases with (INSERTED) marker
 - Include key decisions from PROJECT-STATE.md or SUMMARY files
@@ -112,8 +113,8 @@ _For current project status, see .planning/ROADMAP.md_
 
 **Archive location:**
 
-- Save to `.planning/milestones/v{VERSION}-{NAME}.md`
-- Example: `.planning/milestones/v1.0-mvp.md`
+- Save to `{archive_dir}/v{VERSION}-{NAME}.md` (`archive_dir` from `init.complete-milestone`)
+- Example: `.planning/[<project>/]milestones/v1.0-mvp.md`
 
 **After archiving:**
 

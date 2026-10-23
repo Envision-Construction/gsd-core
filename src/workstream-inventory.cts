@@ -22,7 +22,7 @@ const { readSubdirectories } = coreUtilsMod;
 import planScan = require('./plan-scan.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningPaths, planningRoot, getActiveWorkstream } = planningWorkspace;
+const { planningPaths, getActiveWorkstream } = planningWorkspace;
 import { stateFieldValue } from './state-document.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- frontmatter.cjs is an export= CommonJS module
 import frontmatterMod = require('./frontmatter.cjs');
@@ -79,7 +79,8 @@ interface WorkstreamInventoryList {
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 function workstreamsRoot(cwd: string): string {
-  return path.join(planningRoot(cwd), 'workstreams');
+  // The selected project's workstreams (`.planning/<project>/workstreams`, #3749).
+  return path.join(planningWorkspace.planningDir(cwd, null), 'workstreams');
 }
 
 /**

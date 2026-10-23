@@ -14,6 +14,8 @@ Invoke this Pi skill with `/skill:gsd-manager`.
 
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
+**Project selection:** if the arguments include `--project <name>`, the user is targeting the named project in `.planning/<name>/`. In the first shell command you run for this command (once `gsd_run` is defined), run `gsd_run query project.set <name>` and stop if it fails; then treat the remaining arguments as if `--project <name>` were absent. The selection holds for the rest of the session, including subagents.
+
 <objective>
 Single-terminal command center for managing a milestone. Shows a dashboard of all phases with visual status indicators, recommends optimal next actions, and dispatches work — discuss runs inline, plan/execute run as background agents.
 
@@ -21,7 +23,7 @@ Designed for power users who want to parallelize work across phases from one ter
 
 **Creates/Updates:**
 - No files created directly — dispatches to existing GSD commands via Skill() and background Task agents.
-- Reads `.planning/STATE.md`, `.planning/ROADMAP.md`, phase directories for status.
+- Reads `STATE.md`, `ROADMAP.md` and phase directories in the planning directory (resolved by `init.manager`) for status.
 
 **After:** User exits when done managing, or all phases complete and milestone lifecycle is suggested.
 </objective>

@@ -21,7 +21,7 @@ const { CONFIG_DEFAULTS, resolvePlannerStallDetectionEnabled } = configLoader;
 import { platformWriteSync, platformEnsureDir } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningDir, planningRoot, resolveEnvWorkstream, withPlanningLock } = planningWorkspace;
+const { planningDir, resolveEnvWorkstream, withPlanningLock } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import modelProfiles = require('./model-profiles.cjs');
 const { VALID_PROFILES, getAgentToModelMapForProfile, formatAgentToModelMapAsTable } = modelProfiles;
@@ -732,7 +732,8 @@ function cmdConfigNewProject(cwd: string, choicesJson: string | undefined, raw: 
   // The user defaults rewrite follows the config it was planned for: a
   // creation that fails before here leaves the defaults file as it was.
   persistDefaultsRewrite(plan);
-  output({ created: true, path: '.planning/config.json' }, raw, 'created');
+  // The file actually written (scoped by project/workstream), cwd-relative.
+  output({ created: true, path: path.relative(cwd, configPath).split(path.sep).join('/') }, raw, 'created');
 }
 
 /**
@@ -761,7 +762,7 @@ function ensureConfigFile(cwd: string): { created: boolean; reason?: string; pat
 
   try {
     platformWriteSync(configPath, JSON.stringify(config, null, 2));
-    return { created: true, path: '.planning/config.json' };
+    return { created: true, path: path.relative(cwd, configPath).split(path.sep).join('/') };
   } catch (err) {
     error('Failed to create config.json: ' + (err as Error).message);
   }
@@ -1454,7 +1455,7 @@ function cmdConfigGet(cwd: string, keyPath: string | undefined, raw: boolean, de
       config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
     } else {
       // #2702: when a workstream is active and has no config.json of its own, fall
-      // back to the project ROOT config first — a key the user configured at root is
+      // back to the project's own config first (repo-level for the root project) — a key configured there is
       // a real, present value and must inherit (per #1893: a present key wins over
       // --default). Only when root also misses do --default / schema default apply.
       // (When no workstream is active, resolveFromRootConfig is a no-op: same file.)
@@ -1532,8 +1533,8 @@ function cmdConfigGet(cwd: string, keyPath: string | undefined, raw: boolean, de
 }
 
 /**
- * #2702: resolve a dot-notation key against the project ROOT config
- * (`.planning/config.json`), ignoring any active workstream scope. Returns
+ * #2702: resolve a dot-notation key against the selected project's config
+ * (`.planning/[<project>/]config.json`), ignoring any active workstream scope. Returns
  * `{found:false}` when the root config is absent, unparseable, or does not
  * contain the key. This is the inheritance rung `cmdConfigGet` was missing —
  * when a workstream's own config doesn't set a key, the project root value
@@ -1552,7 +1553,8 @@ function resolveFromRootConfig(cwd: string, kp: string): { found: boolean; value
   // inherit root — matching the runtime's own `if (ws)` gate keeps the two surfaces
   // from diverging on the project-scoped (non-workstream) case.
   if (!resolveEnvWorkstream()) return { found: false, value: undefined };
-  const root = planningRoot(cwd);
+  // The workstream's own project config (the repo-level one for the root project, #3749).
+  const root = planningDir(cwd, null);
   const rootConfigPath = path.join(root, 'config.json');
   let rootConfig: Record<string, unknown>;
   try {

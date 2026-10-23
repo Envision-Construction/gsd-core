@@ -3,6 +3,6 @@
 ```bash
 if [ -n "${PHASE_REQ_IDS}" ]; then
   gsd_run query requirements.revert-phase ${PHASE_REQ_IDS} >/dev/null 2>&1 || true
-  gsd_run query commit "docs(phase-{X}): revert premature Complete requirements after gaps found" --files .planning/REQUIREMENTS.md >/dev/null 2>&1 || true
+  gsd_run query commit "docs(phase-{X}): revert premature Complete requirements after gaps found" --files "{requirements_path}" >/dev/null 2>&1 || true
 fi
 ```

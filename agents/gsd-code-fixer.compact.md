@@ -120,17 +120,27 @@ After applying each fix:
 <step name="setup_worktree">
 **Isolation: create a dedicated git worktree BEFORE touching any files.** This agent runs as a background process that commits — operating on the main working tree would race the foreground session (shared index/HEAD/files). Every instance runs in its own isolated worktree.
 
-**Honor `workflow.use_worktrees` (the documented opt-out; the same flag the sibling writer workflows `/gsd:execute-phase` and `/gsd:quick`, plus the `execute-plan` and `diagnose-issues` workflows, all honor — this is the only writer that hand-rolls its own worktree).** Read it directly via `node` from `.planning/config.json` (NOT the gsd-tools CLI — this step runs before the launcher preamble is sourced). When `false`: edit/commit in the main checkout directly — `wt="."`, `reviewfix_branch="$branch"`, no temp branch, no sentinel, no `git worktree add`, skip the whole cleanup tail. The hand-rolled worktree has no `node_modules` and cannot run the project's gates safely, so the opt-out is also the safe path.
+**Honor `workflow.use_worktrees` (the documented opt-out; the same flag the sibling writer workflows `/gsd:execute-phase` and `/gsd:quick`, plus the `execute-plan` and `diagnose-issues` workflows, all honor — this is the only writer that hand-rolls its own worktree).** Read it directly via `node` from the scoped `config.json` in the planning dir that holds `phase_dir` (NOT the gsd-tools CLI — this step runs before the launcher preamble is sourced); same ladder as config-get: a workstream that leaves the key unset inherits its project's config, and an unreadable config keeps worktrees on. When `false`: edit/commit in the main checkout directly — `wt="."`, `reviewfix_branch="$branch"`, no temp branch, no sentinel, no `git worktree add`, skip the whole cleanup tail. The hand-rolled worktree has no `node_modules` and cannot run the project's gates safely, so the opt-out is also the safe path.
 
 ```bash
+# phase_dir = <planning dir>/phases/<slug> (or <planning dir>/milestones/<v>-phases/<slug>).
 USE_WORKTREES=$(node -e '
   try {
-    const fs = require("fs");
-    const p = (process.env.GSD_PROJECT_DIR || process.cwd()) + "/.planning/config.json";
-    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-    process.stdout.write(String((cfg.workflow && cfg.workflow.use_worktrees) ?? true));
+    const fs = require("fs"), path = require("path");
+    const base = process.env.GSD_PROJECT_DIR || process.cwd();
+    const own = (dir) => {
+      try { const cfg = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf8")); return cfg.workflow && cfg.workflow.use_worktrees; }
+      catch { return undefined; }
+    };
+    if (!process.argv[1]) throw new Error("phase_dir unset");
+    const parent = path.resolve(base, process.argv[1], "..");
+    let dir = path.dirname(parent);
+    if (path.basename(parent).endsWith("-phases") && path.basename(dir) === "milestones") dir = path.dirname(dir);
+    let v = own(dir);
+    if (v == null && path.basename(path.dirname(dir)) === "workstreams") v = own(path.dirname(path.dirname(dir)));
+    process.stdout.write(String(v ?? true));
   } catch { process.stdout.write("true"); }
-')
+' "$phase_dir")
 
 branch=$(git branch --show-current)
 test -n "$branch" || { echo "Detached HEAD is not supported for review-fix (#2686)"; exit 1; }

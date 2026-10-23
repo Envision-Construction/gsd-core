@@ -87,7 +87,8 @@ still apply.
 
 ```bash
 # Commit with automatic commit_docs + gitignore checks:
-gsd_run query commit "docs: update state" --files .planning/STATE.md
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "docs: update state" --files "$PLANNING_DIR/STATE.md"
 
 # Load config via state load (returns JSON):
 INIT=$(gsd_run query state.load)
@@ -107,7 +108,8 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 **Commit via CLI (handles checks automatically):**
 
 ```bash
-gsd_run query commit "docs: update state" --files .planning/STATE.md
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "docs: update state" --files "$PLANNING_DIR/STATE.md"
 ```
 
 The CLI checks `commit_docs` config and gitignore status internally — no manual conditionals needed.

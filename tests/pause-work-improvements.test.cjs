@@ -224,10 +224,14 @@ function extractCheckBlock() {
   assert.fail('check_incomplete_work step must embed a ```bash code block');
 }
 
+// The fence resolves the selected project's planning dir through `gsd_run query planning.dir`
+// (#3749) and fails closed without it; this stand-in answers for the root project.
+const ROOT_PROJECT_GSD_RUN = "gsd_run() { printf '%s\\n' .planning; }";
+
 function runSnippet(cwd, snippet) {
   // has_interrupted_agent is a downstream-orchestrator variable; default it
   // to "false" so the embedded `if` branch is a no-op during this test.
-  return toLegacyResult(runHookSeam('-c', [snippet], {
+  return toLegacyResult(runHookSeam('-c', [`${ROOT_PROJECT_GSD_RUN}\n${snippet}`], {
     interpreter: 'bash',
     cwd,
     env: { ...process.env, has_interrupted_agent: 'false', interrupted_agent_id: '' },
@@ -362,11 +366,16 @@ const WORKFLOW_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'resume-proj
 // The discovery lines the workflow ships, read from resume-project.md itself (#4805) rather than a
 // copy that could drift: from the #2962 nullglob prelude (which keeps zsh NOMATCH from aborting a glob
 // loop) through the line before the next check. Shell builtins only, so it runs as is under bash and zsh.
-const DISCOVERY_SNIPPET = span(
-  'gsd-core/workflows/resume-project.md',
-  '# #2962: zsh aborts the block',
-  '# Check for plans without summaries',
-).join('\n');
+// The span resolves the planning dir through `gsd_run` (#3749); a shell-function stand-in for the
+// root project keeps it builtins-only.
+const DISCOVERY_SNIPPET = [
+  "gsd_run() { printf '%s\\n' .planning; }",
+  ...span(
+    'gsd-core/workflows/resume-project.md',
+    '# #2962: zsh aborts the block',
+    '# Check for plans without summaries',
+  ),
+].join('\n');
 
 // What the workflow shipped before #4805, kept only as a control: with `find` unavailable it prints nothing.
 const LEGACY_FIND_SNIPPET = [

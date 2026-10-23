@@ -22,7 +22,7 @@ Not sure where to start? `/gsd:next` reads your project state and routes you to 
 **`/gsd:next`**
 The state-aware front door. Detects your current situation and presents a short menu of the right next actions.
 
-- Reads `.planning/STATE.md`, git state, and verification signals via `gsd-tools smart-entry`
+- Reads `.planning/[<project>/]STATE.md`, git state, and verification signals via `gsd-tools smart-entry`
 - Classifies your situation (no-project, paused, blocked, planning, executing, needs-verify, idle, complete, …)
 - Shows a situation-appropriate menu with one recommended action, then dispatches
 - Launcher/router only — it never does the work itself; falls back to `/gsd:progress` if detection is unavailable
@@ -127,7 +127,7 @@ Create detailed execution plan for a specific phase.
 - `--no-tracer` — opt out of the default tracer-first slice and plan horizontal layers (legacy default)
 - `--no-reversibility-gates` — suppress the `checkpoint:decision` a `one-way`-door decision normally earns, for intentionally-unattended runs (ratings are still recorded)
 
-- Generates `.planning/phases/XX-phase-name/XX-YY-PLAN.md`
+- Generates `.planning/[<project>/]phases/XX-phase-name/XX-YY-PLAN.md`
 - Breaks phase into concrete, actionable tasks
 - Includes verification criteria and success measures
 - Multiple plans per phase supported (XX-01, XX-02, etc.)
@@ -136,7 +136,7 @@ Usage: `/gsd:plan-phase 1`
 Usage: `/gsd:plan-phase --research-phase 2` — research only on phase 2 (auto-uses existing `RESEARCH.md`, no prompt)
 Usage: `/gsd:plan-phase --research-phase 2 --view` — print existing `RESEARCH.md`, no spawn
 Usage: `/gsd:plan-phase --research-phase 2 --research` — force-refresh, no prompt
-Result: Creates `.planning/phases/01-foundation/01-01-PLAN.md`
+Result: Creates `.planning/[<project>/]phases/01-foundation/01-01-PLAN.md`
 
 **PRD Express Path:** Pass `--prd path/to/requirements.md` to skip discuss-phase entirely. Your PRD becomes locked decisions in CONTEXT.md. Useful when you already have clear acceptance criteria.
 
@@ -179,7 +179,7 @@ Execute small, ad-hoc tasks with GSD guarantees but skip optional agents.
 
 Quick mode uses the same system with a shorter path:
 - Spawns planner + executor (skips researcher, checker, verifier by default)
-- Quick tasks live in `.planning/quick/` separate from planned phases
+- Quick tasks live in `.planning/[<project>/]quick/` separate from planned phases
 - Updates STATE.md tracking (not ROADMAP.md)
 
 Flags enable additional quality steps:
@@ -193,7 +193,7 @@ Granular flags are composable: `--discuss --research --validate` gives the same 
 Usage: `/gsd:quick`
 Usage: `/gsd:quick --full`
 Usage: `/gsd:quick --research --validate`
-Result: Creates `.planning/quick/NNN-slug/PLAN.md`, `.planning/quick/NNN-slug/NNN-slug-SUMMARY.md`
+Result: Creates `.planning/[<project>/]quick/NNN-slug/PLAN.md`, `.planning/[<project>/]quick/NNN-slug/NNN-slug-SUMMARY.md`
 
 ---
 
@@ -203,7 +203,7 @@ Batch several `/gsd:quick`-shaped tasks together (inline list or `--file <path>`
 Flags: `--jobs auto|N` (cap concurrency at `min(tasks, N, capacity)`) · `--validate` (plan-checker + post-merge verification) · `--research` (per-item researcher) · `--resume <batch-id>` (dispatch only eligible items). `--discuss`/`--full` are rejected.
 
 Usage: `/gsd:quick-batch --jobs 3 --validate`
-Result: Per-item artifacts under `.planning/quick/`; batch state in `.planning/quick-batches/<batch-id>/BATCH.json`
+Result: Per-item artifacts under `.planning/[<project>/]quick/`; batch state in `.planning/[<project>/]quick-batches/<batch-id>/BATCH.json`
 
 ---
 
@@ -549,7 +549,7 @@ Configure workflow toggles and model profile interactively.
 
 - Toggle researcher, plan checker, verifier agents
 - Select model profile (quality/balanced/budget/inherit)
-- Updates `.planning/config.json`
+- Updates the selected project's `config.json`
 
 Usage: `/gsd:settings`
 
@@ -585,10 +585,10 @@ Usage: `/gsd:surface disable utility`
 **`/gsd:cleanup`**
 Archive accumulated phase directories from completed milestones.
 
-- Identifies phases from completed milestones still in `.planning/phases/`
+- Identifies phases from completed milestones still in `.planning/[<project>/]phases/`
 - Shows dry-run summary before moving anything
-- Moves phase dirs to `.planning/milestones/v{X.Y}-phases/`
-- Use after multiple milestones to reduce `.planning/phases/` clutter
+- Moves phase dirs to `.planning/[<project>/]milestones/v{X.Y}-phases/`
+- Use after multiple milestones to reduce `.planning/[<project>/]phases/` clutter
 
 Usage: `/gsd:cleanup`
 
@@ -754,11 +754,11 @@ Set during `/gsd:new-project`:
 - Executes plans without confirmation
 - Only stops for critical checkpoints
 
-Change anytime by editing `.planning/config.json`
+Change anytime by editing `.planning/[<project>/]config.json`
 
 ## Planning Configuration
 
-Configure how planning artifacts are managed in `.planning/config.json`:
+Configure how planning artifacts are managed in `.planning/[<project>/]config.json`:
 
 **`planning.commit_docs`** (default: `true`)
 - `true`: Planning artifacts committed to git (standard workflow)
@@ -839,8 +839,8 @@ Example config:
 
 ## Getting Help
 
-- Read `.planning/PROJECT.md` for project vision
-- Read `.planning/STATE.md` for current context
-- Check `.planning/ROADMAP.md` for phase status
+- Read `.planning/[<project>/]PROJECT.md` for project vision
+- Read `.planning/[<project>/]STATE.md` for current context
+- Check `.planning/[<project>/]ROADMAP.md` for phase status
 - Run `/gsd:progress` to check where you're up to
 </reference>

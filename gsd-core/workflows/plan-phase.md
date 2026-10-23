@@ -499,8 +499,10 @@ Display banner:
 
 Each PLAN.md must include a <threat_model> block.
 Block on: {SECURITY_BLOCK} severity threats.
-Opt out: set security_enforcement: false in .planning/config.json
+Opt out: set security_enforcement: false in {config_path}
 ```
+
+`{config_path}` is `gsd_run query config-path --raw` (the selected project's config.json).
 
 Continue to step 5.6. Security config is passed to the planner in step 8.
 
@@ -1448,7 +1450,8 @@ This operation is idempotent: if wave headers or cross-cutting constraints alrea
 If `commit_docs` is true (from the init JSON parsed in step 1), commit the generated plan artifacts (including any ROADMAP.md annotations from step 13c):
 
 ```bash
-gsd_run query commit "docs(${PADDED_PHASE}): create phase plan" --files "${PHASE_DIR}"/*-PLAN.md .planning/STATE.md .planning/ROADMAP.md
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1  # scoped: named project / workstream
+gsd_run query commit "docs(${PADDED_PHASE}): create phase plan" --files "${PHASE_DIR}"/*-PLAN.md "$PLANNING_DIR/STATE.md" "$PLANNING_DIR/ROADMAP.md"
 ```
 
 This commits all PLAN.md files for the phase plus the updated STATE.md and ROADMAP.md to version-control the planning artifacts. Skip this step if `commit_docs` is false.
@@ -1543,7 +1546,7 @@ Verification: {Passed | Passed with override | Skipped}
 ---
 
 **Also available:**
-- cat .planning/phases/{phase-dir}/*-PLAN.md — review plans
+- cat {phase_dir}/*-PLAN.md — review plans
 - /gsd:plan-phase {X} --research — re-research first
 - /gsd:review --phase {X} --all — peer review plans with external AIs
 - /gsd:plan-phase {X} --reviews — replan incorporating review feedback

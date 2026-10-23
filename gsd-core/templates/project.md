@@ -1,6 +1,6 @@
 # PROJECT.md Template
 
-Template for `.planning/PROJECT.md` — the living project context document.
+Template for `.planning/[<project>/]PROJECT.md` — the living project context document.
 
 <template>
 
@@ -192,12 +192,12 @@ STATE.md references PROJECT.md:
 ```markdown
 ## Project Reference
 
-See: .planning/PROJECT.md (updated [date])
+See: {project_dir_rel}/PROJECT.md (updated [date])
 
 **Core value:** [One-liner from Core Value section]
 **Current focus:** [Current phase name]
 ```
 
-This ensures Claude reads current PROJECT.md context.
+`{project_dir_rel}` is the repo-relative project directory (`gsd_run query planning.dir --pick project_dir_rel`). This ensures Claude reads current PROJECT.md context.
 
 </state_reference>

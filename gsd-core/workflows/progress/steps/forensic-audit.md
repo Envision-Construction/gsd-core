@@ -23,9 +23,10 @@ Read STATE.md `status` / `stopped_at` fields (from the STATE snapshot already lo
 
 Check for existence of:
 ```bash
-ls .planning/HANDOFF.json .planning/phases/*/.continue-here.md .planning/phases/*/*HANDOFF*.md 2>/dev/null || true
+PHASES_DIR="$(dirname "{roadmap_path}")/phases"  # scoped phases/ beside ROADMAP.md (named project / workstream)
+ls "${PHASES_DIR%/phases}/HANDOFF.json" "$PHASES_DIR"/*/.continue-here.md "$PHASES_DIR"/*/*HANDOFF*.md 2>/dev/null || true
 ```
-Also check `.planning/continue-here.md`.
+Also check `.continue-here.md` beside `{roadmap_path}` (the scoped planning dir).
 
 Emit:
 - ✓ `No orphaned handoff files` — if none found
@@ -33,9 +34,10 @@ Emit:
 
 **Check 3 — Deferred scope drift**
 
-Search phase artifacts (CONTEXT.md, DISCUSSION-LOG.md, BUG-BRIEF.md, VERIFICATION.md, SUMMARY.md, HANDOFF.md files under `.planning/phases/`) for patterns:
+Search phase artifacts (CONTEXT.md, DISCUSSION-LOG.md, BUG-BRIEF.md, VERIFICATION.md, SUMMARY.md, HANDOFF.md files under the scoped `phases/` directory beside `{roadmap_path}`) for patterns:
 ```bash
-grep -rl "defer to Phase\|future phase\|out of scope Phase\|deferred to Phase" .planning/phases/ 2>/dev/null || true
+PHASES_DIR="$(dirname "{roadmap_path}")/phases"
+grep -rl "defer to Phase\|future phase\|out of scope Phase\|deferred to Phase" "$PHASES_DIR/" 2>/dev/null || true
 ```
 
 For each match, extract the referenced phase number. Cross-reference against ROADMAP.md phase list. If the referenced phase number is NOT in ROADMAP.md, flag as deferred scope not captured.
@@ -86,7 +88,8 @@ Emit:
 
 Glob every phase directory's SCOPE BOUNDARY log (executor writes out-of-scope discoveries here per `agents/gsd-executor.md`):
 ```bash
-ls .planning/phases/*/deferred-items.md 2>/dev/null || true
+PHASES_DIR="$(dirname "{roadmap_path}")/phases"
+ls "$PHASES_DIR"/*/deferred-items.md 2>/dev/null || true
 ```
 
 For each `deferred-items.md` found, read its entries (bullet list, one entry per top-level list item — `-`, `*`, `+` or an ordered marker of one to nine digits terminated by a DOT, where an ordered list counts when it starts at `0.` or `1.` or continues a list already open at its level; `1)` is not a marker and neither is a ten-digit ordinal (`999999999.` counts, `1234567890.` does not) — with continuation lines indented beneath it; fenced code blocks at ANY indent, including deeper than CommonMark's three-space cap, and `* * *`-style separators are not entries; an unclosed fence ends with its own entry and never hides the entries after it; a closed pair of delimiters is a fence whatever sits between them). An entry is RESOLVED only if it carries an explicit `status: resolved` field on one of its lines — the bare key lower-case only, or the bolded `**Status:**` form in any case; the VALUE is case-insensitive in both; every other entry — including one with no `status:` field at all — is UNRESOLVED and must be surfaced (fail-safe: never silently drop a possibly-open item).

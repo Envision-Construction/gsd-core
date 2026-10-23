@@ -159,8 +159,9 @@ Assign the composed prompt to a shell variable so it can be passed as one argume
 #      An unreadable source file is a halt condition (#3637 fail-closed),
 #      never a skip — a child without these texts is not a gsd-executor.
 #   2. Substitute this plan's {plan_number}, {phase_number}, {phase_name},
-#      {phase_dir}, {plan_file}, {plan_id}, and {plan_padded} placeholders (same values the
-#      harness path substitutes into its Agent() prompt). {plan_id} is this
+#      {phase_dir}, {plan_file}, {plan_id}, {plan_padded}, {planning_dir_rel}, and
+#      {project_dir_rel} placeholders (same values the harness path substitutes
+#      into its Agent() prompt). {plan_id} is this
 #      plan's `id` field from the phase-plan-index JSON — the guard hooks
 #      compare it verbatim against the sentinel the per-plan gate wrote, so a
 #      paraphrase or omission costs the dispatch its recorded isolation
@@ -226,9 +227,9 @@ Read these files at execution start using the Read tool.
 First resolve repo root so every path is anchored:
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 - ${PROJECT_ROOT}/{phase_dir}/{plan_file} (Plan — THE plan you are executing)
-- ${PROJECT_ROOT}/.planning/PROJECT.md (Project context — core value, requirements, evolution rules)
-- ${PROJECT_ROOT}/.planning/STATE.md (State)
-- ${PROJECT_ROOT}/.planning/config.json (Config, if exists)
+- ${PROJECT_ROOT}/{project_dir_rel}/PROJECT.md (Project context — core value, requirements, evolution rules)
+- ${PROJECT_ROOT}/{planning_dir_rel}/STATE.md (State)
+- ${PROJECT_ROOT}/{project_dir_rel}/config.json (Config, if exists)
 - ${PROJECT_ROOT}/CLAUDE.md (Project instructions, if exists — follow project-specific guidelines and coding conventions)
 - ${PROJECT_ROOT}/.claude/skills/ or ${PROJECT_ROOT}/.agents/skills/ (Project skills, if either exists — list skills, read SKILL.md for each, follow relevant rules during implementation)
 - ${PROJECT_ROOT}/{phase_dir}/*-CONTEXT.md (User decisions from discuss-phase — honors locked choices; skip silently when none exist)

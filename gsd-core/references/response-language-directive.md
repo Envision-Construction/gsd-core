@@ -1,6 +1,6 @@
 # Response-Language Directive (#2529)
 
-**If `response_language` is set** (in the init JSON this workflow parses, or in `.planning/config.json`): ALL user-facing output of this workflow MUST be in that language — narration between tool calls, status updates, progress notes, findings, banners, report prose, questions (AskUserQuestion or plain text), and summaries. Technical terms, code, file paths, commands, and identifiers stay in English.
+**If `response_language` is set** (in the init JSON this workflow parses, or in the selected project's `config.json`): ALL user-facing output of this workflow MUST be in that language — narration between tool calls, status updates, progress notes, findings, banners, report prose, questions (AskUserQuestion or plain text), and summaries. Technical terms, code, file paths, commands, and identifiers stay in English.
 
 Literal English report/banner templates embedded in a workflow are a structural SOURCE, not literal output to copy verbatim — render their prose translated into `{response_language}` while keeping headings' structural markers, table columns, IDs, commands, and file paths unchanged. Exception: blocks a workflow explicitly requires to be emitted byte-for-byte (e.g. pre-rendered checkpoints) are output exactly as rendered.
 

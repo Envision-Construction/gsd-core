@@ -32,7 +32,7 @@ INIT=$(gsd_run query init.resume ${GSD_WS:+--ws=${GSD_WS##* }})
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
-Parse JSON for: `state_exists`, `roadmap_exists`, `project_exists`, `planning_exists`, `requirements_exists`, `init_incomplete`, `has_interrupted_agent`, `interrupted_agent_id`, `commit_docs`.
+Parse JSON for: `state_exists`, `roadmap_exists`, `project_exists`, `planning_exists`, `requirements_exists`, `init_incomplete`, `has_interrupted_agent`, `interrupted_agent_id`, `commit_docs`, `state_path`, `roadmap_path`, `project_path` (the selected project's files; use these paths, not root `.planning/` literals).
 
 **If `init_incomplete` is true (#4040 — interrupted bootstrap):** `.planning/` exists but initialization never finished — one or more of `REQUIREMENTS.md`, `ROADMAP.md`, `STATE.md` were never created. This is NOT a STATE.md-reconstruction case (there is no project history to reconstruct from). Route to initialization recovery: resume `/gsd:new-project`, which continues from the first missing artifact and keeps the existing PROJECT.md and any already-created artifacts. Do not proceed to load_state.
 
@@ -46,8 +46,8 @@ Parse JSON for: `state_exists`, `roadmap_exists`, `project_exists`, `planning_ex
 Read and parse STATE.md, then PROJECT.md:
 
 ```bash
-cat .planning/STATE.md
-cat .planning/PROJECT.md
+cat "{state_path}"
+cat "{project_path}"
 ```
 
 **From STATE.md extract:**
@@ -73,21 +73,34 @@ cat .planning/PROJECT.md
 Look for incomplete work that needs attention:
 
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+
 # #2962: zsh aborts the block on an unmatched for-list glob (nomatch); bash passes it through. nullglob both.
 shopt -s nullglob 2>/dev/null; setopt NULL_GLOB 2>/dev/null
 
-# Check for structured handoff (preferred — machine-readable)
-cat .planning/HANDOFF.json 2>/dev/null || true
+# Selected project's (or workstream's) planning dir (`<repo>/.planning` for the root project).
+# Fails closed: guessing `.planning` would resume (and delete) another project's handoff.
+_PD=$(gsd_run query planning.dir --raw ${GSD_WS:+--ws=${GSD_WS##* }}) || exit 1
 
-# Check for continue-here files (phase + non-phase + legacy fallback), three levels below .planning.
+# Check for structured handoff (preferred — machine-readable); pause-work writes it to the scoped dir
+cat "$_PD/HANDOFF.json" 2>/dev/null || true
+
+# Check for continue-here files: the scoped dir's top level and phases, the repo-level spike / sketch /
+# deliberation handoffs, and the legacy repo-root file. Never another project's: a root-project scan
+# does not descend into `.planning/<project>/`, and a named project's scan skips the root phases.
 # Guarded glob loops, not `find` and not a chained `ls` of bare globs (#4805, #3689):
 #  - a chained `ls` of bare globs aborts under zsh's default NOMATCH on the first miss, silently
-#    dropping every pattern after it, including `.planning/.continue-here*.md` (#3689);
+#    dropping every pattern after it, including the top-level `.continue-here*.md` (#3689);
 #  - `find` is an external binary that allowlisted agent shells (an fd-only policy, for one) refuse, and a
 #    per-line `2>/dev/null || true` then hid the refusal, so a checkpoint on disk looked absent (#4805).
 # The shell alone does this: nullglob (set above) drops an unmatched glob, `[ -e ]` guards the shells that
-# keep it, and an absent directory simply matches nothing. Output is `.planning/...` and `./...` as before.
-for f in .planning/.continue-here*.md .planning/*/.continue-here*.md .planning/*/*/.continue-here*.md ./.continue-here*.md; do
+# keep it, and an absent directory simply matches nothing. Output is absolute for the scoped dir and `.planning/...` / `./...` for the repo-level handoffs.
+for f in "$_PD"/.continue-here*.md "$_PD"/phases/*/.continue-here*.md .planning/spikes/*/.continue-here*.md \
+  .planning/sketches/.continue-here*.md .planning/sketches/*/.continue-here*.md .planning/deliberations/.continue-here*.md ./.continue-here*.md; do
   if [ -e "$f" ]; then echo "$f"; fi
 done 2>/dev/null || true
 
@@ -100,7 +113,7 @@ for f in .planning/async-jobs/*.json; do
 done 2>/dev/null || true
 
 # Check for plans without summaries (incomplete execution)
-for plan in .planning/phases/*/*-PLAN.md; do
+for plan in "$_PD"/phases/*/*-PLAN.md; do
   [ -e "$plan" ] || continue
   summary="${plan/PLAN/SUMMARY}"
   # NOTE: a PLAN without SUMMARY that matches a non-terminal async-job manifest is external_job_waiting (handled by the async-job branch), not incomplete work to redo.
@@ -122,7 +135,7 @@ fi
 - Validate `uncommitted_files` against `git status` — flag divergence
 - Use `context_notes` to restore mental model
 - Flag: "Found structured handoff — resuming from task {task}/{total_tasks}"
-- **After successful resumption, delete HANDOFF.json** (it's a one-shot artifact)
+- **After successful resumption, delete that scoped HANDOFF.json** (`$_PD/HANDOFF.json`; it's a one-shot artifact — never delete another project's)
 
 **If .continue-here file exists (phase/non-phase/legacy fallback):**
 
@@ -252,7 +265,7 @@ What would you like to do?
 **Note:** When offering phase planning, check for CONTEXT.md existence first:
 
 ```bash
-ls .planning/phases/XX-name/*-CONTEXT.md 2>/dev/null || true
+ls "$(dirname "{roadmap_path}")"/phases/XX-name/*-CONTEXT.md 2>/dev/null || true
 ```
 
 If missing, suggest discuss-phase before plan. If exists, offer plan directly.

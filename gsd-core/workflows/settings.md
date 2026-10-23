@@ -1,5 +1,5 @@
 <purpose>
-Interactive configuration of GSD workflow agents (research, plan_check, verifier) and model profile selection via multi-question prompt. Updates .planning/config.json with user preferences. Optionally saves settings as global defaults (~/.gsd/defaults.json) for future projects.
+Interactive configuration of GSD workflow agents (research, plan_check, verifier) and model profile selection via multi-question prompt. Updates the selected project's config.json with user preferences. Optionally saves settings as global defaults (~/.gsd/defaults.json) for future projects.
 </purpose>
 
 <required_reading>
@@ -17,21 +17,16 @@ RESPONSE_LANGUAGE=$(gsd_run query config-get response_language --raw --default "
 gsd_run query config-ensure-section
 INIT=$(gsd_run query state.load)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
-# `state.load` returns STATE frontmatter JSON from the SDK — it does not include `config_path`. Orchestrators may set `GSD_CONFIG_PATH` from init phase-op JSON; otherwise resolve the same path gsd-tools uses for flat vs active workstream (#2282).
+# `state.load` returns STATE frontmatter JSON from the SDK — it does not include `config_path`. Orchestrators may set `GSD_CONFIG_PATH` from init phase-op JSON; otherwise `config-path` resolves the same path gsd-tools uses for the selected project and active workstream (#2282).
 if [[ -z "${GSD_CONFIG_PATH:-}" ]]; then
-  if [[ -f .planning/active-workstream ]]; then
-    WS=$(tr -d '\n\r' < .planning/active-workstream)
-    GSD_CONFIG_PATH=".planning/workstreams/${WS}/config.json"
-  else
-    GSD_CONFIG_PATH=".planning/config.json"
-  fi
+  GSD_CONFIG_PATH=$(gsd_run query config-path --raw)
 fi
 ```
 
 **If `response_language` is set:** All user-facing output of this workflow — narration between tool calls, status updates, progress notes, findings, questions, prompts, and explanations — MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
 
 Creates `config.json` (at the resolved path) with defaults if missing. `INIT` still holds `state.load` output for any step that needs STATE fields.
-Store `$GSD_CONFIG_PATH` — all subsequent reads and writes use this path, not a hardcoded `.planning/config.json`, so active-workstream installs target the correct file (#2282).
+Store `$GSD_CONFIG_PATH` — all subsequent reads and writes use this path, never a hardcoded root `config.json` path, so named-project and active-workstream installs target the correct file (#2282).
 </step>
 
 <step name="read_current">
@@ -76,7 +71,7 @@ Parse current values (default to `true` if not present):
 
 ```
 Note: Quality, Balanced, Budget, and Adaptive profiles assign semantic tiers
-(Opus/Sonnet/Haiku) to each agent. When `runtime` is set in .planning/config.json,
+(Opus/Sonnet/Haiku) to each agent. When `runtime` is set in the selected project's config.json,
 tiers resolve to runtime-native model IDs — on Codex that's gpt-5.6-sol / gpt-5.6-terra /
 gpt-5.6-luna with appropriate reasoning effort. See "Runtime-Aware Profiles" in
 docs/CONFIGURATION.md.
@@ -84,7 +79,7 @@ docs/CONFIGURATION.md.
 If `runtime` is unset on a non-Claude runtime, the profile tiers have no effect on
 actual model selection — agents use the runtime's default model. Choose "Inherit" to
 force session-model behavior, set `runtime` + a profile to get tiered models, or
-configure `model_overrides` manually in .planning/config.json to target specific
+configure `model_overrides` manually in the selected project's config.json to target specific
 models per agent.
 ```
 
@@ -547,7 +542,7 @@ Merge new settings into existing config.json:
 
 `model_profile` is written on Q1 "Adaptive (Recommended)" (→ adaptive) or Q1 "Inherit" (→ inherit) immediately; for Q1 "Standard tier…", `model_profile` is written from Q2's answer. If Q1 = "Standard tier…" but Q2 is cancelled, leave the existing `model_profile` value unchanged — do not write any new value.
 
-Write updated config to `$GSD_CONFIG_PATH` (the workstream-aware path resolved in `ensure_and_load_config`). Never hardcode `.planning/config.json` — workstream installs route to `.planning/workstreams/<slug>/config.json`.
+Write updated config to `$GSD_CONFIG_PATH` (the workstream-aware path resolved in `ensure_and_load_config`). Never hardcode the root `config.json` — named projects and workstreams route to their own (`.planning/[<project>/][workstreams/<slug>/]config.json`).
 </step>
 
 <step name="save_as_defaults">

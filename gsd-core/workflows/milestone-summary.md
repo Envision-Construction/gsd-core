@@ -17,10 +17,12 @@ GSD_ARGS=${GSD_ARGS%$'\n'}
 VERSION="$GSD_ARGS"
 ```
 
+`$PLANNING_DIR` below is the scoped planning directory (`gsd_run query planning.dir --raw`: STATE.md, ROADMAP.md, REQUIREMENTS.md, milestones/, phases/) and `$PROJECT_DIR` the project directory (`gsd_run query planning.dir --pick project_dir`: PROJECT.md). Both are `.planning` for the root project.
+
 If `$ARGUMENTS` is empty:
-1. Check `.planning/STATE.md` for current milestone version
-2. Check `.planning/milestones/` for the latest archived version
-3. If neither found, check if `.planning/ROADMAP.md` exists (project may be mid-milestone)
+1. Check `$PLANNING_DIR/STATE.md` for current milestone version
+2. Check `$PLANNING_DIR/milestones/` for the latest archived version
+3. If neither found, check if `$PLANNING_DIR/ROADMAP.md` exists (project may be mid-milestone)
 4. If nothing found: error "No milestone found. Run /gsd:new-project or /gsd:new-milestone first."
 
 Set `VERSION` to the resolved version (e.g., "1.0").
@@ -29,27 +31,27 @@ Set `VERSION` to the resolved version (e.g., "1.0").
 
 Determine whether the milestone is **archived** or **current**:
 
-**Archived milestone** (`.planning/milestones/v{VERSION}-ROADMAP.md` exists):
+**Archived milestone** (`$PLANNING_DIR/milestones/v{VERSION}-ROADMAP.md` exists):
 ```
-ROADMAP_PATH=".planning/milestones/v${VERSION}-ROADMAP.md"
-REQUIREMENTS_PATH=".planning/milestones/v${VERSION}-REQUIREMENTS.md"
-AUDIT_PATH=".planning/milestones/v${VERSION}-MILESTONE-AUDIT.md"
+ROADMAP_PATH="$PLANNING_DIR/milestones/v${VERSION}-ROADMAP.md"
+REQUIREMENTS_PATH="$PLANNING_DIR/milestones/v${VERSION}-REQUIREMENTS.md"
+AUDIT_PATH="$PLANNING_DIR/milestones/v${VERSION}-MILESTONE-AUDIT.md"
 ```
 
 **Current/in-progress milestone** (no archive yet):
 ```
-ROADMAP_PATH=".planning/ROADMAP.md"
-REQUIREMENTS_PATH=".planning/REQUIREMENTS.md"
-AUDIT_PATH=".planning/v${VERSION}-MILESTONE-AUDIT.md"
+ROADMAP_PATH="$PLANNING_DIR/ROADMAP.md"
+REQUIREMENTS_PATH="$PLANNING_DIR/REQUIREMENTS.md"
+AUDIT_PATH="$PLANNING_DIR/v${VERSION}-MILESTONE-AUDIT.md"
 ```
 
-Note: The audit file moves to `.planning/milestones/` on archive (per `complete-milestone` workflow). Check both locations as a fallback.
+Note: The audit file moves to `$PLANNING_DIR/milestones/` on archive (per `complete-milestone` workflow). Check both locations as a fallback.
 
 **Always available:**
 ```
-PROJECT_PATH=".planning/PROJECT.md"
-RETRO_PATH=".planning/RETROSPECTIVE.md"
-STATE_PATH=".planning/STATE.md"
+PROJECT_PATH="$PROJECT_DIR/PROJECT.md"
+RETRO_PATH="$PROJECT_DIR/RETROSPECTIVE.md"
+STATE_PATH="$PLANNING_DIR/STATE.md"
 ```
 
 Read all files that exist. Missing files are fine — the summary adapts to what's available.
@@ -100,9 +102,10 @@ git log --oneline --since="<started_at_date>" | wc -l
 ```
 
 **Method 3 — Earliest phase commit** (if STATE.md has no date):
-Find the earliest `.planning/phases/` commit:
+Find the earliest `$PLANNING_DIR/phases/` commit:
 ```bash
-git log --oneline --diff-filter=A -- ".planning/phases/" | tail -1
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+git log --oneline --diff-filter=A -- "$PLANNING_DIR/phases/" | tail -1
 ```
 Use that commit's date as the start boundary.
 
@@ -117,7 +120,7 @@ Extract (when available):
 
 ## Step 5: Generate Summary Document
 
-Write to `.planning/reports/MILESTONE_SUMMARY-v${VERSION}.md`:
+Write to `$PROJECT_DIR/reports/MILESTONE_SUMMARY-v${VERSION}.md` (each project keeps its own reports; versions repeat across projects):
 
 ```markdown
 # Milestone v{VERSION} — Project Summary
@@ -190,19 +193,20 @@ Present as a bulleted list of decisions with brief rationale:
 
 ## Step 6: Write and Commit
 
-**Overwrite guard:** If `.planning/reports/MILESTONE_SUMMARY-v${VERSION}.md` already exists, ask the user:
+**Overwrite guard:** If `$PROJECT_DIR/reports/MILESTONE_SUMMARY-v${VERSION}.md` already exists, ask the user:
 > "A milestone summary for v{VERSION} already exists. Overwrite it, or view the existing one?"
 If "view": display existing file and skip to Step 8 (interactive mode). If "overwrite": proceed.
 
 Create the reports directory if needed:
 ```bash
-mkdir -p .planning/reports
+PROJECT_DIR=$(gsd_run query planning.dir --pick project_dir) || exit 1
+mkdir -p "$PROJECT_DIR/reports"
 ```
 
 Write the summary, then commit:
 ```bash
 gsd_run query commit "docs(v${VERSION}): generate milestone summary for onboarding" --files \
-  ".planning/reports/MILESTONE_SUMMARY-v${VERSION}.md"
+  "$(gsd_run query planning.dir --pick project_dir)/reports/MILESTONE_SUMMARY-v${VERSION}.md"
 ```
 
 ## Step 7: Present Summary
@@ -213,7 +217,7 @@ Display the full summary document inline.
 
 After presenting the summary:
 
-> "Summary written to `.planning/reports/MILESTONE_SUMMARY-v{VERSION}.md`.
+> "Summary written to `$PROJECT_DIR/reports/MILESTONE_SUMMARY-v{VERSION}.md`.
 >
 > I have full context from the build artifacts. Want to ask anything about the project?
 > Architecture decisions, specific phases, requirements, tech debt — ask away."
@@ -231,5 +235,5 @@ If the user is done:
 ```bash
 gsd_run query state.record-session \
   --stopped-at "Milestone v${VERSION} summary generated" \
-  --resume-file ".planning/reports/MILESTONE_SUMMARY-v${VERSION}.md"
+  --resume-file "$(gsd_run query planning.dir --pick project_dir_rel)/reports/MILESTONE_SUMMARY-v${VERSION}.md"
 ```

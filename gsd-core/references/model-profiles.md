@@ -21,7 +21,7 @@ Model profiles control which Claude model each GSD agent uses. This allows balan
 
 ## Per-Phase-Type Model Map (#3023)
 
-`.planning/config.json` accepts a coarse per-**phase-type** map under the `models` key. Use this when you want tuning at the phase level ("Opus for planning and execution, Sonnet for the rest") without learning the agent taxonomy.
+The selected project's `config.json` accepts a coarse per-**phase-type** map under the `models` key. Use this when you want tuning at the phase level ("Opus for planning and execution, Sonnet for the rest") without learning the agent taxonomy.
 
 ```json
 {
@@ -129,7 +129,7 @@ If you're using Claude Code with OpenRouter, a local model, or any non-Anthropic
 /gsd:settings
 # → Select "Inherit" for model profile
 
-# Or manually in .planning/config.json
+# Or manually in config.json (path: gsd_run query config-path)
 {
   "model_profile": "inherit"
 }
@@ -166,7 +166,7 @@ The advisor is a single session-wide setting inherited by all subagents; there i
 
 ## Dynamic Routing with Failure-Tier Escalation (#3024)
 
-When `dynamic_routing.enabled = true` in `.planning/config.json`, the resolver picks a model from a tier-mapped table based on the agent's *default tier* (light / standard / heavy) and escalates to the next tier up on orchestrator-detected soft failure.
+When `dynamic_routing.enabled = true` in the selected project's `config.json`, the resolver picks a model from a tier-mapped table based on the agent's *default tier* (light / standard / heavy) and escalates to the next tier up on orchestrator-detected soft failure.
 
 ```json
 {
@@ -213,7 +213,7 @@ Orchestrators resolve model before spawning. The full precedence ladder
 is (highest → lowest):
 
 ```text
-1. Read .planning/config.json
+1. Read config (the project/workstream ladder: gsd_run query config-get <key>)
 2. Check model_overrides[<agent>] (full IDs accepted; targeted exceptions)
 3. If dynamic_routing.enabled, return tier_models[escalated_tier]
    (see §Dynamic Routing — escalation steps tier up per attempt counter)
@@ -228,7 +228,7 @@ is (highest → lowest):
 
 `model` and `effort` resolve through different mechanisms at different
 times — they do not share the ladder above. `model` resolves at runtime,
-per spawn, from `.planning/config.json`; a config change takes effect on
+per spawn, from the selected project's `config.json`; a config change takes effect on
 the next spawn. `effort` (claude runtime) has its own cascade
 (`agent_overrides` → `routing_tier_defaults` → `default`; see
 `docs/CONFIGURATION.md` § "Where effort actually reaches") and is baked at
@@ -261,7 +261,7 @@ On the Claude runtime, fully-qualified Claude model IDs are honored as explicit 
 
 Runtime: `/gsd-set-profile <profile>`
 
-Per-project default: Set in `.planning/config.json`:
+Per-project default: Set in the selected project's `config.json` (`gsd_run query config-path --raw`):
 ```json
 {
   "model_profile": "balanced"

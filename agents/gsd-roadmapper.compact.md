@@ -247,8 +247,8 @@ Post-write `## ROADMAP CREATED` return (orchestrator branches only on `ROADMAP C
 ## ROADMAP CREATED
 
 **Files written:**
-- .planning/ROADMAP.md
-- .planning/STATE.md
+- {roadmap_path}
+- {state_path}
 
 ### Roadmap Preview
 
@@ -314,10 +314,12 @@ Verify 100% requirement mapping — no orphans, no duplicates. Gaps found → in
 ## Step 7: Write Files Immediately
 **ALWAYS use the Write tool** — never heredoc. Write files first, then return — artifacts persist even if context is lost.
 
-**Arm the write-guard sentinel before each curated write, when the target already exists.** On `/gsd:new-milestone`, `.planning/ROADMAP.md`/`STATE.md` still hold the *outgoing* milestone's content and the replacement is a legitimate, intentional shrink — the `gsd-write-guard` PreToolUse hook (#2255) hard-blocks curated `.planning/` writes otherwise. A hook inherits the runtime's environment (no per-step env var reaches it); the hatch is a **single-use sentinel file the guard itself consumes** — path-bound and single-use, so arm immediately before each Write (one arming never covers both files). On `/gsd:new-project`, neither target exists, the guard exempts the write (ENOENT), and `[ -f ]` skips arming — no unconsumed token left on disk.
+**Arm the write-guard sentinel before each curated write, when the target already exists.** On `/gsd:new-milestone`, the target ROADMAP.md/STATE.md still hold the *outgoing* milestone's content and the replacement is a legitimate, intentional shrink — the `gsd-write-guard` PreToolUse hook (#2255) hard-blocks curated `.planning/` writes otherwise. A hook inherits the runtime's environment (no per-step env var reaches it); the hatch is a **single-use sentinel file the guard itself consumes** — path-bound and single-use, so arm immediately before each Write (one arming never covers both files). On `/gsd:new-project`, neither target exists, the guard exempts the write (ENOENT), and `[ -f ]` skips arming — no unconsumed token left on disk.
 
-1. **Write ROADMAP.md** — arm first: `[ -f .planning/ROADMAP.md ] && printf '.planning/ROADMAP.md\n' > .planning/.gsd-allow-shrink`, then Write.
-2. **Write STATE.md** — arm first: `[ -f .planning/STATE.md ] && printf '.planning/STATE.md\n' > .planning/.gsd-allow-shrink`, then Write.
+**Write targets.** A `<write_targets>` block in the prompt names the exact ROADMAP.md, STATE.md and REQUIREMENTS.md paths (they may sit under `.planning/<project>/` or a workstream); write there and arm with those paths, since the root copies belong to a different project or workstream; without the block, resolve them with `gsd_run query planning.dir --raw`. The sentinel itself stays at `.planning/.gsd-allow-shrink`.
+
+1. **Write ROADMAP.md** — arm first: `ROADMAP_TARGET="{roadmap_path}"; [ -f "$ROADMAP_TARGET" ] && printf '%s\n' "$ROADMAP_TARGET" > .planning/.gsd-allow-shrink`, then Write.
+2. **Write STATE.md** — arm first: `STATE_TARGET="{state_path}"; [ -f "$STATE_TARGET" ] && printf '%s\n' "$STATE_TARGET" > .planning/.gsd-allow-shrink`, then Write.
 3. **Update REQUIREMENTS.md traceability section.**
 
 Files on disk = context preserved; user can review actual files.
@@ -337,11 +339,11 @@ Orchestrator provides revision feedback → parse concerns, update files in plac
 ## ROADMAP CREATED
 
 **Files written:**
-- .planning/ROADMAP.md
-- .planning/STATE.md
+- {roadmap_path}
+- {state_path}
 
 **Updated:**
-- .planning/REQUIREMENTS.md (traceability section)
+- {requirements_path} (traceability section)
 
 ### Summary
 
@@ -379,9 +381,9 @@ User can review actual files in the editor or via SDK queries (e.g. `gsd-tools q
 - {change 1}
 
 **Files updated:**
-- .planning/ROADMAP.md
-- .planning/STATE.md (if needed)
-- .planning/REQUIREMENTS.md (if traceability changed)
+- {roadmap_path}
+- {state_path} (if needed)
+- {requirements_path} (if traceability changed)
 
 ### Updated Summary
 

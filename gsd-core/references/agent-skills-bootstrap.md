@@ -1,7 +1,7 @@
 # Agent Skills Self-Load (Bootstrap)
 
 > **Shared contract.** Every `agent_skills` consumer agent self-loads its configured
-> skills in its mandatory init step, so a project's `.planning/config.json`
+> skills in its mandatory init step, so a project's `config.json`
 > `agent_skills.<agent-type>` mapping reaches the agent that actually does the work —
 > even when the orchestrator did not run bash init (e.g. a runtime whose `Skill()`
 > delegation does not reliably execute the delegated workflow's bash, such as Cursor;

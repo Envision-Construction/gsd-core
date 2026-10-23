@@ -15,6 +15,8 @@ requires: [audit-milestone, discuss-phase, execute-phase, new-milestone, phase, 
 
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
+**Project selection:** if the arguments include `--project <name>`, the user is targeting the named project in `.planning/<name>/`. In the first shell command you run for this command (once `gsd_run` is defined), run `gsd_run query project.set <name>` and stop if it fails; then treat the remaining arguments as if `--project <name>` were absent. The selection holds for the rest of the session, including subagents.
+
 <objective>
 Mark milestone {{version}} complete, archive to milestones/, and update ROADMAP.md and REQUIREMENTS.md.
 
@@ -30,11 +32,11 @@ Output: Milestone archived (roadmap + requirements), PROJECT.md evolved, git tag
   </execution_context>
 
 <context>
-**Project files:**
-- `.planning/ROADMAP.md`
-- `.planning/REQUIREMENTS.md`
-- `.planning/STATE.md`
-- `.planning/PROJECT.md`
+**Project files** (scoped paths from the workflow's `init.complete-milestone`: `roadmap_path`, `requirements_path`, `state_path`, `project_path`):
+- `ROADMAP.md`
+- `REQUIREMENTS.md`
+- `STATE.md`
+- `PROJECT.md`
 
 **User input:**
 
@@ -47,7 +49,7 @@ Output: Milestone archived (roadmap + requirements), PROJECT.md evolved, git tag
 
 0. **Check for audit:**
 
-   - Look for `.planning/v{{version}}-MILESTONE-AUDIT.md`
+   - Look for `$(gsd_run query planning.dir --raw)/v{{version}}-MILESTONE-AUDIT.md` (the scoped planning directory, where `/gsd:audit-milestone` writes it)
    - If missing or stale: recommend `/gsd:audit-milestone` first
    - If audit status is `gaps_found`: recommend closing the gaps inline
      (the audit output already enumerates them — insert closure phases
@@ -94,17 +96,17 @@ Output: Milestone archived (roadmap + requirements), PROJECT.md evolved, git tag
 
 4. **Archive milestone:**
 
-   - Create `.planning/milestones/v{{version}}-ROADMAP.md`
+   - Create `{archive_dir}/v{{version}}-ROADMAP.md` (`archive_dir` from `init.complete-milestone`: the planning directory's `milestones/`)
    - Extract full phase details from ROADMAP.md
    - Fill milestone-archive.md template
    - Update ROADMAP.md to one-line summary with link
 
 5. **Archive requirements:**
 
-   - Create `.planning/milestones/v{{version}}-REQUIREMENTS.md`
+   - Create `{archive_dir}/v{{version}}-REQUIREMENTS.md`
    - Mark all v1 requirements as complete (checkboxes checked)
    - Note requirement outcomes (validated, adjusted, dropped)
-   - Delete `.planning/REQUIREMENTS.md` (fresh one created for next milestone)
+   - Delete the planning directory's `REQUIREMENTS.md` (fresh one created for next milestone)
 
 6. **Update PROJECT.md:**
 
@@ -126,9 +128,9 @@ Output: Milestone archived (roadmap + requirements), PROJECT.md evolved, git tag
 
 <success_criteria>
 
-- Milestone archived to `.planning/milestones/v{{version}}-ROADMAP.md`
-- Requirements archived to `.planning/milestones/v{{version}}-REQUIREMENTS.md`
-- `.planning/REQUIREMENTS.md` deleted (fresh for next milestone)
+- Milestone archived to `{archive_dir}/v{{version}}-ROADMAP.md`
+- Requirements archived to `{archive_dir}/v{{version}}-REQUIREMENTS.md`
+- The planning directory's `REQUIREMENTS.md` deleted (fresh for next milestone)
 - ROADMAP.md collapsed to one-line entry
 - PROJECT.md updated with current state
 - Git tag v{{version}} created (if `git.create_tag` enabled)

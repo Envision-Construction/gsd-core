@@ -28,8 +28,8 @@ Follow the tier exactly — controls output shape.
 </calibration_tiers>
 
 <process>
-1. Read ROADMAP.md phase description
-2. Read prior CONTEXT.md (`find .planning/phases -name "*-CONTEXT.md"`)
+1. Read ROADMAP.md phase description (planning dir: `gsd_run query planning.dir --raw`)
+2. Read prior CONTEXT.md (`PLANNING_DIR=$(gsd_run query planning.dir --raw) && find "$PLANNING_DIR/phases" -name "*-CONTEXT.md"`)
 3. Glob/Grep for files related to phase goal terms
 4. Read 5-15 most relevant source files
 5. Form assumptions from what the codebase reveals

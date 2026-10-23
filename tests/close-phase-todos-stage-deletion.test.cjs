@@ -42,7 +42,8 @@ describe('#2415: close_phase_todos must stage the pending/ deletion alongside co
 
     assert.match(filesList, /"\$\{ADDED\[@\]\}"/, 'commit --files must carry the ADDED array (destinations of the move)');
     assert.match(filesList, /--files-removed\s+"\$\{REMOVED\[@\]\}"/, 'the moved-away file must be staged as a deletion via --files-removed (#2415, #4208)');
-    assert.match(filesList, /\.planning\/STATE\.md/, 'commit --files must still include .planning/STATE.md (the step also updates state)');
+    // STATE.md is the scoped one (planning.dir), so a named project or workstream commits its own state.
+    assert.match(filesList, /planning\.dir --raw\)\/STATE\.md/, 'commit --files must still include the scoped STATE.md (the step also updates state)');
 
     // The arrays are only worth asserting if they are built from the right two dirs:
     // ADDED from completed/ (destination), REMOVED from pending/ (source).
@@ -92,7 +93,8 @@ describe('#4208: cleanup.md archives phase directories without a --files directo
     // entry stages EVERYTHING under it, so an in-flight phase or quick-task
     // file a concurrent session had written there would be committed too --
     // the sweep #4208 exists to remove.
-    for (const dir of ['.planning/phases/', '.planning/quick/']) {
+    // $PLANNING_DIR is the scoped planning dir (root, named project or workstream).
+    for (const dir of ['$PLANNING_DIR/phases/', '$PLANNING_DIR/quick/']) {
       assert.ok(removed.includes(dir), `${dir} must be under --files-removed. Line: ${line}`);
       assert.ok(!added.includes(dir), `${dir} must NOT be under --files -- a directory entry there sweeps in concurrent writes. Line: ${line}`);
     }
@@ -107,7 +109,7 @@ describe('#4208: cleanup.md archives phase directories without a --files directo
     assert.match(added, /--files\s/, `the additive half must actually carry --files. Line: ${line}`);
     // --files keeps its #2014 skip-if-missing contract: it is the additive
     // half and the only half that can carry a path that must be WRITTEN.
-    assert.ok(added.includes('.planning/milestones/'), `the archive destination must stay under --files. Line: ${line}`);
-    assert.ok(added.includes('.planning/STATE.md'), `STATE.md must stay under --files. Line: ${line}`);
+    assert.ok(added.includes('$PLANNING_DIR/milestones/'), `the archive destination must stay under --files. Line: ${line}`);
+    assert.ok(added.includes('$PLANNING_DIR/STATE.md'), `STATE.md must stay under --files. Line: ${line}`);
   });
 });

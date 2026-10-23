@@ -12,7 +12,7 @@ Runs once per phase at `ship:post`, after verification passes, to consolidate th
 </role>
 
 <inputs>
-- `.planning/config.json`: `mempalace.enabled`, `mempalace.memory_mode`, `mempalace.wing`, `mempalace.diary_journal`, `mempalace.cross_project_tunnels`, `mempalace.mirror_kg`, `project_code`.
+- Project config (`gsd_run query config-get <key>`): `mempalace.enabled`, `mempalace.memory_mode`, `mempalace.wing`, `mempalace.diary_journal`, `mempalace.cross_project_tunnels`, `mempalace.mirror_kg`, `project_code`.
 - Completed phase artifacts: `UAT.md`, `SUMMARY.md`, any `extract-learnings` output.
 </inputs>
 
@@ -20,7 +20,7 @@ Runs once per phase at `ship:post`, after verification passes, to consolidate th
 `mempalace.enabled !== true` → do nothing, report `MemPalace disabled — curation skipped`. Check first.
 
 ## Wing / mode / transport
-- **Wing:** `mempalace.wing` if non-empty, else `project_code`, else repo dir name. Every call is scoped to this one wing.
+- **Wing:** `mempalace.wing` if non-empty, else `project_code`, else repo dir name (`-<project>` appended for a named project). Every call is scoped to this one wing.
 - **Mode** (`mempalace.memory_mode`): `augment` → KG writes are additive mirror of `.planning/graphs/`. `kg_backend`/`replace` → palace KG is authoritative — still mirror every fact here as primary target; GSD's normal graphify keeps `.planning/graphs/` current so an unreachable palace never loses history.
 - **Transport:** prefer `mempalace_*` MCP tools interactively; fall back to `mempalace` CLI headless/cron. Neither reachable → report unavailability and stop, do not error.
 

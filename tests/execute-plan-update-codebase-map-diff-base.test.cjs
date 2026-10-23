@@ -99,7 +99,8 @@ function seedTwoMilestones(tmpDir) {
 
 function runFence(bashFence, tmpDir) {
   // The workflow's own launcher defines gsd_run; the fixture points it at this checkout's CLI.
-  const script = [`gsd_run() { node "${TOOLS_PATH}" "$@"; }`, bashFence.replace('.planning/phases/XX-name', '.planning/phases/03-beta')].join('\n');
+  // {phase_dir} is the init-resolved (project-scoped) phase directory the orchestrator substitutes.
+  const script = [`gsd_run() { node "${TOOLS_PATH}" "$@"; }`, bashFence.replace('{phase_dir}', '.planning/phases/03-beta')].join('\n');
   const scriptPath = path.join(tmpDir, '.diff-base-script.sh');
   fs.writeFileSync(scriptPath, script);
   const output = execFileSync('bash', [scriptPath], {
@@ -123,7 +124,8 @@ describe('#4459 / #5164: update_codebase_map scopes to the phase through the eva
 
   test('the fence asks the resolver, keyed on the phase directory', () => {
     assert.ok(
-      /gsd_run check evaluation-scope --phase-dir "\.planning\/phases\/XX-name"/.test(bashFence),
+      // The phase directory is the scoped {phase_dir} init field, never a root .planning/phases literal.
+      /gsd_run check evaluation-scope --phase-dir "\{phase_dir\}"/.test(bashFence),
       'update_codebase_map must call the evaluation-scope resolver with the phase directory',
     );
   });

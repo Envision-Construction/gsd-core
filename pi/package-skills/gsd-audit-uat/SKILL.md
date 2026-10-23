@@ -20,7 +20,7 @@ Scan all phases for pending, skipped, blocked, and human_needed UAT items. Cross
 <context>
 Core planning files are loaded in-workflow via CLI.
 
-**Scope:**
-Glob: .planning/phases/*/*-UAT.md
-Glob: .planning/phases/*/*-VERIFICATION.md
+**Scope** (`{planning_dir}` = `gsd_run query planning.dir --raw`):
+Glob: {planning_dir}/phases/*/*-UAT.md
+Glob: {planning_dir}/phases/*/*-VERIFICATION.md
 </context>

@@ -47,6 +47,7 @@ Evaluate `$ARGUMENTS` against these routing rules. Rules are ordered **most-spec
 |--------------------------|----------|-----|
 | First-time setup for an existing codebase, brownfield onboarding, "onboard this codebase" | `/gsd:onboard` | Safe map → docs ingest → project setup sequence |
 | Starting a new greenfield project, "set up", "initialize" (no existing codebase named) | `/gsd:new-project` | Needs full project initialization |
+| A separate initiative in a repo that already has a GSD project — its own goal, users or acceptance, not a phase, milestone or fix of the current roadmap ("start a new project for", "new product/service/tool") | `/gsd:new-project` | Creates `.planning/<slug>/` beside the existing project instead of appending to its roadmap |
 | Mapping or analyzing an existing codebase map | `/gsd:map-codebase` | Codebase discovery or refresh |
 | A bug, error, crash, failure, or something broken | `/gsd:debug` | Needs systematic investigation |
 | Wrapping up spikes, "package the spikes", "consolidate spike findings" | `/gsd:spike --wrap-up` | Package spike findings into reusable skill |

@@ -44,7 +44,7 @@ This doc describes what IS, not what should be. Casing inconsistencies are docum
 | gsd-intel-updater | Codebase intelligence analysis | No marker (`.planning/intel/*.json` artifacts) | `.planning/intel/*.json` artifacts, read via `gsd_run intel query` / `intel validate` (no `*.md` workflow currently spawns this agent -- see `docs/adr/22-plan-drift-guard.md`, "never auto-spawned") | artifact+query |
 | gsd-mempalace-curator | Ship-time MemPalace curation | No marker (writes the session diary + cross-links) | `gsd-core/workflows/ship.md` reads the diary artifacts | artifact+query |
 | gsd-pattern-mapper | Codebase pattern mapping | `## PATTERN MAPPING COMPLETE` | `gsd-core/workflows/plan-phase.md` (also spawned by `gsd-core/workflows/settings.md`) | sentinel-match |
-| gsd-doc-synthesizer | Doc synthesis for `/gsd:ingest-docs` | No marker (SYNTHESIS.md and INGEST-CONFLICTS.md artifacts) | `.planning/intel/SYNTHESIS.md` and `.planning/INGEST-CONFLICTS.md` artifacts, read by `gsd-core/workflows/ingest-docs.md` | artifact+query |
+| gsd-doc-synthesizer | Doc synthesis for `/gsd:ingest-docs` | No marker (SYNTHESIS.md and INGEST-CONFLICTS.md artifacts) | `.planning/intel/SYNTHESIS.md` and `.planning/[<project>/]INGEST-CONFLICTS.md` artifacts, read by `gsd-core/workflows/ingest-docs.md` | artifact+query |
 
 ## Marker Rules
 

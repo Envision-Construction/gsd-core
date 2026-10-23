@@ -206,7 +206,8 @@ describe('ingest-docs workflow content', () => {
     const askIdx = content.indexOf('Use `AskUserQuestion`', gateIdx);
     assert.ok(askIdx !== -1 && askIdx < delegateIdx, 'gate must specify its AskUserQuestion contract');
     const displayBlock = content.slice(gateIdx, askIdx);
-    for (const dest of ['.planning/PROJECT.md', '.planning/REQUIREMENTS.md', '.planning/ROADMAP.md', '.planning/STATE.md']) {
+    // Destinations are the init-resolved paths, so a named project or workstream shows its own files.
+    for (const dest of ['{project_path}', '{requirements_path}', '{roadmap_path}', '{state_path}']) {
       assert.ok(
         displayBlock.includes(dest),
         `routing gate display block must name destination file ${dest}`

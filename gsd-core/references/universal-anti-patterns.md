@@ -8,7 +8,7 @@ Rules that apply to ALL workflows and agents. Individual workflows may have addi
 
 1. **Never** read agent definition files (`agents/*.md`) -- `subagent_type` auto-loads them. Reading agent definitions into the orchestrator wastes context for content automatically injected into subagent sessions.
 2. **Never** inline large files into subagent prompts -- tell agents to read files from disk instead. Agents have their own context windows.
-3. **Read depth scales with context window** -- check `context_window` in `.planning/config.json`. At < 500000: read only frontmatter, status fields, or summaries. At >= 500000 (1M model): full body reads permitted when content is needed for inline decisions. See `gsd-core/references/context-budget.md` for the complete table.
+3. **Read depth scales with context window** -- check `context_window` (`gsd_run query config-get context_window --raw`). At < 500000: read only frontmatter, status fields, or summaries. At >= 500000 (1M model): full body reads permitted when content is needed for inline decisions. See `gsd-core/references/context-budget.md` for the complete table.
 4. **Delegate** heavy work to subagents -- the orchestrator routes, it does not build, analyze, research, investigate, or verify.
 5. **Proactive pause warning**: If you have already consumed significant context (large file reads, multiple subagent results), warn the user: "Context budget is getting heavy. Consider checkpointing progress."
 

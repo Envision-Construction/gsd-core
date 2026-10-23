@@ -4,6 +4,9 @@ This reference documents all artifact types in the GSD planning taxonomy. Each t
 shape, lifecycle, location, and consumption mechanism. A well-formatted artifact that no workflow
 reads is inert — the consumption mechanism is what gives an artifact meaning.
 
+`.planning/[<project>/]` is the selected project's planning directory: `.planning/` for the root
+project, `.planning/<project>/` for a named project (`gsd_run query planning.dir --raw`).
+
 ---
 
 ## Core Artifacts
@@ -11,37 +14,37 @@ reads is inert — the consumption mechanism is what gives an artifact meaning.
 ### ROADMAP.md
 - **Shape**: Milestone + phase listing with goals and canonical refs
 - **Lifecycle**: Created → Updated per milestone → Archived
-- **Location**: `.planning/ROADMAP.md`
+- **Location**: `.planning/[<project>/]ROADMAP.md`
 - **Consumed by**: `plan-phase`, `discuss-phase`, `execute-phase`, `progress`, `state` commands
 
 ### STATE.md
 - **Shape**: Current position tracker (phase, plan, progress, decisions)
 - **Lifecycle**: Continuously updated throughout the project
-- **Location**: `.planning/STATE.md`
+- **Location**: `.planning/[<project>/]STATE.md`
 - **Consumed by**: All orchestration workflows; `resume-project`, `progress`, `next` commands
 
 ### REQUIREMENTS.md
 - **Shape**: Numbered acceptance criteria with traceability table
 - **Lifecycle**: Created at project start → Updated as requirements are satisfied
-- **Location**: `.planning/REQUIREMENTS.md`
+- **Location**: `.planning/[<project>/]REQUIREMENTS.md`
 - **Consumed by**: `discuss-phase`, `plan-phase`, CONTEXT.md generation; executor marks complete
 
 ### CONTEXT.md (per-phase)
 - **Shape**: 6-section format: domain, decisions, canonical_refs, code_context, specifics, deferred
 - **Lifecycle**: Created before planning → Used during planning and execution → Superseded by next phase
-- **Location**: `.planning/phases/XX-name/XX-CONTEXT.md`
+- **Location**: `.planning/[<project>/]phases/XX-name/XX-CONTEXT.md`
 - **Consumed by**: `plan-phase` (reads decisions), `execute-phase` (reads code_context and canonical_refs)
 
 ### PLAN.md (per-plan)
 - **Shape**: Frontmatter + objective + tasks with types + success criteria + output spec
 - **Lifecycle**: Created by planner → Executed → SUMMARY.md produced
-- **Location**: `.planning/phases/XX-name/XX-YY-PLAN.md`
+- **Location**: `.planning/[<project>/]phases/XX-name/XX-YY-PLAN.md`
 - **Consumed by**: `execute-phase` executor; task commits reference plan IDs
 
 ### SUMMARY.md (per-plan)
 - **Shape**: Frontmatter with dependency graph + narrative + deviations + self-check
 - **Lifecycle**: Created at plan completion → Read by subsequent plans in same phase
-- **Location**: `.planning/phases/XX-name/XX-YY-SUMMARY.md`
+- **Location**: `.planning/[<project>/]phases/XX-name/XX-YY-SUMMARY.md`
 - **Consumed by**: Orchestrator (progress), planner (context for future plans), `milestone-summary`
 - **`status:`** — `complete` (default) or **`halted`**. `halted` records a *designed stop*:
   the plan ran and answered its question, but the answer means the work it was gating cannot
@@ -54,7 +57,7 @@ reads is inert — the consumption mechanism is what gives an artifact meaning.
 ### HANDOFF.json / .continue-here.md
 - **Shape**: Structured pause state (JSON machine-readable + Markdown human-readable)
 - **Lifecycle**: Created on pause → Consumed on resume → Replaced by next pause
-- **Location**: `.planning/HANDOFF.json` + `.planning/phases/XX-name/.continue-here.md` (or spike/deliberation path)
+- **Location**: `.planning/[<project>/]HANDOFF.json` + `.planning/[<project>/]phases/XX-name/.continue-here.md` (or spike/deliberation path)
 - **Consumed by**: `resume-project` workflow
 
 ---
@@ -64,7 +67,7 @@ reads is inert — the consumption mechanism is what gives an artifact meaning.
 ### DISCUSSION-LOG.md (per-phase)
 - **Shape**: Audit trail of assumptions and corrections from discuss-phase
 - **Lifecycle**: Created at discussion time → Read-only audit record
-- **Location**: `.planning/phases/XX-name/XX-DISCUSSION-LOG.md`
+- **Location**: `.planning/[<project>/]phases/XX-name/XX-DISCUSSION-LOG.md`
 - **Consumed by**: Human review; not read by automated workflows
 
 ### USER-PROFILE.md

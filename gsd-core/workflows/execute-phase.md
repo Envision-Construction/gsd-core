@@ -636,6 +636,11 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
    **Record this plan's isolation immediately before its dispatch (#5516).** Restore the dispatched plan's **stored decision** from step 2.5 (`plan_id` := this plan's `id`, `USE_WORKTREES_FOR_PLAN` := the value stored for that plan, and `PLAN_FILES` / `PLAN_DELETIONS` re-extracted from this plan's JSON, since the later plans' decisions overwrote them) and run **Part 2** of `gsd-core/workflows/execute-phase/steps/per-plan-worktree-gate.md`, so the single-slot sentinel names the plan being dispatched. Do not run it for any other plan, and do not batch it ahead of the dispatches.
 
+   **Substitute `{planning_dir_rel}` and `{project_dir_rel}`** (every mode) with the selected project's planning directories relative to the repo root (`.planning` for the root project), so the executor reads its own checkout's scoped STATE.md, config.json and PROJECT.md:
+   ```bash
+   echo "planning_dir_rel=$(gsd_run query planning.dir --pick dir_rel) project_dir_rel=$(gsd_run query planning.dir --pick project_dir_rel)"
+   ```
+
    **Executor routing (#1689/#3370).** Per plan, run `gsd-core/workflows/execute-phase/steps/per-plan-executor-routing.md` to set `EXECUTOR_TYPE` for `subagent_type="{EXECUTOR_TYPE}"` below.
 
    **TDD-applicability resolution (#4266/#4272).** Run `gsd-core/workflows/execute-phase/steps/tdd-applicability-resolution.md`.
@@ -731,9 +736,9 @@ increases monotonically across waves. `{status}` is `complete` (success),
        First resolve repo root so every path is anchored:
        \`PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)\`
        - ${PROJECT_ROOT}/{phase_dir}/{plan_file} (Plan)
-       - ${PROJECT_ROOT}/.planning/PROJECT.md (Project context — core value, requirements, evolution rules)
-       - ${PROJECT_ROOT}/.planning/STATE.md (State)
-       - ${PROJECT_ROOT}/.planning/config.json (Config, if exists)
+       - ${PROJECT_ROOT}/{project_dir_rel}/PROJECT.md (Project context — core value, requirements, evolution rules)
+       - ${PROJECT_ROOT}/{planning_dir_rel}/STATE.md (State)
+       - ${PROJECT_ROOT}/{project_dir_rel}/config.json (Config, if exists)
        ${CONTEXT_WINDOW >= 500000 ? `
        - ${PROJECT_ROOT}/${phase_dir}/*-CONTEXT.md (User decisions from discuss-phase — honors locked choices)
        - ${PROJECT_ROOT}/${phase_dir}/*-RESEARCH.md (Technical research — pitfalls and patterns to follow)
@@ -961,9 +966,10 @@ increases monotonically across waves. `{status}` is `complete` (success),
        gsd_run query roadmap.update-plan-progress "${PHASE_NUMBER}" "${plan_id}" "complete"
      done
 
-     # Only commit tracking files if they actually changed
-     if ! git diff --quiet .planning/ROADMAP.md .planning/STATE.md 2>/dev/null; then
-       gsd_run query commit "docs(phase-${PHASE_NUMBER}): update tracking after wave ${N}" --files .planning/ROADMAP.md .planning/STATE.md
+     # Only commit tracking files if they actually changed (scoped: named project / workstream)
+     PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+     if ! git diff --quiet "$PLANNING_DIR/ROADMAP.md" "$PLANNING_DIR/STATE.md" 2>/dev/null; then
+       gsd_run query commit "docs(phase-${PHASE_NUMBER}): update tracking after wave ${N}" --files "$PLANNING_DIR/ROADMAP.md" "$PLANNING_DIR/STATE.md"
      fi
    elif [ "${TEST_EXIT}" -eq 124 ]; then
      echo "⚠ Skipping tracking update — test suite timed out. Plans remain in-progress. Run tests manually to confirm."
@@ -1315,7 +1321,8 @@ These items are tracked and will appear in `/gsd:progress` and `/gsd:audit-uat`.
 ```
 
 ```bash
-gsd_run query commit "docs(phase-{X}): complete phase execution" --files .planning/ROADMAP.md .planning/STATE.md .planning/REQUIREMENTS.md {phase_dir}/*-VERIFICATION.md
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "docs(phase-{X}): complete phase execution" --files "$PLANNING_DIR/ROADMAP.md" "$PLANNING_DIR/STATE.md" "$PLANNING_DIR/REQUIREMENTS.md" {phase_dir}/*-VERIFICATION.md
 ```
 </step>
 
@@ -1372,7 +1379,7 @@ done
 if [ ${#CLOSED[@]} -gt 0 ]; then
   ADDED=(); REMOVED=()
   for f in "${CLOSED[@]}"; do ADDED+=("$COMPLETED_DIR/$f"); REMOVED+=("$PENDING_DIR/$f"); done
-  gsd_run query commit "docs(phase-${PHASE_NUMBER}): close ${#CLOSED[@]} resolved todo(s)" --files "${ADDED[@]}" .planning/STATE.md --files-removed "${REMOVED[@]}" || true
+  gsd_run query commit "docs(phase-${PHASE_NUMBER}): close ${#CLOSED[@]} resolved todo(s)" --files "${ADDED[@]}" "$(gsd_run query planning.dir --raw)/STATE.md" --files-removed "${REMOVED[@]}" || true
   echo "◆ Closed ${#CLOSED[@]} todo(s) for Phase ${PHASE_NUMBER}:"; printf '  ✓ %s\n' "${CLOSED[@]}"
 fi
 ```

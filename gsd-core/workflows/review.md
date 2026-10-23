@@ -169,13 +169,13 @@ placeholder and `$RUN_DIR`/`${RUN_DIR}` reference within a bash block. Do NOT
 re-run `mktemp -d` later — every block must resolve to this same directory, or
 `build_prompt`'s writes and `invoke_reviewers`' reads split.
 
-Then read:
-1. `.planning/PROJECT.md` (first 80 lines — project context)
-2. Phase section from `.planning/ROADMAP.md`
+Then read (`gsd_run query planning.dir --pick project_dir` holds PROJECT.md and `gsd_run query planning.dir --raw` holds ROADMAP.md and REQUIREMENTS.md; both are `.planning/` for the root project):
+1. `PROJECT.md` (first 80 lines — project context)
+2. Phase section from `ROADMAP.md`
 3. All `*-PLAN.md` files in the phase directory
 4. `*-CONTEXT.md` if present (user decisions)
 5. `*-RESEARCH.md` if present (domain research)
-6. `.planning/REQUIREMENTS.md` (requirements this phase addresses)
+6. `REQUIREMENTS.md` (requirements this phase addresses)
 </step>
 
 <step name="build_prompt">
@@ -204,7 +204,7 @@ Provide structured feedback on plan quality, completeness, and risks.
 {research if present}
 
 ### Plans to Review
-For each `*-PLAN.md` in the phase directory, in glob order, include its full content preceded by a `####` header carrying the plan's **repo-relative path** (e.g. `#### .planning/phases/<phase>/<NN>-PLAN.md`). The path header is the citable anchor for findings about the plan itself — cite it as `<repo-relative plan path>:<line>` (name the heading in prose beside the citation if it helps the reader); reserve `path:line` for repo files the plan references.
+For each `*-PLAN.md` in the phase directory, in glob order, include its full content preceded by a `####` header carrying the plan's **repo-relative path** (e.g. `#### <repo-relative phase_dir>/<NN>-PLAN.md`). The path header is the citable anchor for findings about the plan itself — cite it as `<repo-relative plan path>:<line>` (name the heading in prose beside the citation if it helps the reader); reserve `path:line` for repo files the plan references.
 {per-plan: `#### <repo-relative plan path>` + full plan contents}
 
 ## Review Instructions
@@ -310,8 +310,10 @@ done
 } > "${RUN_DIR}/.plans-manifest.md"
 
 # Optional section files (only if content was included in the combined prompt)
-if [ -f ".planning/PROJECT.md" ]; then
-  cp .planning/PROJECT.md "${RUN_DIR}/gsd-review-project.md"
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+PROJECT_DIR=$(gsd_run query planning.dir --pick project_dir) || exit 1
+if [ -f "$PROJECT_DIR/PROJECT.md" ]; then
+  cp "$PROJECT_DIR/PROJECT.md" "${RUN_DIR}/gsd-review-project.md"
 fi
 _CTX=( "${PHASE_DIR}"/*-CONTEXT.md )
 if [ ${#_CTX[@]} -gt 0 ]; then
@@ -321,8 +323,8 @@ _RESEARCH=( "${PHASE_DIR}"/*-RESEARCH.md )
 if [ ${#_RESEARCH[@]} -gt 0 ]; then
   cat "${_RESEARCH[@]}" > "${RUN_DIR}/gsd-review-research.md"
 fi
-if [ -f ".planning/REQUIREMENTS.md" ]; then
-  cp .planning/REQUIREMENTS.md "${RUN_DIR}/gsd-review-requirements.md"
+if [ -f "$PLANNING_DIR/REQUIREMENTS.md" ]; then
+  cp "$PLANNING_DIR/REQUIREMENTS.md" "${RUN_DIR}/gsd-review-requirements.md"
 fi
 
 # #3301: append the manifest to BOTH files reviewers actually read — the
@@ -547,7 +549,7 @@ review: it keeps its "failed or returned empty output" header (#2494/#2605/#2794
 A lane that will not run reports a typed reason rather than an empty file — `missing_binary`,
 `probe_failed`, `probe_timeout`, `missing_required_binary`, `host_unreachable`,
 `egress_host_changed`, `unknown_handler`, `budget_too_small`. **`egress_host_changed` means the lane
-was consented to send plans to one destination and `.planning/config.json` now names another; it is
+was consented to send plans to one destination and the project's `config.json` now names another; it is
 blocked, not silently redirected** (ADR-2782 D5).
 
 Display progress:

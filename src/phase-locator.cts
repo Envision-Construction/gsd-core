@@ -26,7 +26,7 @@ import coreUtilsModule = require('./core-utils.cjs');
 const { readSubdirectories, getPhaseFileStats, extractCanonicalPlanId, toPosixPath, findUnsummarizedPlans } = coreUtilsModule;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningDir, planningRoot } = planningWorkspace;
+const { planningDir } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterModule = require('./frontmatter.cjs');
 const { extractFrontmatter } = frontmatterModule;
@@ -574,7 +574,7 @@ function getAllArchivedPhaseDirs(cwd: string): ArchivedPhaseDir[] {
     }
   };
   collect('', null);
-  const workstreamsDir = path.join(planningRoot(cwd), 'workstreams');
+  const workstreamsDir = path.join(planningDir(cwd, null), 'workstreams');
   try {
     const wsEntries = fs.readdirSync(workstreamsDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())

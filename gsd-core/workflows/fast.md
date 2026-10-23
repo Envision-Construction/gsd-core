@@ -74,7 +74,7 @@ Use conventional commit format: `fix:`, `feat:`, `docs:`, `chore:`, `refactor:` 
 </step>
 
 <step name="log_to_state">
-If `.planning/STATE.md` exists and has a "Quick Tasks Completed" table, append a row
+If STATE.md (in the scoped `gsd_run query planning.dir` directory) exists and has a "Quick Tasks Completed" table, append a row
 that matches the existing table's schema via the schema-backed `gsd-tools
 quick-tasks-append` helper (`markdown-table.cjs`'s `appendQuickTaskRow`; #2133,
 ADR-2143 §3/§7). If no table exists, skip silently. If the table's schema is
@@ -83,8 +83,8 @@ a column count — this replaces the prior inline `awk NF-2` arithmetic that was
 the root cause of #2133.
 
 ```bash
-# Detect whether STATE.md has a Quick Tasks Completed table
-if grep -q "Quick Tasks Completed" .planning/STATE.md 2>/dev/null; then
+# Detect whether STATE.md has a Quick Tasks Completed table (scoped: named project / workstream)
+if grep -q "Quick Tasks Completed" "$(gsd_run query planning.dir --raw)/STATE.md" 2>/dev/null; then
   # #3730: bring a legacy pre-registry table onto the canonical schema BEFORE
   # appending — silent no-op when already canonical, so this runs harmlessly
   # on every fast task and migrates exactly once, on the first.

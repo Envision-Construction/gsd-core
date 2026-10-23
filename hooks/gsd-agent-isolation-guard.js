@@ -323,6 +323,14 @@ function resolveRegistryIsolation(cwd, configPath) {
     try {
       ensureRuntimeBuild();
       const { worktreesOptedOut } = require('../gsd-core/bin/lib/planning-workspace.cjs');
+      // The hook's env carries no GSD_PROJECT; read the session-selected project's
+      // own opt-out (#3749), not the root project's.
+      if (!process.env.GSD_PROJECT) {
+        const { findProjectRoot } = require('../gsd-core/bin/lib/project-root.cjs');
+        const { getSessionProject } = require('../gsd-core/bin/lib/active-project-store.cjs');
+        const project = getSessionProject(findProjectRoot(cwd));
+        if (project) process.env.GSD_PROJECT = project;
+      }
       useWorktrees = !worktreesOptedOut(cwd);
       ladderAnswered = true;
     } catch {
@@ -587,6 +595,11 @@ function main() {
     clearTimeout(stdinTimeout);
     try {
       const data = JSON.parse(input);
+      // Hooks may not inherit the session id Bash sees; the payload carries it, and the
+      // session-selected project (#3749) is keyed on it.
+      if (data && typeof data.session_id === 'string' && !process.env.CLAUDE_CODE_SESSION_ID) {
+        process.env.CLAUDE_CODE_SESSION_ID = data.session_id;
+      }
       const decision = evaluateDispatch(data);
       if (decision.action === 'block') {
         const out = {

@@ -22,6 +22,8 @@ requires: [phase]
 
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
+**Project selection:** if the arguments include `--project <name>`, the user is targeting the named project in `.planning/<name>/`. In the first shell command you run for this command (once `gsd_run` is defined), run `gsd_run query project.set <name>` and stop if it fails; then treat the remaining arguments as if `--project <name>` were absent. The selection holds for the rest of the session, including subagents.
+
 <objective>
 Generate unit and E2E tests for a completed phase, using its SUMMARY.md, CONTEXT.md, and VERIFICATION.md as specifications.
 
@@ -37,8 +39,7 @@ Output: Test files committed with message `test(phase-{N}): add unit and E2E tes
 <context>
 Phase: the `<arguments>` block
 
-@.planning/STATE.md
-@.planning/ROADMAP.md
+Read STATE.md and ROADMAP.md from the planning directory (the workflow's `init.phase-op` `state_path`/`roadmap_path`, or `gsd_run query planning.dir --raw`).
 </context>
 
 <process>

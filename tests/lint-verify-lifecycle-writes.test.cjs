@@ -142,6 +142,30 @@ describe('T21: L2 negative space — a shared planning doc is inert', () => {
     assert.deepStrictEqual(violations, [], 'a shared planning doc pathspec must be inert under L2');
   });
 
+  test('a shared doc under the resolved planning dir (#3749) is NOT flagged', () => {
+    const { scanText } = loadLint();
+    const text = [
+      '```bash',
+      'gsd_run query commit "roadmap update" --files "$(gsd_run query planning.dir --raw)/ROADMAP.md"',
+      '```',
+      '',
+    ].join('\n');
+    const violations = scanText('gsd-core/workflows/verify-work.md', text, { postFingerprint: true });
+    assert.deepStrictEqual(violations, [], 'the planning.dir resolver output is a planning root, so its ROADMAP.md is inert under L2');
+  });
+
+  test('a phase artifact under the resolved planning dir IS still flagged', () => {
+    const { scanText } = loadLint();
+    const text = [
+      '```bash',
+      'gsd_run query commit "uat" --files "$(gsd_run query planning.dir --raw)/phases/01-x/01-UAT.md"',
+      '```',
+      '',
+    ].join('\n');
+    const violations = scanText('gsd-core/workflows/verify-work.md', text, { postFingerprint: true });
+    assert.equal(violations.length, 1, 'only files directly under the planning root are shared docs');
+  });
+
   test('a report path (…-VERIFICATION.md) is NOT flagged', () => {
     const { scanText } = loadLint();
     const text = [
