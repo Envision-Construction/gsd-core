@@ -204,6 +204,7 @@ build/
 /gsd-core/bin/lib/installer-migrations/011-opencode-mcp-no-prompts.cjs
 /gsd-core/bin/lib/opencode-mcp-entry.cjs
 /gsd-core/bin/lib/observability/logger.cjs
+/gsd-core/bin/lib/active-project-store.cjs
 /gsd-core/bin/lib/active-workstream-store.cjs
 /gsd-core/bin/lib/adr-parser.cjs
 /gsd-core/bin/lib/graphify.cjs

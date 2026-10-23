@@ -616,7 +616,7 @@ describe('D10b — a NEW prose re-derivation in a workflow file is flagged', () 
 describe('D10c — the smart-entry.md gsd-tools-down fallback is a written, permanent exemption', () => {
   const SMART_ENTRY_RELPATH = path.join('gsd-core', 'workflows', 'smart-entry.md');
   const LIVE_LINE =
-    "- Read `.planning/STATE.md` (frontmatter + body) with the Read tool. Extract: `status` (frontmatter `status:` or body `**Status:**`), `Phase:` from the body, `total_phases`/`percent` from a nested `progress:` frontmatter object if present, and any `## Blockers` items.";
+    "- Read the selected scope's STATE.md (frontmatter + body) with the Read tool: `.planning/[<project>/][workstreams/<ws>/]STATE.md` for the project/workstream selected by `--project`/`GSD_PROJECT` and `--ws`/`GSD_WORKSTREAM` (with neither, the one directly in `.planning/`). Extract: `status` (frontmatter `status:` or body `**Status:**`), `Phase:` from the body, `total_phases`/`percent` from a nested `progress:` frontmatter object if present, and any `## Blockers` items.";
 
   test('the real live line is caught when NOT under the exempted relPath (proves detection genuinely fires on this exact text — it is not silent by construction)', () => {
     const out = drift.findPromptFieldDrift(LIVE_LINE, path.join('gsd-core', 'workflows', 'unrelated-workflow.md'));

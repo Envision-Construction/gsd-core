@@ -656,7 +656,8 @@ test('#3430: planner SUMMARY instruction uses canonical padded phase/plan form',
   const content = readPlanner();
   assert.match(
     content,
-    /Create `\.planning\/phases\/XX-name\/\{padded_phase\}-\{plan\}-SUMMARY\.md` when done/,
+    // PLAN.md is committed, so the SUMMARY path is repo-relative under the scoped planning dir ({dir_rel}).
+    /Create `\{dir_rel\}\/phases\/XX-name\/\{padded_phase\}-\{plan\}-SUMMARY\.md` when done/,
     'planner must instruct executors to write SUMMARY files in canonical padded-phase form'
   );
   assert.doesNotMatch(

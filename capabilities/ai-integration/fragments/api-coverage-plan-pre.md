@@ -136,4 +136,4 @@ printf '%s' "$SCOPE" | node gsd-core/bin/lib/api-coverage.cjs --json \
 ```
 
 The whole checkpoint is toggleable via `workflow.api_coverage_gate` in
-`.planning/config.json`.
+the project's `config.json` (`gsd_run query config-get workflow.api_coverage_gate`).

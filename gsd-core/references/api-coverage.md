@@ -68,7 +68,7 @@ compound modifiers ("Resolver-only API"), and first-party-qualified services
 | No matrix, **scope could not be established** | **block** — `scope_unavailable: true` (#3909) |
 | Phase token unresolvable | **block** |
 | Plan file exists but unreadable | **block** |
-| No `.planning/phases` tree at all | pass — not a GSD project layout |
+| No `phases/` tree in the planning directory at all | pass — not a GSD project layout |
 
 The last four are the fail-closed arms: the gate refuses to certify "no
 external-API integration" from scope it did not read. A phase with real plans
@@ -136,7 +136,7 @@ zero — the matrix is the durable subtraction record.
 ## Tuning
 
 - **Disable entirely:** set `workflow.api_coverage_gate: false` in
-  `.planning/config.json` (the gate unregisters from `verify:pre`).
+  the selected project's `config.json` (the gate unregisters from `verify:pre`).
 - **Widen the trigger vocabulary:** the detector accepts `--verbs` / `--nouns`
   overrides (see `capabilities/ai-integration/fragments/api-coverage-plan-pre.md`).
   The default vocabulary is additive-only.

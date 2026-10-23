@@ -27,7 +27,10 @@ const { getMilestoneInfo } = roadmapParser;
 import { platformWriteSync, platformEnsureDir, retryRenameSync } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningRoot, setActiveWorkstream, getActiveWorkstream } = planningWorkspace;
+const { setActiveWorkstream, getActiveWorkstream } = planningWorkspace;
+// Workstreams live in the selected project's planning dir (`.planning/<project>/workstreams`, #3749);
+// for the root project that is `.planning`.
+const projectPlanningDir = (cwd: string): string => planningWorkspace.planningDir(cwd, null);
 import {
   toWorkstreamSlug,
   assertValidActiveWorkstreamName,
@@ -76,7 +79,7 @@ function migrateToWorkstreams(cwd: string, workstreamName: string): MigrateResul
     throw new Error(reservedWorkstreamNameMessage(workstreamName));
   }
 
-  const baseDir = planningRoot(cwd);
+  const baseDir = projectPlanningDir(cwd);
   const wsDir = path.join(baseDir, 'workstreams', workstreamName);
 
   if (fs.existsSync(path.join(baseDir, 'workstreams'))) {
@@ -129,7 +132,7 @@ function cmdWorkstreamCreate(cwd: string, name: string | null | undefined, optio
     error(reservedWorkstreamNameMessage(slug));
   }
 
-  const baseDir = planningRoot(cwd);
+  const baseDir = projectPlanningDir(cwd);
   if (!fs.existsSync(baseDir)) {
     error(`.planning/ directory not found — run ${formatGsdSlash('new-project', resolveRuntime(cwd)) as string} first`);
   }
@@ -263,7 +266,7 @@ function cmdWorkstreamStatus(cwd: string, name: string | null | undefined, raw: 
     error(INVALID_ACTIVE_WORKSTREAM_NAME_MESSAGE);
   }
 
-  const wsDir = path.join(planningRoot(cwd), 'workstreams', name!);
+  const wsDir = path.join(projectPlanningDir(cwd), 'workstreams', name!);
   if (!fs.existsSync(wsDir)) {
     output({ found: false, workstream: name }, raw, undefined);
     return;
@@ -298,7 +301,7 @@ function cmdWorkstreamComplete(cwd: string, name: string | null | undefined, opt
     error(INVALID_ACTIVE_WORKSTREAM_NAME_MESSAGE);
   }
 
-  const root = planningRoot(cwd);
+  const root = projectPlanningDir(cwd);
   const wsRoot = path.join(root, 'workstreams');
   const wsDir = path.join(wsRoot, name!);
 
@@ -375,7 +378,7 @@ function cmdWorkstreamSet(cwd: string, name: string | null | undefined, raw: boo
     return;
   }
 
-  const wsDir = path.join(planningRoot(cwd), 'workstreams', name);
+  const wsDir = path.join(projectPlanningDir(cwd), 'workstreams', name);
   if (!fs.existsSync(wsDir)) {
     output({ active: null, error: 'not_found', workstream: name }, raw, undefined);
     return;
@@ -387,7 +390,7 @@ function cmdWorkstreamSet(cwd: string, name: string | null | undefined, raw: boo
 
 function cmdWorkstreamGet(cwd: string, raw: boolean): void {
   const active = getActiveWorkstream(cwd);
-  const wsRoot = path.join(planningRoot(cwd), 'workstreams');
+  const wsRoot = path.join(projectPlanningDir(cwd), 'workstreams');
   output({ active, mode: fs.existsSync(wsRoot) ? 'workstream' : 'flat' }, raw, active || 'none');
 }
 

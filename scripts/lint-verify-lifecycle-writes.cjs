@@ -166,10 +166,15 @@ function scanForMissingGating(file, lines) {
  * line with its pathspec on the next — is joined before tokenizing and
  * cannot dodge the scan by wrapping across lines.
  */
+// `$(gsd_run query planning.dir --raw ...)` prints the scoped planning root
+// (`.planning`, `.planning/<project>`, or a workstream under either, #3749), so a
+// file directly under it is a shared planning doc exactly like `.planning/ROADMAP.md`.
+const PLANNING_DIR_RESOLVER_RE = /^\$\(gsd_run query planning\.dir --raw[^)]*\)(?=\/)/;
+
 function scanForRawWrites(file, lines) {
   const violations = [];
   const flag = (line, text, pathspecRaw) => {
-    const p = stripQuotes(pathspecRaw);
+    const p = stripQuotes(pathspecRaw).replace(PLANNING_DIR_RESOLVER_RE, '.planning');
     if (isVerificationReportPath(p) || isSharedPlanningDoc(p)) return;
     violations.push({ rule: 'L2', file, line, target: p, text: text.trim() });
   };

@@ -2,7 +2,7 @@
 Interactive configuration of third-party integrations for GSD — search API keys
 (Brave / Firecrawl / Exa), code-review CLI routing (`review.models.<cli>`), and
 agent-skill injection (`agent_skills.<agent-type>`). Writes to
-`.planning/config.json` via `gsd-tools` so unrelated keys are
+the selected project's `config.json` via `gsd-tools` so unrelated keys are
 preserved, never clobbered.
 
 This command is deliberately separate from `/gsd:settings` (workflow toggles)
@@ -12,7 +12,7 @@ cross-tool routing are *connectivity* concerns, not workflow or tuning knobs.
 
 <security>
 **API keys are secrets.** They are written as plaintext to
-`.planning/config.json` — that is where secrets live on disk, and file
+the selected project's `config.json` — that is where secrets live on disk, and file
 permissions are the security boundary. The UI must never display, echo, or
 log the plaintext value. The workflow follows these rules:
 
@@ -51,12 +51,7 @@ _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-pars
 RESPONSE_LANGUAGE=$(gsd_run query config-get response_language --raw --default "" 2>/dev/null || echo "")
 gsd_run query config-ensure-section
 if [[ -z "${GSD_CONFIG_PATH:-}" ]]; then
-  if [[ -f .planning/active-workstream ]]; then
-    WS=$(tr -d '\n\r' < .planning/active-workstream)
-    GSD_CONFIG_PATH=".planning/workstreams/${WS}/config.json"
-  else
-    GSD_CONFIG_PATH=".planning/config.json"
-  fi
+  GSD_CONFIG_PATH=$(gsd_run query config-path --raw)
 fi
 ```
 
@@ -325,7 +320,7 @@ Agent Skills Injection
 | ...              | ...                       |
 
 Notes:
-- API keys are stored plaintext in .planning/config.json. The confirmation
+- API keys are stored plaintext in the selected project's config.json. The confirmation
   table above never displays plaintext — keys appear as ****<last-4>.
 - Plaintext is not echoed back by this workflow, not written to any log,
   and not displayed in error messages.

@@ -11,7 +11,7 @@ parallel milestone work by multiple Claude Code instances on the same codebase.
 2. `GSD_WORKSTREAM` environment variable (per-instance)
 3. Session-scoped active workstream pointer in temp storage (per runtime session / terminal),
    when that pointer exists and is non-blank
-4. `.planning/active-workstream` file — consulted whenever step 3 has nothing to say: either
+4. `.planning/[<project>/]active-workstream` file (one per project) — consulted whenever step 3 has nothing to say: either
    there is no session identity at all, or there is one but it has never pointed at a
    workstream. A session that already has its own pointer (step 3) is never overridden by
    this step, even if that pointer is stale.

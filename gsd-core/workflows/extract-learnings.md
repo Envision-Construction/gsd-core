@@ -29,7 +29,7 @@ INIT=$(gsd_run query init.phase-op ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE_ARG}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
-Parse from init JSON: `phase_found`, `phase_dir`, `phase_number`, `phase_name`, `padded_phase`.
+Parse from init JSON: `phase_found`, `phase_dir`, `phase_number`, `phase_name`, `padded_phase`, `state_path`.
 
 If phase not found, exit with error: "Phase {PHASE_ARG} not found."
 </step>
@@ -46,7 +46,7 @@ If PLAN.md or SUMMARY.md files are not found or missing, exit with error: "Requi
 **Optional artifacts (read if available, skip if not found):**
 - `${PHASE_DIR}/*-VERIFICATION.md` — verification results
 - `${PHASE_DIR}/*-UAT.md` — user acceptance test results
-- `.planning/STATE.md` — project state with decisions and blockers
+- `{state_path}` (scoped STATE.md from init) — project state with decisions and blockers
 
 Track which optional artifacts are missing for the `missing_artifacts` frontmatter field.
 </step>

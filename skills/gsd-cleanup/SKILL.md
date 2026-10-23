@@ -10,9 +10,9 @@ allowed-tools:
 ---
 
 <objective>
-Archive phase directories from completed milestones into `.planning/milestones/v{X.Y}-phases/`.
+Archive phase directories from completed milestones into `{planning_dir}/milestones/v{X.Y}-phases/`, where `{planning_dir}` is the scoped planning directory (`gsd_run query planning.dir --raw`).
 
-Use when `.planning/phases/` has accumulated directories from past milestones.
+Use when `{planning_dir}/phases/` has accumulated directories from past milestones.
 </objective>
 
 <execution_context>

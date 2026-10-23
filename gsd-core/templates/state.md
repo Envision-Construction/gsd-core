@@ -1,6 +1,6 @@
 # State Template
 
-Template for `.planning/STATE.md` — the project's living memory.
+Template for `.planning/[<project>/]STATE.md` — the project's living memory.
 
 ---
 
@@ -29,7 +29,7 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated [date])
+See: {project_dir_rel}/PROJECT.md (updated [date])
 
 **Core value:** [One-liner from PROJECT.md Core Value section]
 **Current focus:** [Current phase name]
@@ -116,7 +116,7 @@ STATE.md is the project's short-term memory spanning all phases and sessions.
 <lifecycle>
 
 **Creation:** After ROADMAP.md is created (during init)
-- Reference PROJECT.md (read it for current context)
+- Reference PROJECT.md (read it for current context); write `{project_dir_rel}` repo-relative: `gsd_run query planning.dir --pick project_dir_rel` (`.planning` for the root project)
 - Initialize empty accumulated context sections
 - Set position to "Phase 1 ready to plan"
 

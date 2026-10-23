@@ -198,8 +198,8 @@ function ownConfigValue(configPath: string, keyPath: readonly string[]): ScopedC
  * with the value `config-get <keyPath>` reports but may not call loadConfig
  * (it normalizes and rewrites config.json, spawns git, and prints warnings).
  * Ladder: the scoped config's OWN key wins (planningDir is project- and
- * workstream-aware); otherwise the flat root's key, but only under the
- * GSD_WORKSTREAM env gate — config-get deliberately does NOT inherit root
+ * workstream-aware); otherwise the project's own config key (repo-level for the
+ * root project, #3749), but only under the GSD_WORKSTREAM env gate — config-get deliberately does NOT inherit root
  * under GSD_PROJECT alone, and no reader of this ladder may diverge (#3963).
  * An unreadable or unparseable file sets nothing, so the ladder moves on:
  * under GSD_WORKSTREAM a broken workstream config inherits the root's key.
@@ -216,7 +216,8 @@ function readScopedConfigValue(cwd: string, keyPath: readonly [string, ...string
     const scoped = ownConfigValue(path.join(planningDir(cwd), 'config.json'), keyPath);
     if (scoped.present) return scoped;
     if (resolveEnvWorkstream() !== null) {
-      return ownConfigValue(path.join(planningRoot(cwd), 'config.json'), keyPath);
+      // The workstream's project config (repo-level for the root project, #3749).
+      return ownConfigValue(path.join(planningDir(cwd, null), 'config.json'), keyPath);
     }
   } catch {
     // Degrade to "not present" — see the contract above.
@@ -240,7 +241,7 @@ function worktreesOptedOut(cwd: string): boolean {
 /**
  * #612: resolve `phase_id_convention` with the SAME workstream->root federation
  * config-loader uses (config-loader.cts:618/:649) — the workstream config wins,
- * the root config is the fallback.
+ * its project's config (repo-level for the root project) is the fallback.
  *
  * Why this exists rather than `loadConfig(cwd)['phase_id_convention']`: as of
  * #2997 (aa7697fe, in `next`), loadConfig surfaces `phase_id_convention` in
@@ -312,17 +313,18 @@ function resolvePhaseIdConvention(cwd: string, ws?: string | null): string | nul
   // workstream segment rather than re-reading the environment.
   const projectOnly = planningDir(cwd, null);
   if (scoped === projectOnly) return readFrom(scoped);
-  return readFrom(scoped) ?? readFrom(root);
+  return readFrom(scoped) ?? readFrom(projectOnly);
 }
 
-// Sorted list of workstream directory names under `<root>/.planning/workstreams`,
+// Sorted list of workstream directory names under the selected project's
+// `workstreams` dir (`.planning/[<project>/]workstreams`),
 // or `[]` when the project is flat (no workstreams dir). Single source of truth
 // for the "workstream mode" detection shared by the #1912/#2028 fail-safe guards
 // (init.progress, phase.complete) so the two paths cannot drift.
 function listAvailableWorkstreams(cwd: string): string[] {
   try {
     return fs
-      .readdirSync(path.join(planningRoot(cwd), 'workstreams'), { withFileTypes: true })
+      .readdirSync(path.join(planningDir(cwd, null), 'workstreams'), { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
       .sort();

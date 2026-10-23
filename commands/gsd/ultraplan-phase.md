@@ -14,6 +14,8 @@ requires: [import, phase, plan-phase]
 
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
+**Project selection:** if the arguments include `--project <name>`, the user is targeting the named project in `.planning/<name>/`. In the first shell command you run for this command (once `gsd_run` is defined), run `gsd_run query project.set <name>` and stop if it fails; then treat the remaining arguments as if `--project <name>` were absent. The selection holds for the rest of the session, including subagents.
+
 <objective>
 Offload GSD's plan phase to Claude Code's ultraplan cloud infrastructure.
 

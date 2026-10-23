@@ -36,11 +36,11 @@ These files live directly at `.planning/` — not inside phase subdirectories.
 |---------|-------------|---------|
 | `vX.Y-MILESTONE-AUDIT.md` | `/gsd:audit-milestone` | Milestone audit report before archiving |
 
-These files are archived to `.planning/milestones/` by `/gsd:complete-milestone`. Finding them at the `.planning/` root after completion indicates the archive step was skipped.
+These files are archived to `.planning/[<project>/]milestones/` by `/gsd:complete-milestone`. Finding them at the `.planning/[<project>/]` root after completion indicates the archive step was skipped.
 
 ---
 
-## Phase Subdirectory Artifacts (`.planning/phases/NN-name/`)
+## Phase Subdirectory Artifacts (`.planning/[<project>/]phases/NN-name/`)
 
 These files live inside a phase directory. They are NOT checked by W019 (which only inspects the `.planning/` root).
 
@@ -61,7 +61,7 @@ These files live inside a phase directory. They are NOT checked by W019 (which o
 
 ---
 
-## Milestone Archive (`.planning/milestones/`)
+## Milestone Archive (`.planning/[<project>/]milestones/`)
 
 Files archived by `/gsd:complete-milestone`. These are never checked by W019.
 

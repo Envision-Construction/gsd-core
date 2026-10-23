@@ -56,12 +56,12 @@ Usage: `/gsd:map-codebase`
 Usage: `/gsd:discuss-phase 2`
 Usage: `/gsd:discuss-phase 2 --batch=3`
 
-**`/gsd:plan-phase <number> [--research] [--skip-research] [--research-phase <N>] [--view] [--gaps] [--skip-verify] [--skip-ui] [--prd <file>] [--ingest <path-or-glob>] [--ingest-format <auto|nygard|madr|narrative>] [--reviews] [--text] [--bounce] [--skip-bounce] [--chunked] [--tdd] [--mvp] [--granularity <coarse|standard|fine>] [--no-tracer] [--no-reversibility-gates]`** — Creates `.planning/phases/XX-phase-name/XX-YY-PLAN.md` with concrete tasks, verification criteria, and success measures (multiple plans per phase supported).
+**`/gsd:plan-phase <number> [--research] [--skip-research] [--research-phase <N>] [--view] [--gaps] [--skip-verify] [--skip-ui] [--prd <file>] [--ingest <path-or-glob>] [--ingest-format <auto|nygard|madr|narrative>] [--reviews] [--text] [--bounce] [--skip-bounce] [--chunked] [--tdd] [--mvp] [--granularity <coarse|standard|fine>] [--no-tracer] [--no-reversibility-gates]`** — Creates `.planning/[<project>/]phases/XX-phase-name/XX-YY-PLAN.md` with concrete tasks, verification criteria, and success measures (multiple plans per phase supported).
 
 Key flags: `--research-phase <N>` runs research only and writes `RESEARCH.md` then exits (replaces the deleted `gsd-research-phase`; `--research` forces refresh, `--view` prints existing without spawning). `--gaps` closes gaps from a prior plan-check. `--ingest`/`--ingest-format` pre-ingest external ADRs/PRDs/SPECs (see PRD Express Path). `--bounce`/`--skip-bounce` toggle the optional external refinement pass (`workflow.plan_bounce`). `--chunked` splits planning into short, individually-committed passes for crash resilience (`workflow.plan_chunked`), resumable. `--tdd` tests-before-code order. `--mvp` adds user story + Walking Skeleton (see `/gsd:mvp-phase`). `--granularity` overrides resolved plan granularity. `--no-tracer` opts out of tracer-first ordering. `--no-reversibility-gates` suppresses the one-way-door checkpoint for unattended runs.
 
 Usage: `/gsd:plan-phase 1`
-Result: Creates `.planning/phases/01-foundation/01-01-PLAN.md`
+Result: Creates `.planning/[<project>/]phases/01-foundation/01-01-PLAN.md`
 
 **PRD Express Path:** Pass `--prd path/to/requirements.md` to skip discuss-phase — your PRD becomes locked decisions in CONTEXT.md.
 
@@ -80,17 +80,17 @@ Usage: `/gsd:progress --do "fix the login button"`
 
 ### Quick Mode
 
-**`/gsd:quick [--full] [--validate] [--discuss] [--research]`** — Small ad-hoc tasks in `.planning/quick/` (updates STATE.md, not ROADMAP.md); spawns planner+executor only by default. `--full` = discuss+research+plan-check+verify; `--validate` = plan-check + post-execution verify; `--discuss`/`--research` add one step each; flags compose.
+**`/gsd:quick [--full] [--validate] [--discuss] [--research]`** — Small ad-hoc tasks in `.planning/[<project>/]quick/` (updates STATE.md, not ROADMAP.md); spawns planner+executor only by default. `--full` = discuss+research+plan-check+verify; `--validate` = plan-check + post-execution verify; `--discuss`/`--research` add one step each; flags compose.
 
 Usage: `/gsd:quick`
-Result: Creates `.planning/quick/NNN-slug/PLAN.md`, `.planning/quick/NNN-slug/NNN-slug-SUMMARY.md`
+Result: Creates `.planning/[<project>/]quick/NNN-slug/PLAN.md`, `.planning/[<project>/]quick/NNN-slug/NNN-slug-SUMMARY.md`
 
 ---
 
 **`/gsd:quick-batch [--file <path>] [--jobs auto|N] [--validate] [--research] [--resume <batch-id>] [task list]`** — Batches several quick-shaped tasks (inline or `--file`); one coordinator plans/dispatches/merges. `--jobs` caps concurrency, `--resume` dispatches only eligible items; `--discuss`/`--full` are rejected.
 
 Usage: `/gsd:quick-batch --jobs 3 --validate`
-Result: Per-item artifacts under `.planning/quick/`; batch state in `.planning/quick-batches/<batch-id>/BATCH.json`
+Result: Per-item artifacts under `.planning/[<project>/]quick/`; batch state in `.planning/[<project>/]quick-batches/<batch-id>/BATCH.json`
 
 ---
 
@@ -236,7 +236,7 @@ Usage: `/gsd:audit-milestone`
 
 ### Configuration
 
-**`/gsd:settings`** — Interactively toggles researcher/plan-checker/verifier agents and the model profile (quality/balanced/budget/inherit); updates `.planning/config.json`.
+**`/gsd:settings`** — Interactively toggles researcher/plan-checker/verifier agents and the model profile (quality/balanced/budget/inherit); updates the selected project's `config.json`.
 
 Usage: `/gsd:settings`
 
@@ -250,7 +250,7 @@ Usage: `/gsd:surface profile standard`
 
 ### Utility Commands
 
-**`/gsd:cleanup`** — Dry-run then moves completed-milestone phase dirs from `.planning/phases/` to `.planning/milestones/v{X.Y}-phases/`.
+**`/gsd:cleanup`** — Dry-run then moves completed-milestone phase dirs from `.planning/[<project>/]phases/` to `.planning/[<project>/]milestones/v{X.Y}-phases/`.
 
 Usage: `/gsd:cleanup`
 
@@ -354,14 +354,14 @@ Six skills for two-stage hierarchical routing across 60+ skills; invoke directly
 
 ## Workflow Modes
 
-Set during `/gsd:new-project`, changeable anytime in `.planning/config.json`:
+Set during `/gsd:new-project`, changeable anytime in `.planning/[<project>/]config.json`:
 
 - **Interactive** — confirms each major decision, pauses at checkpoints, more guidance.
 - **YOLO** — auto-approves most decisions, executes without confirmation, stops only for critical checkpoints.
 
 ## Planning Configuration
 
-`.planning/config.json`:
+`.planning/[<project>/]config.json`:
 
 - **`planning.commit_docs`** (default `true`) — `false` keeps planning artifacts local-only (add `.planning/` to `.gitignore`); useful for OSS/client projects wanting private planning.
 - **`planning.search_gitignored`** (default `false`) — `true` adds `--no-ignore` to broad ripgrep searches when `.planning/` is gitignored.
@@ -391,8 +391,8 @@ Set during `/gsd:new-project`, changeable anytime in `.planning/config.json`:
 
 ## Getting Help
 
-- Read `.planning/PROJECT.md` for project vision
-- Read `.planning/STATE.md` for current context
-- Check `.planning/ROADMAP.md` for phase status
+- Read `.planning/[<project>/]PROJECT.md` for project vision
+- Read `.planning/[<project>/]STATE.md` for current context
+- Check `.planning/[<project>/]ROADMAP.md` for phase status
 - Run `/gsd:progress` to check where you're up to
 </reference>

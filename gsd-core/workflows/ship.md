@@ -491,7 +491,8 @@ merge (#2138). The `[ci skip]` trailer suppresses the redundant pipeline the pus
 would otherwise trigger (GitHub honors `[ci skip]` / `[skip ci]`):
 
 ```bash
-gsd_run query commit "docs(${padded_phase}): ship phase ${PHASE_NUMBER} — PR #${PR_NUMBER} [ci skip]" --files .planning/STATE.md
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "docs(${padded_phase}): ship phase ${PHASE_NUMBER} — PR #${PR_NUMBER} [ci skip]" --files "$PLANNING_DIR/STATE.md"
 SHIP_NOTE_SHA=$(git rev-parse HEAD)
 git push origin ${CURRENT_BRANCH} 2>&1 || echo "⚠ track_shipping: ship-note push failed — it is local-only; rerun: git push origin ${CURRENT_BRANCH}"
 

@@ -67,9 +67,9 @@ A plan should not interleave multiple checkpoint types with implementation tasks
 
 ```markdown
 <context>
-@.planning/phases/01-foundation/01-01-SUMMARY.md
-@.planning/phases/01-foundation/01-02-SUMMARY.md  <!-- Does Plan 02 actually need Plan 01's output? -->
-@.planning/phases/01-foundation/01-03-SUMMARY.md  <!-- Chain grows, context bloats -->
+@{phase_dir}/01-01-SUMMARY.md
+@{phase_dir}/01-02-SUMMARY.md  <!-- Does Plan 02 actually need Plan 01's output? -->
+@{phase_dir}/01-03-SUMMARY.md  <!-- Chain grows, context bloats -->
 </context>
 ```
 
@@ -79,9 +79,9 @@ A plan should not interleave multiple checkpoint types with implementation tasks
 
 ```markdown
 <context>
-@.planning/PROJECT.md
-@.planning/STATE.md
-@.planning/phases/01-foundation/01-01-SUMMARY.md  <!-- Uses User type defined in Plan 01 -->
+@{project_path}
+@{state_path}
+@{phase_dir}/01-01-SUMMARY.md  <!-- Uses User type defined in Plan 01 -->
 </context>
 ```
 

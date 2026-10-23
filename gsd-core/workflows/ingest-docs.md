@@ -170,7 +170,7 @@ On Revise: exit with guidance to re-run with `--manifest` or a narrower path.
 Create staging directory:
 
 ```bash
-mkdir -p .planning/intel/classifications/
+mkdir -p "{intel_dir}/classifications/"
 ```
 
 For each discovered doc, spawn `gsd-doc-classifier` in parallel. In Claude Code, issue all Task calls in a single message with multiple tool uses so the harness runs them concurrently. For Copilot / sequential runtimes, fall back to sequential dispatch.
@@ -223,15 +223,15 @@ Agent({
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read or synthesize any classified documents independently while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
 The synthesizer writes:
-- `.planning/intel/decisions.md`, `.planning/intel/requirements.md`, `.planning/intel/constraints.md`, `.planning/intel/context.md`
-- `.planning/intel/SYNTHESIS.md`
-- `.planning/INGEST-CONFLICTS.md`
+- `{intel_dir}/decisions.md`, `{intel_dir}/requirements.md`, `{intel_dir}/constraints.md`, `{intel_dir}/context.md`
+- `{intel_dir}/SYNTHESIS.md`
+- `{conflicts_path}`
 
 </step>
 
 <step name="conflict_gate">
 
-Read `.planning/INGEST-CONFLICTS.md`. Count entries in each bucket (the synthesizer always writes the three-bucket header; parse the `### BLOCKERS ({N})`, `### WARNINGS ({N})`, `### INFO ({N})` lines).
+Read `{conflicts_path}` (the scoped INGEST-CONFLICTS.md the synthesizer wrote, never a root copy). Count entries in each bucket (the synthesizer always writes the three-bucket header; parse the `### BLOCKERS ({N})`, `### WARNINGS ({N})`, `### INFO ({N})` lines).
 
 Apply the safety semantics from `gsd-core/references/doc-conflict-engine.md`. Operation noun: `ingest`.
 
@@ -252,7 +252,7 @@ Render the report, then ask via AskUserQuestion (approve-revise-abort):
 - header: "Approve?"
 - options: Approve | Abort
 
-On Abort: exit cleanly with "Ingest cancelled. Staged intel preserved at `.planning/intel/`."
+On Abort: exit cleanly with "Ingest cancelled. Staged intel preserved at `{intel_dir}/`."
 
 **If BLOCKERS = 0 and WARNINGS = 0:**
 
@@ -264,17 +264,17 @@ Optionally display `GSD > No conflicts. Auto-resolved: {N}.` Absence of conflict
 
 **Applies only when MODE=new.**
 
-Audit PROJECT.md field requirements that `gsd-roadmapper` expects. For fields derivable from `.planning/intel/SYNTHESIS.md` (project scope, goals/non-goals, constraints, locked decisions), synthesize from the intel. For fields NOT derivable (project name, developer-facing success metric, target runtime), prompt via `AskUserQuestion` one at a time — minimal question set, no interrogation.
+Audit PROJECT.md field requirements that `gsd-roadmapper` expects. For fields derivable from `{intel_dir}/SYNTHESIS.md` (project scope, goals/non-goals, constraints, locked decisions), synthesize from the intel. For fields NOT derivable (project name, developer-facing success metric, target runtime), prompt via `AskUserQuestion` one at a time — minimal question set, no interrogation.
 
 **Routing gate (#3827): approval to classify documents is not approval to write the planning scaffold.** Before delegating, display the exact destinations and require an explicit choice:
 
 ```
 Routing — create the planning setup now?
 
-  .planning/PROJECT.md        (new)
-  .planning/REQUIREMENTS.md   (new)
-  .planning/ROADMAP.md        (new)
-  .planning/STATE.md          (new)
+  {project_path}        (new)
+  {requirements_path}   (new)
+  {roadmap_path}        (new)
+  {state_path}          (new)
 ```
 
 Use `AskUserQuestion`:
@@ -286,9 +286,9 @@ Use `AskUserQuestion`:
 
 On **Create planning setup**: continue to the `gsd-roadmapper` delegation below.
 
-On **Keep synthesized intel only**: analysis-only ingest. Do NOT invoke `gsd-roadmapper`; write no destination files. The staged intel under `.planning/intel/` is preserved and committed by `finalize` (substitute its actual file set — no PROJECT.md/REQUIREMENTS.md/ROADMAP.md/STATE.md lines). Display the completion banner with mode `new (intel only)`.
+On **Keep synthesized intel only**: analysis-only ingest. Do NOT invoke `gsd-roadmapper`; write no destination files. The staged intel under `{intel_dir}/` is preserved and committed by `finalize` (substitute its actual file set — no PROJECT.md/REQUIREMENTS.md/ROADMAP.md/STATE.md lines). Display the completion banner with mode `new (intel only)`.
 
-On **Abort**: exit cleanly with "Ingest cancelled. Staged intel preserved at `.planning/intel/`."
+On **Abort**: exit cleanly with "Ingest cancelled. Staged intel preserved at `{intel_dir}/`."
 
 Any other response (freeform/"Other"): re-ask once; if still ambiguous, treat as Abort. Never infer Create from an ambiguous answer.
 
@@ -323,14 +323,14 @@ Agent({
 
 **Applies only when MODE=merge.**
 
-Load existing `.planning/ROADMAP.md`, `.planning/PROJECT.md`, `.planning/REQUIREMENTS.md`, all `CONTEXT.md` files under `.planning/phases/`.
+Load existing `{roadmap_path}`, `{project_path}`, `{requirements_path}`, all `CONTEXT.md` files under the `phases/` directory beside `{roadmap_path}`.
 
 The synthesizer has already hard-blocked on any LOCKED-in-ingest vs LOCKED-in-existing contradiction; if we reach this step, no such blockers remain.
 
 Plan the merge:
-- **New requirements** from synthesized `.planning/intel/requirements.md` that do not overlap existing REQUIREMENTS.md entries → append to REQUIREMENTS.md
-- **New decisions** from synthesized `.planning/intel/decisions.md` that do not overlap existing CONTEXT.md `<decisions>` blocks → write to a new phase's CONTEXT.md or append to the next milestone's requirements
-- **New scope** → derive phase additions following the `new-milestone.md` pattern; append phases to `.planning/ROADMAP.md`
+- **New requirements** from synthesized `{intel_dir}/requirements.md` that do not overlap existing REQUIREMENTS.md entries → append to REQUIREMENTS.md
+- **New decisions** from synthesized `{intel_dir}/decisions.md` that do not overlap existing CONTEXT.md `<decisions>` blocks → write to a new phase's CONTEXT.md or append to the next milestone's requirements
+- **New scope** → derive phase additions following the `new-milestone.md` pattern; append phases to `{roadmap_path}`
 
 Preview the merge diff to the user and gate via approve-revise-abort before writing.
 
@@ -343,12 +343,12 @@ Commit the ingest results:
 ```bash
 gsd_run commit \
   "docs: ingest {N} docs from {SCAN_PATH} (#2387)" --files \
-  .planning/PROJECT.md \
-  .planning/REQUIREMENTS.md \
-  .planning/ROADMAP.md \
-  .planning/STATE.md \
-  .planning/intel/ \
-  .planning/INGEST-CONFLICTS.md
+  "{project_path}" \
+  "{requirements_path}" \
+  "{roadmap_path}" \
+  "{state_path}" \
+  "{intel_dir}/" \
+  "{conflicts_path}"
 ```
 
 (For merge mode, substitute the actual set of modified files.)
@@ -363,7 +363,7 @@ Show:
 - Mode ran (new, new (intel only), or merge)
 - Docs ingested (count + type breakdown)
 - Decisions locked, requirements created, constraints captured
-- Conflict report path (`.planning/INGEST-CONFLICTS.md`)
+- Conflict report path (`{conflicts_path}`)
 - Next step: `/gsd:plan-phase 1` (new) or `/gsd:plan-phase N` (merge, pointing at the first newly-added phase); for intel-only runs there is no roadmap yet — point at `/gsd:new-project` (or a later re-run with `--mode merge` once scaffold files exist), never `/gsd:plan-phase`
 
 </step>

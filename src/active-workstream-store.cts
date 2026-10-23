@@ -51,6 +51,18 @@ function planningRoot(cwd: string): string {
   return path.join(cwd, '.planning');
 }
 
+// The selected project's workstreams dir, mirroring planningWorkspace.planningDir(cwd, null)
+// (which cannot be imported here: planning-workspace imports this module). Named projects
+// keep their workstreams under `.planning/<project>/` (#3749).
+function projectPlanningBase(cwd: string): string {
+  const project = process.env['GSD_PROJECT']?.trim();
+  return project && !/[/\\]|\.\./.test(project) ? path.join(planningRoot(cwd), project) : planningRoot(cwd);
+}
+
+function workstreamsDir(cwd: string): string {
+  return path.join(projectPlanningBase(cwd), 'workstreams');
+}
+
 function validateWorkstreamName(name: string | null | undefined): boolean {
   return isValidActiveWorkstreamName(name);
 }
@@ -124,9 +136,9 @@ function getSessionScopedWorkstreamFile(cwd: string, fixedSessionKey?: string | 
 
   let planningAbs: string;
   try {
-    planningAbs = fs.realpathSync.native(planningRoot(cwd));
+    planningAbs = fs.realpathSync.native(projectPlanningBase(cwd));
   } catch {
-    planningAbs = path.resolve(planningRoot(cwd));
+    planningAbs = path.resolve(projectPlanningBase(cwd));
   }
   const projectId = crypto
     .createHash('sha1')
@@ -149,7 +161,9 @@ interface WorkstreamPointerAdapter {
 }
 
 function createSharedPointerAdapter(cwd: string): WorkstreamPointerAdapter {
-  const filePath = path.join(planningRoot(cwd), 'active-workstream');
+  // Per project, like the session pointer above: a named project's selection never
+  // overwrites (or self-heals away) the root project's (#3749).
+  const filePath = path.join(projectPlanningBase(cwd), 'active-workstream');
   return {
     read(): string | null {
       const raw = platformReadSync(filePath);
@@ -294,7 +308,7 @@ function pickActiveWorkstreamAdapterChain(cwd: string, opts: ActiveWorkstreamOpt
  */
 function resolvesToExistingWorkstream(cwd: string, name: string | null): name is string {
   if (!name || !validateWorkstreamName(name)) return false;
-  return fs.existsSync(path.join(planningRoot(cwd), 'workstreams', name));
+  return fs.existsSync(path.join(workstreamsDir(cwd), name));
 }
 
 /**
@@ -401,7 +415,7 @@ function setActiveWorkstream(cwd: string, name: string | null | undefined, opts:
     throw new Error('Invalid workstream name: must be alphanumeric, hyphens, underscores, or dots');
   }
 
-  const wsDir = path.join(planningRoot(cwd), 'workstreams', name);
+  const wsDir = path.join(workstreamsDir(cwd), name);
   platformEnsureDir(wsDir);
   adapter.write(name);
 }
@@ -457,7 +471,7 @@ interface ResolvedWorkstream {
 
 function workstreamDirectoryExists(cwd: string, name: string): boolean {
   try {
-    return fs.readdirSync(path.join(planningRoot(cwd), 'workstreams')).includes(name);
+    return fs.readdirSync(workstreamsDir(cwd)).includes(name);
   } catch {
     return false;
   }

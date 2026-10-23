@@ -244,6 +244,7 @@ export default tseslint.config(
       // src/plan-document.cts), not these emitted .cjs files.
       'gsd-core/bin/lib/planning-inspect.cjs',
       'gsd-core/bin/lib/planning-command-router.cjs',
+      'gsd-core/bin/lib/active-project-store.cjs',
       'gsd-core/bin/lib/plan-document.cjs',
       'gsd-core/bin/lib/pattern.cjs',
       'gsd-core/bin/lib/text-lines.cjs',

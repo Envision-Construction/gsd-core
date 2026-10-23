@@ -97,10 +97,12 @@ For each phase, extract what it provides and what it should consume.
 # #2962: zsh aborts the block on an unmatched for-list glob (nomatch); bash passes it through. nullglob both.
 shopt -s nullglob 2>/dev/null; setopt NULL_GLOB 2>/dev/null
 
-# Key exports from each phase
-for summary in .planning/phases/*/*-SUMMARY.md; do
-  echo "=== $summary ==="
-  grep -A 10 "Key Files\|Exports\|Provides" "$summary" 2>/dev/null
+# Key exports from each phase directory your prompt lists under `Phases:` ({phase_dirs})
+for phase_dir in {phase_dirs}; do
+  for summary in "$phase_dir"/*-SUMMARY.md; do
+    echo "=== $summary ==="
+    grep -A 10 "Key Files\|Exports\|Provides" "$summary" 2>/dev/null
+  done
 done
 ```
 

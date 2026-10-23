@@ -41,9 +41,9 @@ INIT=$(gsd_run query init.phase-op ${GSD_WS:+--ws=${GSD_WS##* }} "${target}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
-Extract: `phase_found`, `phase_dir`, `phase_number`, `commit_docs`, `roadmap_exists`.
+Extract: `phase_found`, `phase_dir`, `phase_number`, `commit_docs`, `roadmap_exists`, `state_path`, `roadmap_path`.
 
-Also read STATE.md and ROADMAP.md content for parsing current position.
+Also read STATE.md (`{state_path}`) and ROADMAP.md (`{roadmap_path}`) content for parsing current position.
 </step>
 
 <step name="validate_future_phase">
@@ -74,7 +74,7 @@ Present removal summary and confirm:
 Removing Phase {target}: {Name}
 
 This will:
-- Delete: .planning/phases/{target}-{slug}/
+- Delete: {phase_dir}/
 - Renumber all subsequent phases
 - Update: ROADMAP.md, STATE.md
 
@@ -111,7 +111,8 @@ Extract from result: `removed`, `directory_deleted`, `renamed_directories`, `ren
 Stage and commit the removal:
 
 ```bash
-gsd_run query commit "chore: remove phase {target} ({original-phase-name})" --files .planning/
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "chore: remove phase {target} ({original-phase-name})" --files "$PLANNING_DIR/phases" "$PLANNING_DIR/ROADMAP.md" "$PLANNING_DIR/STATE.md"
 ```
 
 The commit message preserves the historical record of what was removed.
@@ -124,7 +125,7 @@ Present completion summary:
 Phase {target} ({original-name}) removed.
 
 Changes:
-- Deleted: .planning/phases/{target}-{slug}/
+- Deleted: {phase_dir}/
 - Renumbered: {N} directories and {M} files
 - Updated: ROADMAP.md, STATE.md
 - Committed: chore: remove phase {target} ({original-name})

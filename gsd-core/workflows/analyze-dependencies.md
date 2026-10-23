@@ -8,7 +8,7 @@ Analyze ROADMAP.md phases for dependency relationships before execution. Detect 
 
 ## 1. Load ROADMAP.md
 
-Read `.planning/ROADMAP.md`. If it does not exist, error: "No ROADMAP.md found — run `/gsd:new-project` first."
+Read the scoped ROADMAP.md: `roadmap_path` from `init.manager`, or `ROADMAP.md` in the planning directory (`gsd_run query planning.dir --raw`). Never the root `ROADMAP.md` while a named project or workstream is selected. If it does not exist, error: "No ROADMAP.md found — run `/gsd:new-project` first."
 
 Extract all phases. For each phase capture:
 - Phase number and name
@@ -84,11 +84,11 @@ Suggested ROADMAP.md updates:
 
 Ask the user: "Apply these `Depends on` suggestions to ROADMAP.md? (yes / no / edit)"
 
-- **yes** — Write all suggested `Depends on` entries to ROADMAP.md. Confirm each write.
+- **yes** — Write all suggested `Depends on` entries to the ROADMAP.md read in step 1. Confirm each write.
 - **no** — Print the suggestions as text only. User updates manually.
 - **edit** — Present each suggestion individually with yes/no/skip per suggestion.
 
-When writing to ROADMAP.md:
+When writing to that ROADMAP.md:
 - Locate the phase entry and add or update the `Depends on:` field
 - Preserve all other phase content unchanged
 - Do not reorder phases

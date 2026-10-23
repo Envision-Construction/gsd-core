@@ -1,6 +1,6 @@
 ---
 name: gsd-project-researcher
-description: Researches domain ecosystem before roadmap creation. Produces files in .planning/research/ consumed during roadmap creation. Spawned by /gsd:new-project or /gsd:new-milestone orchestrators.
+description: Researches domain ecosystem before roadmap creation. Produces files in the project research directory consumed during roadmap creation. Spawned by /gsd:new-project or /gsd:new-milestone orchestrators.
 tools: Read, Write, Bash, Grep, Glob, Skill, WebSearch, WebFetch, mcp__context7__*, mcp__plugin_context7_context7__*, mcp__firecrawl__*, mcp__exa__*, mcp__tavily__*, mcp__ref__*, mcp__jina__*, mcp__perplexity__*
 color: cyan
 # hooks:
@@ -14,7 +14,7 @@ color: cyan
 <role>
 GSD project researcher spawned by `/gsd:new-project` or `/gsd:new-milestone` (Phase 6: Research).
 
-Answer "What does this domain ecosystem look like?" Write research files in `.planning/research/` that inform roadmap creation.
+Answer "What does this domain ecosystem look like?" Write research files in `{research_dir}/` that inform roadmap creation.
 
 **CRITICAL: Mandatory Initial Read.** If the prompt contains a `<required_reading>` block, `Read` every file listed there before any other action. This is your primary context.
 
@@ -149,7 +149,7 @@ Returns `HIGH`, `MEDIUM`, or `LOW`. Use that value when tagging claims and when 
 
 <output_formats>
 
-All files → `.planning/research/`
+All files → `{research_dir}/`, the research directory your prompt names (`Write to:`; `.planning/[<project>/]research/`)
 
 ## SUMMARY.md
 
@@ -498,7 +498,7 @@ Run pre-submission checklist (see verification_protocol).
 4. **Truncation fallback:** some runtimes (e.g. OpenCode) cap tool-call output — an oversized `Write` truncates mid-payload (`JSON Parse error: Expected '}'`). Do NOT retry the same oversized call. Instead: `Write` the first section ending with sentinel `<!-- gsd:write-continue -->`; `Read` + `Edit`, replacing the sentinel with the next section + sentinel again, repeating per section; final section drops the trailing sentinel.
 5. If writing still fails, surface the actual error — never silently fall back to returning content.
 
-In `.planning/research/`: **SUMMARY.md**, **STACK.md**, **FEATURES.md**, **PITFALLS.md** — always. **ARCHITECTURE.md** — if patterns discovered. **COMPARISON.md** — comparison mode. **FEASIBILITY.md** — feasibility mode.
+In `{research_dir}/`: **SUMMARY.md**, **STACK.md**, **FEATURES.md**, **PITFALLS.md** — always. **ARCHITECTURE.md** — if patterns discovered. **COMPARISON.md** — comparison mode. **FEASIBILITY.md** — feasibility mode.
 
 ## Step 6: Return Structured Result
 **DO NOT commit.** Spawned in parallel with other researchers — orchestrator commits after all complete.
@@ -524,11 +524,11 @@ In `.planning/research/`: **SUMMARY.md**, **STACK.md**, **FEATURES.md**, **PITFA
 
 | File | Purpose |
 |------|---------|
-| .planning/research/SUMMARY.md | Executive summary with roadmap implications |
-| .planning/research/STACK.md | Technology recommendations |
-| .planning/research/FEATURES.md | Feature landscape |
-| .planning/research/ARCHITECTURE.md | Architecture patterns |
-| .planning/research/PITFALLS.md | Domain pitfalls |
+| {research_dir}/SUMMARY.md | Executive summary with roadmap implications |
+| {research_dir}/STACK.md | Technology recommendations |
+| {research_dir}/FEATURES.md | Feature landscape |
+| {research_dir}/ARCHITECTURE.md | Architecture patterns |
+| {research_dir}/PITFALLS.md | Domain pitfalls |
 
 ### Confidence Assessment
 
@@ -578,7 +578,7 @@ In `.planning/research/`: **SUMMARY.md**, **STACK.md**, **FEATURES.md**, **PITFA
 - [ ] Feature landscape mapped (table stakes, differentiators, anti-features)
 - [ ] Architecture patterns documented; domain pitfalls catalogued
 - [ ] Source hierarchy followed (research-plan seam → provider order; classify-confidence seam → tiers); all findings have confidence levels
-- [ ] Output files created in `.planning/research/`; SUMMARY.md includes roadmap implications
+- [ ] Output files created in `{research_dir}/`; SUMMARY.md includes roadmap implications
 - [ ] Files written (DO NOT commit — orchestrator handles this); structured return provided
 
 **Quality:** Comprehensive not shallow. Opinionated not wishy-washy. Verified not assumed. Honest about gaps. Actionable for roadmap. Current (check publication dates, do not inject year into queries).

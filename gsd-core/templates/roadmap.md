@@ -1,6 +1,6 @@
 # Roadmap Template
 
-Template for `.planning/ROADMAP.md`.
+Template for `.planning/[<project>/]ROADMAP.md`.
 
 ## Initial Roadmap (v1.0 Greenfield)
 

@@ -348,6 +348,7 @@
       "worktree-path-safety.md"
     ],
     "cli_modules": [
+      "active-project-store.cjs",
       "active-workstream-store.cjs",
       "adapter-declarative.cjs",
       "adapter-imperative.cjs",

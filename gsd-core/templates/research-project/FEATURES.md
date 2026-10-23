@@ -1,6 +1,6 @@
 # Features Research Template
 
-Template for `.planning/research/FEATURES.md` — feature landscape for the project domain.
+Template for `.planning/[<project>/]research/FEATURES.md` — feature landscape for the project domain.
 
 <template>
 

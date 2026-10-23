@@ -4,7 +4,7 @@
    degradation signals in `gsd-core/references/context-budget.md`. Signs of POOR tier (70%+):
    increasing vagueness, skipped steps, silent partial completion.
 
-   Read `workflow.context_guard_mode` from `.planning/config.json` (default `warn`).
+   Read `workflow.context_guard_mode` with `gsd_run query config-get workflow.context_guard_mode --default warn --raw`.
 
    | Tier | `warn` (default) | `auto` | `off` |
    |------|-----------------|--------|-------|

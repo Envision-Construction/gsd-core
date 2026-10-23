@@ -5,13 +5,13 @@
 -->
 ### Capture problems → fixes (MemPalace)
 
-**Gate first.** Read `.planning/config.json`. If `mempalace.enabled` is not `true`, or `mempalace.capture_artifacts` is `false`, **skip this entire section** and let the wave complete unchanged. (This contribution is only injected when the capability is enabled; the `capture_artifacts` check lets you turn capture off without disabling the rest of the capability.)
+**Gate first.** Read the selected project's settings (`gsd_run query config-get mempalace.enabled --default false --raw`, `gsd_run query config-get mempalace.capture_artifacts --default true --raw`). If `mempalace.enabled` is not `true`, or `mempalace.capture_artifacts` is `false`, **skip this entire section** and let the wave complete unchanged. (This contribution is only injected when the capability is enabled; the `capture_artifacts` check lets you turn capture off without disabling the rest of the capability.)
 
 Otherwise — after verifying this wave, persist any *confirmed* problem→fix pairs into the palace so they are recalled in future phases. This is best-effort; if MemPalace is unreachable, skip silently — capture never fails a wave.
 
 For each confirmed bug/issue resolved in this wave:
 
-1. **Resolve the wing** (`mempalace.wing`, else `project_code`, else project dir) and target `room: problems`.
+1. **Resolve the wing** (`mempalace.wing`, else `project_code`, else project dir with `-<project>` appended for a named project) and target `room: problems`.
 2. **Dedupe first.** Call `mempalace_check_duplicate` (interactive) before filing so re-runs don't create duplicate drawers.
 3. **File the drawer verbatim.** Store the problem statement and its fix as a drawer in `room: problems` — interactive: `mempalace_add_drawer`; headless: stage the artifact under the `problems/` folder and run `mempalace mine --daemon --background` (no `--room` flag; the background queue defers the write when another writer holds the palace lock, #4700 — see [CLI reference](https://mempalaceofficial.com/reference/cli.html); room assignment is via `detect_room()` folder-path match per the [mining guide](https://mempalaceofficial.com/guide/mining.html); use the same staging pattern documented in `gsd-mempalace-capture` Step 3). Include provenance (`source_file`, phase id).
 4. **Mirror the KG fact** when `mempalace.mirror_kg` is on: add `(<bug>, fixed_by, <fix>)` with `valid_from` = the phase date via `mempalace_kg_add`.

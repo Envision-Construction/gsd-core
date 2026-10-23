@@ -81,8 +81,9 @@ describe('milestone-summary workflow', () => {
   test('workflow writes to reports directory', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     assert.ok(
-      content.includes('.planning/reports/MILESTONE_SUMMARY'),
-      'should write summary to .planning/reports/'
+      // Per project: `$PROJECT_DIR/reports/` (`.planning/reports/` for the root project) — versions repeat across projects.
+      content.includes('$PROJECT_DIR/reports/MILESTONE_SUMMARY'),
+      'should write summary to the project reports directory'
     );
   });
 
@@ -146,7 +147,7 @@ describe('milestone-summary workflow', () => {
   test('workflow checks both audit file locations for archived milestones', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     assert.ok(
-      content.includes('.planning/milestones/v${VERSION}-MILESTONE-AUDIT.md'),
+      content.includes('$PLANNING_DIR/milestones/v${VERSION}-MILESTONE-AUDIT.md'),
       'should check milestones/ directory for archived audit file'
     );
   });
@@ -175,29 +176,29 @@ describe('milestone-summary artifact path resolution', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
     // Archived roadmap path should be under milestones/
     assert.ok(
-      content.includes('.planning/milestones/v${VERSION}-ROADMAP.md'),
+      content.includes('$PLANNING_DIR/milestones/v${VERSION}-ROADMAP.md'),
       'archived ROADMAP path should be under .planning/milestones/'
     );
     assert.ok(
-      content.includes('.planning/milestones/v${VERSION}-REQUIREMENTS.md'),
+      content.includes('$PLANNING_DIR/milestones/v${VERSION}-REQUIREMENTS.md'),
       'archived REQUIREMENTS path should be under .planning/milestones/'
     );
     assert.ok(
-      content.includes('.planning/milestones/v${VERSION}-MILESTONE-AUDIT.md'),
+      content.includes('$PLANNING_DIR/milestones/v${VERSION}-MILESTONE-AUDIT.md'),
       'archived AUDIT path should be under .planning/milestones/'
     );
   });
 
-  test('current milestone paths point to .planning/ root', () => {
+  test('current milestone paths point to the resolved planning dir', () => {
     const content = fs.readFileSync(workflowPath, 'utf-8');
-    // Current milestone should read from .planning/ root
+    // Current milestone reads from the resolved planning dir ($PLANNING_DIR: root, named project or workstream)
     const lines = content.split(/\r?\n/);
     const currentSection = lines.slice(
       lines.findIndex(l => l.includes('Current/in-progress')),
       lines.findIndex(l => l.includes('Current/in-progress')) + 10
     ).join('\n');
     assert.ok(
-      currentSection.includes('ROADMAP_PATH=".planning/ROADMAP.md"'),
+      currentSection.includes('ROADMAP_PATH="$PLANNING_DIR/ROADMAP.md"'),
       'current ROADMAP path should be at .planning/ root'
     );
   });

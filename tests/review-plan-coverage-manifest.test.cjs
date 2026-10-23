@@ -125,10 +125,14 @@ function extractAllBashBlocks() {
     .map((b) => lines.slice(b.openLineIdx + 1, b.closeLineIdx).join('\n'));
 }
 
+// review.md's build_prompt block resolves PROJECT.md/REQUIREMENTS.md through `gsd_run query planning.dir`
+// (scoped per project); stub it to the root-project answer, cwd/.planning, which these fixtures leave absent.
+const GSD_RUN_STUB = 'gsd_run() { case "$*" in "query planning.dir"*) printf \'%s\\n\' "$PWD/.planning" ;; *) return 1 ;; esac; }\n';
+
 /** Fill the workflow's `{run_dir}` placeholder and stage the script in a file. */
 function stageScript(shell, body, root, runDir) {
   const scriptPath = path.join(root, `block-${shell.name}-${Math.random().toString(36).slice(2)}.sh`);
-  fs.writeFileSync(scriptPath, body.split('{run_dir}').join(runDir));
+  fs.writeFileSync(scriptPath, GSD_RUN_STUB + body.split('{run_dir}').join(runDir));
   return scriptPath;
 }
 

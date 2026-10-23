@@ -51,7 +51,8 @@ Phases:
 What to commit:
 
 ```bash
-gsd_run query commit "docs: initialize [project-name] ([N] phases)" --files .planning/
+P=$(gsd_run query planning.dir --raw) || exit 1; J=$(gsd_run query planning.dir --pick project_dir) || exit 1
+gsd_run query commit "docs: initialize [project-name] ([N] phases)" --files "$J/PROJECT.md" "$P/config.json" "$P/REQUIREMENTS.md" "$P/ROADMAP.md" "$P/STATE.md"
 ```
 
 </format>
@@ -130,13 +131,13 @@ Tasks completed: [N]/[N]
 - [Task 2 name]
 - [Task 3 name]
 
-SUMMARY: .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md
+SUMMARY: {phase}-{plan}-SUMMARY.md
 ```
 
 What to commit:
 
 ```bash
-gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-PLAN.md .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md
+gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files "{phase_dir}/{phase}-{plan}-PLAN.md" "{phase_dir}/{phase}-{plan}-SUMMARY.md" "{state_path}" "{roadmap_path}"
 ```
 
 **Note:** Code files NOT included - already committed per-task.
@@ -156,7 +157,8 @@ Current: [task name]
 What to commit:
 
 ```bash
-gsd_run query commit "docs(pause): [phase-name] paused at task [X]/[Y]" --files .planning/
+P=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "docs(pause): [phase-name] paused at task [X]/[Y]" --files [handoff-path] "$P/HANDOFF.json" "$P/STATE.md"
 ```
 
 </format>
@@ -262,7 +264,7 @@ For workspaces with separate git repos (e.g., `backend/`, `frontend/`, `shared/`
 
 ### Configuration
 
-In `.planning/config.json`, list sub-repo directories under `planning.sub_repos`:
+In the selected project's `config.json`, list sub-repo directories under `planning.sub_repos`:
 
 ```json
 {

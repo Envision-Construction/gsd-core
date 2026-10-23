@@ -850,6 +850,27 @@ export const NON_FAMILY_COMMAND_ALIASES: NonFamilyCommandAlias[] = [
     "mutation": false
   },
   {
+    "canonical": "project.get",
+    "aliases": [
+      "project get"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "project.list",
+    "aliases": [
+      "project list"
+    ],
+    "mutation": false
+  },
+  {
+    "canonical": "project.set",
+    "aliases": [
+      "project set"
+    ],
+    "mutation": true
+  },
+  {
     "canonical": "requirements.mark-complete",
     "aliases": [
       "requirements mark-complete"

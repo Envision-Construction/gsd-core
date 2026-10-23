@@ -48,7 +48,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 Check `roadmap_exists` from init JSON. If false:
 ```
-ERROR: No roadmap found (.planning/ROADMAP.md)
+ERROR: No roadmap found (ROADMAP.md)
 Run /gsd:new-project to initialize.
 ```
 Exit.
@@ -246,7 +246,7 @@ Before writing, capture the current milestone scope (window scope + phase set) s
 SCOPE_BEFORE=$(gsd_run query roadmap milestone-scope)
 ```
 
-Write the updated phase back in place in ROADMAP.md.
+Write the updated phase back in place in ROADMAP.md (`{roadmap_path}` from init JSON).
 
 Read the full ROADMAP.md content, locate the phase section by its header (`## Phase {N}:` or `### Phase {N}:`), and replace exactly the old section text with the new section text. All content before and after the section (including other phases, milestone headers, and the summary checklist) must be left unchanged.
 

@@ -25,7 +25,7 @@ INIT=$(gsd_run query init.progress ${GSD_WS:+--ws=${GSD_WS##* }} $FORENSIC_PARAM
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
 
-Extract from init JSON: `project_exists`, `roadmap_exists`, `state_exists`, `requirements_exists`, `planning_exists`, `milestones_exists`, `init_incomplete`, `phases`, `current_phase`, `next_phase`, `milestone_version`, `completed_count`, `phase_count`, `paused_at`, `state_path`, `roadmap_path`, `project_path`, `config_path`, `phase_mvp_mode`.
+Extract from init JSON: `project_exists`, `roadmap_exists`, `state_exists`, `requirements_exists`, `planning_exists`, `milestones_exists`, `init_incomplete`, `phases`, `current_phase`, `next_phase`, `milestone_version`, `completed_count`, `phase_count`, `paused_at`, `state_path`, `roadmap_path`, `project_path`, `config_path`, `phase_mvp_mode`, `planning_project`, `projects`.
 
 ```bash
 DISCUSS_MODE=$(gsd_run query config-get workflow.discuss_mode --raw 2>/dev/null || echo "discuss")
@@ -135,6 +135,7 @@ Present:
 ````
 # [Project Name]
 
+**Project:** {planning_project, or `root` when empty} · named projects here: {projects} — show this line only when `projects` is non-empty; switch with `--project <name>` on any GSD command
 **Progress:** {PROGRESS_BAR}
 **Profile:** [quality/balanced/budget/inherit]
 **Discuss mode:** {DISCUSS_MODE}
@@ -253,7 +254,7 @@ counts, i.e. `status: superseded` plans excluded, matching "outstanding work"):
 PHASE_COUNTS=$(gsd_run query find-phase "${CURRENT_PHASE}")
 X=$(echo "$PHASE_COUNTS" | jq -r '.plan_count // 0')
 Y=$(echo "$PHASE_COUNTS" | jq -r '.summary_count // 0')
-(ls -1 .planning/phases/[current-phase-dir]/*-UAT.md 2>/dev/null || true) | wc -l
+(ls -1 "$(echo "$PHASE_COUNTS" | jq -r '.directory // empty')"/*-UAT.md 2>/dev/null || true) | wc -l
 ```
 
 State: "This phase has {X} plans, {Y} summaries."
@@ -264,7 +265,7 @@ Check for UAT.md files with status "diagnosed" (has gaps needing fixes).
 
 ```bash
 # Check for diagnosed UAT with gaps or partial (incomplete) testing
-grep -l "status: diagnosed\|status: partial" .planning/phases/[current-phase-dir]/*-UAT.md 2>/dev/null || true
+grep -l "status: diagnosed\|status: partial" "$(gsd_run query planning.dir --raw)"/phases/[current-phase-dir]/*-UAT.md 2>/dev/null || true
 ```
 
 Track:
@@ -317,7 +318,7 @@ The unparsed row comes from `results` entries with `parse_gap: true` (`summary.p
 
 **Step 1.7: Check verification status for the current phase**
 
-A phase whose verification is anything but `passed` is NOT complete, even when every PLAN.md has a matching SUMMARY.md. The count-based status (`roadmap.analyze`) only sees plans/summaries, so without this check such a phase is reported complete and routing skips straight to the next phase. When the phase appears count-complete (`summaries = plans AND plans > 0`), consult the verification report (the same `verification.status` gate `ship` and `execute-phase` use, from #651), on the phase directory the locator resolved (a workstream project does not keep its phases under `.planning/phases/`):
+A phase whose verification is anything but `passed` is NOT complete, even when every PLAN.md has a matching SUMMARY.md. The count-based status (`roadmap.analyze`) only sees plans/summaries, so without this check such a phase is reported complete and routing skips straight to the next phase. When the phase appears count-complete (`summaries = plans AND plans > 0`), consult the verification report (the same `verification.status` gate `ship` and `execute-phase` use, from #651), on the phase directory the locator resolved (a named project or workstream does not keep its phases under the root `phases/`):
 
 ```bash
 PHASE_DIR=$(gsd_run query find-phase "${CURRENT_PHASE}" --pick directory)

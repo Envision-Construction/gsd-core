@@ -101,7 +101,7 @@ If `files` field has entries, read and briefly summarize each.
 <step name="check_roadmap">
 Check for roadmap (can use init progress or directly check file existence):
 
-If `.planning/ROADMAP.md` exists:
+If `ROADMAP.md` exists in the planning directory (`gsd_run query planning.dir ${GSD_WS:+--ws=${GSD_WS##* }} --raw`):
 1. Check if todo's area matches an upcoming phase
 2. Check if todo's files overlap with a phase's scope
 3. Note any match for action options
@@ -155,7 +155,7 @@ Return to list_todos step.
 </step>
 
 <step name="update_state">
-If `.planning/STATE.md` exists:
+If `STATE.md` exists in the planning directory (`gsd_run query planning.dir ${GSD_WS:+--ws=${GSD_WS##* }} --raw`):
 
 1. Re-run `gsd_run query init.todos ${GSD_WS:+--ws=${GSD_WS##* }}` (same workstream flag as the first call) to get a fresh, post-write JSON snapshot (the count and rendering must reflect the change just made).
 2. **Fail-safe check (#2618):** if the JSON failed to parse, or `pending_read_ok` is not `true`, or `pending_todos_markdown` is not a string, do NOT touch the "### Pending Todos" section — leave it exactly as-is and continue to the next step. A partial or malformed `init.todos` result must never overwrite a good existing section.
@@ -166,8 +166,14 @@ If `.planning/STATE.md` exists:
 If todo was moved to completed/, commit the change:
 
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
 git rm --cached .planning/todos/pending/[filename] 2>/dev/null || true
-gsd_run query commit "docs: start work on todo - [title]" --files .planning/todos/completed/[filename] .planning/STATE.md
+PLANNING_DIR=$(gsd_run query planning.dir ${GSD_WS:+--ws=${GSD_WS##* }} --raw) || exit 1
+gsd_run query commit "docs: start work on todo - [title]" --files .planning/todos/completed/[filename] "$PLANNING_DIR/STATE.md"
 ```
 
 Tool respects `commit_docs` config and gitignore automatically.

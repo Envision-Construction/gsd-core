@@ -2004,7 +2004,8 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   const commitDocsPolicy = resolveCommitDocsPolicy(
     config,
     detectPhaseNumberFromFiles(files),
-    () => isGitIgnored(cwd, '.planning'),
+    // The selected project's planning dir (`.planning` for the root project, #3749).
+    () => isGitIgnored(cwd, path.relative(cwd, planningDir(cwd, null)).split(path.sep).join('/')),
   );
   if (!commitDocsPolicy.resolved) {
     const result = {
@@ -4129,7 +4130,7 @@ function cmdCheckCommit(cwd: string, raw: boolean): void {
       const policy = resolveCommitDocsPolicy(
         config,
         detectPhaseNumberFromFiles(planningFiles),
-        () => isGitIgnored(cwd, '.planning'),
+        () => isGitIgnored(cwd, path.relative(cwd, planningDir(cwd, null)).split(path.sep).join('/')),
       );
       if (!policy.resolved) {
         error(

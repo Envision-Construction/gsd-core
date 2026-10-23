@@ -115,7 +115,7 @@ These six routers are descriptor-only entries that the model picks first; the bo
 
 | Command | Role | Source |
 |---------|------|--------|
-| `/gsd-new-project` | Initialize a new project with deep context gathering and PROJECT.md. | [commands/gsd/new-project.md](../commands/gsd/new-project.md) |
+| `/gsd-new-project` | Initialize a new project, or a separate one beside an existing project, with deep context gathering. | [commands/gsd/new-project.md](../commands/gsd/new-project.md) |
 | `/gsd-onboard` | Guide existing codebase onboarding through mapping, docs ingest, project setup, and onboarding summary. | [commands/gsd/onboard.md](../commands/gsd/onboard.md) |
 | `/gsd-workspace` | Manage GSD workspaces — create (`--new`), list (`--list`), or remove (`--remove`) isolated workspace environments. | [commands/gsd/workspace.md](../commands/gsd/workspace.md) |
 | `/gsd-discuss-phase` | Gather phase context through adaptive questioning before planning. | [commands/gsd/discuss-phase.md](../commands/gsd/discuss-phase.md) |
@@ -502,6 +502,7 @@ Full listing: `gsd-core/bin/lib/*.cjs`.
 | `installer-migrations/009-pi-retire-reserved-hooks-dir.cjs` | Installer migration: retires pi's legacy `hooks/` directory after GSD's shared hook bundle moved to `gsd-hooks/` (#3023) |
 | `installer-migrations/010-antigravity-retire-confighome-artifacts.cjs` | Installer migration: retires Antigravity's configHome `skills/`/`agents/` surfaces after the global layout moved to the `~/.gemini/config` home override (#3738) |
 | `installer-migrations/011-opencode-mcp-no-prompts.cjs` | Installer migration (compiled from `src/installer-migrations/011-opencode-mcp-no-prompts.cts`, gitignored; #5338, ADR-5331 D6): adds `--no-prompts` to the GSD-written `gsd` MCP entry in `opencode.json(c)` (`mcp.gsd` and the 2.x native `mcp.servers.gsd`) so OpenCode stops listing every GSD command a second time as an MCP-prompt command; edits a commented config as text and never touches a user-edited or user-defined entry |
+| `active-project-store.cjs` | Named-project selection (CLI `--project` > `GSD_PROJECT` env > session pointer keyed to the repository) for `.planning/<project>/`; `project set/get/list` |
 | `active-workstream-store.cjs` | Workstream source precedence and selection (CLI `--ws` > `GSD_WORKSTREAM` env > stored pointer); name validation and environment propagation |
 | `adapter-declarative.cjs` | Declarative host-integration adapter — projects workflow artifacts through the install engine for hosts that declare a descriptor-driven surface (#1680) |
 | `adapter-imperative.cjs` | Imperative host-integration adapter — binds the composed capability registry in-process for hosts that drive emission themselves (#1680) |

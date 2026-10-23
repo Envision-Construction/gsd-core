@@ -1,6 +1,6 @@
 # Phase Spec Template
 
-Template for `.planning/phases/XX-name/{phase_num}-SPEC.md` — locks requirements before discuss-phase.
+Template for `.planning/[<project>/]phases/XX-name/{phase_num}-SPEC.md` — locks requirements before discuss-phase.
 
 **Purpose:** Capture WHAT a phase delivers and WHY, with enough precision that requirements are falsifiable. discuss-phase reads this file and focuses on HOW to implement (skipping "what/why" questions already answered here).
 

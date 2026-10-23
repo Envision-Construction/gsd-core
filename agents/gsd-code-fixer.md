@@ -232,19 +232,32 @@ The cleanup tail (commit fixes -> remove worktree -> drop recovery sentinel) MUS
 # #2825: honor workflow.use_worktrees — the documented opt-out. When false,
 # edit/commit in the main checkout (wt=".", no temp branch, no sentinel, no
 # cleanup tail). Read the flag the same way the four sibling writer workflows
-# do. NOTE: this read parses .planning/config.json directly via `node` rather
+# do. NOTE: this read parses the scoped config.json directly via `node` rather
 # than the gsd-tools CLI, because setup_worktree runs BEFORE the canonical
 # launcher preamble is sourced — invoking the CLI here would be undefined at
 # runtime and violates the runtime-launcher-parity preamble-ordering rule.
 # Once the preamble is sourced (later steps), the CLI is available.
+# The scoped planning dir (root, named project, or workstream) holds phase_dir:
+# <planning dir>/phases/<slug>, or <planning dir>/milestones/<v>-phases/<slug>.
+# Same ladder as config-get: a workstream that leaves the key unset inherits its
+# project's config (the repo-level one for the root project); an unreadable config keeps worktrees on.
 USE_WORKTREES=$(node -e '
   try {
-    const fs = require("fs");
-    const p = (process.env.GSD_PROJECT_DIR || process.cwd()) + "/.planning/config.json";
-    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-    process.stdout.write(String((cfg.workflow && cfg.workflow.use_worktrees) ?? true));
+    const fs = require("fs"), path = require("path");
+    const base = process.env.GSD_PROJECT_DIR || process.cwd();
+    const own = (dir) => {
+      try { const cfg = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf8")); return cfg.workflow && cfg.workflow.use_worktrees; }
+      catch { return undefined; }
+    };
+    if (!process.argv[1]) throw new Error("phase_dir unset");
+    const parent = path.resolve(base, process.argv[1], "..");
+    let dir = path.dirname(parent);
+    if (path.basename(parent).endsWith("-phases") && path.basename(dir) === "milestones") dir = path.dirname(dir);
+    let v = own(dir);
+    if (v == null && path.basename(path.dirname(dir)) === "workstreams") v = own(path.dirname(path.dirname(dir)));
+    process.stdout.write(String(v ?? true));
   } catch { process.stdout.write("true"); }
-')
+' "$phase_dir")
 
 # Derive worktree path from padded_phase (parsed from config in next step,
 # but the shell snippet below is illustrative — adapt once config is parsed).
@@ -435,11 +448,11 @@ This cleanup is unconditional when a worktree was created — register it mental
 **1. Read mandatory files:** Load all files from `<required_reading>` block if present.
 
 **2. Parse config:** Extract from `<config>` block in prompt:
-- `phase_dir`: Path to phase directory (e.g., `.planning/phases/02-code-review-command`)
+- `phase_dir`: Path to phase directory (e.g., `.planning/[<project>/]phases/02-code-review-command`)
 - `padded_phase`: Zero-padded phase number (e.g., "02")
-- `review_path`: Full path to REVIEW.md (e.g., `.planning/phases/02-code-review-command/02-REVIEW.md`)
+- `review_path`: Full path to REVIEW.md (e.g., `.planning/[<project>/]phases/02-code-review-command/02-REVIEW.md`)
 - `fix_scope`: "critical_warning" (default) or "all" (includes Info findings)
-- `fix_report_path`: Full path for REVIEW-FIX.md output (e.g., `.planning/phases/02-code-review-command/02-REVIEW-FIX.md`)
+- `fix_report_path`: Full path for REVIEW-FIX.md output (e.g., `.planning/[<project>/]phases/02-code-review-command/02-REVIEW-FIX.md`)
 
 **3. Read REVIEW.md:**
 ```bash
@@ -665,8 +678,8 @@ _Iteration: {N}_
 
 **#2825 — honor `workflow.use_worktrees`.** Before creating a worktree, read the
 `workflow.use_worktrees` config flag (the documented opt-out — same key the four sibling writer
-workflows honor). `setup_worktree` reads it via `node` directly from `.planning/config.json`
-(because that step runs BEFORE the canonical gsd_run launcher preamble is sourced; later steps may
+workflows honor). `setup_worktree` reads it via `node` directly from the scoped `config.json`
+in the planning dir that holds `phase_dir` (because that step runs BEFORE the canonical gsd_run launcher preamble is sourced; later steps may
 use `gsd_run query config-get workflow.use_worktrees`). When it is `false`, do NOT create a worktree
 — edit and commit in the main checkout directly (`wt="."`, no temp branch, no sentinel, no cleanup
 tail). A user who opted out of worktrees must

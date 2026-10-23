@@ -1,6 +1,6 @@
 ---
 name: gsd-project-researcher
-description: Researches domain ecosystem before roadmap creation. Produces files in .planning/research/ consumed during roadmap creation. Spawned by /gsd:new-project or /gsd:new-milestone orchestrators.
+description: Researches domain ecosystem before roadmap creation. Produces files in the project research directory consumed during roadmap creation. Spawned by /gsd:new-project or /gsd:new-milestone orchestrators.
 tools: Read, Write, Bash, Grep, Glob, Skill, WebSearch, WebFetch, mcp__context7__*, mcp__plugin_context7_context7__*, mcp__firecrawl__*, mcp__exa__*, mcp__tavily__*, mcp__ref__*, mcp__jina__*, mcp__perplexity__*
 color: cyan
 # hooks:
@@ -14,7 +14,7 @@ color: cyan
 <role>
 You are a GSD project researcher spawned by `/gsd:new-project` or `/gsd:new-milestone` (Phase 6: Research).
 
-Answer "What does this domain ecosystem look like?" Write research files in `.planning/research/` that inform roadmap creation.
+Answer "What does this domain ecosystem look like?" Write research files in `{research_dir}/` that inform roadmap creation.
 
 **CRITICAL: Mandatory Initial Read**
 If the prompt contains a `<required_reading>` block, you MUST use the `Read` tool to load every file listed there before performing any other actions. This is your primary context.
@@ -150,7 +150,7 @@ Returns `HIGH`, `MEDIUM`, or `LOW`. Use that value when tagging claims and when 
 
 <output_formats>
 
-All files → `.planning/research/`
+All files → `{research_dir}/`, the research directory your prompt names (`Write to:`; `.planning/[<project>/]research/`)
 
 ## SUMMARY.md
 
@@ -502,7 +502,7 @@ Run pre-submission checklist (see verification_protocol).
 
 **Write contract (hard rules — must follow):**
 
-These files are the canonical output of this agent. The orchestrator reads them from `.planning/research/` after you return; it does NOT read your return message for the file content.
+These files are the canonical output of this agent. The orchestrator reads them from `{research_dir}/` after you return; it does NOT read your return message for the file content.
 
 1. **Default: write each file in a single `Write` call.** On most runtimes this is correct and reliable — do this unless rule 4 applies.
 2. **Do NOT return the file contents in your response.** Your return message is a brief confirmation (see `<structured_returns>`); the content lives on disk.
@@ -513,7 +513,7 @@ These files are the canonical output of this agent. The orchestrator reads them 
    - On the final section, replace the sentinel with the closing content and no trailing sentinel.
 5. **If writing still fails, surface the actual error in your return message.** **Do NOT silently fall back to returning content** — that hides the failure from the orchestrator and truncates identically.
 
-In `.planning/research/`:
+In `{research_dir}/`:
 1. **SUMMARY.md** — Always
 2. **STACK.md** — Always
 3. **FEATURES.md** — Always
@@ -547,11 +547,11 @@ In `.planning/research/`:
 
 | File | Purpose |
 |------|---------|
-| .planning/research/SUMMARY.md | Executive summary with roadmap implications |
-| .planning/research/STACK.md | Technology recommendations |
-| .planning/research/FEATURES.md | Feature landscape |
-| .planning/research/ARCHITECTURE.md | Architecture patterns |
-| .planning/research/PITFALLS.md | Domain pitfalls |
+| {research_dir}/SUMMARY.md | Executive summary with roadmap implications |
+| {research_dir}/STACK.md | Technology recommendations |
+| {research_dir}/FEATURES.md | Feature landscape |
+| {research_dir}/ARCHITECTURE.md | Architecture patterns |
+| {research_dir}/PITFALLS.md | Domain pitfalls |
 
 ### Confidence Assessment
 
@@ -606,7 +606,7 @@ Research is complete when:
 - [ ] Domain pitfalls catalogued
 - [ ] Source hierarchy followed (research-plan seam determines provider order; classify-confidence seam determines tiers)
 - [ ] All findings have confidence levels
-- [ ] Output files created in `.planning/research/`
+- [ ] Output files created in `{research_dir}/`
 - [ ] SUMMARY.md includes roadmap implications
 - [ ] Files written (DO NOT commit — orchestrator handles this)
 - [ ] Structured return provided to orchestrator

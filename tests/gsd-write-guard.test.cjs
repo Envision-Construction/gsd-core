@@ -795,8 +795,10 @@ describe('guard <-> gsd-roadmapper binding (the /gsd:new-milestone collapse path
 
     // Both curated targets the step writes must be armed by name — one arming
     // cannot cover both, because the token is path-bound and single-use.
-    for (const target of ['.planning/ROADMAP.md', '.planning/STATE.md']) {
-      assert.ok(step.includes(`printf '${target}\\n' > ${sentinel}`),
+    // The targets are variables bound to the resolved write targets (a named project's
+    // or workstream's ROADMAP.md/STATE.md), so the root files are never armed by accident.
+    for (const target of ['"$ROADMAP_TARGET"', '"$STATE_TARGET"']) {
+      assert.ok(step.includes(`printf '%s\\n' ${target} > ${sentinel}`),
         `Step 7 must arm ${sentinel} for ${target} immediately before writing it — ` +
         'the sentinel is path-bound and single-use, so a single arming covers only one file');
     }
@@ -830,7 +832,7 @@ describe('guard <-> gsd-roadmapper binding (the /gsd:new-milestone collapse path
     const src = fs.readFileSync(roadmapperPath, 'utf8');
     const stepStart = src.indexOf('## Step 7: Write Files Immediately');
     const step = src.slice(stepStart, src.indexOf('## Step 8', stepStart));
-    for (const target of ['.planning/ROADMAP.md', '.planning/STATE.md']) {
+    for (const target of ['"$ROADMAP_TARGET"', '"$STATE_TARGET"']) {
       assert.ok(step.includes(`[ -f ${target} ] &&`),
         `Step 7 must gate the ${target} arming on the file existing — an unconditional ` +
         'arming on the new-project path strands an unconsumed sentinel (#2255 round 10)');

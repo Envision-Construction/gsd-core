@@ -379,7 +379,7 @@ a literal directory an earlier occupant used (`03-auth` again, not merely phase 
 makes the oldest add at that path the **previous occupant's**. The archived refusal above
 cannot reach it — `find-phase` returns the **live** directory, so nothing is under
 `milestones/` to refuse. Driven before the guard: two milestones both using
-`.planning/phases/03-auth` anchored on the v1 plan commit and selected all four v1+v2 phase-03
+`phases/03-auth` anchored on the v1 plan commit and selected all four v1+v2 phase-03
 commits; a workstream completed into `milestones/ws-feat-<date>/` and then re-created as `feat`
 with the same `03-auth` did the same across the two workstream generations. The collision check
 closes both without a phase identity a directory name does not carry, and without restating any

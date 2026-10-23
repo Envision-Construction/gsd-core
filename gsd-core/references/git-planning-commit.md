@@ -9,7 +9,8 @@ Pass the message first, then file paths via `--files`. Both `commit` and `commit
 Always use this for `.planning/` files — it handles `commit_docs` and gitignore checks automatically:
 
 ```bash
-gsd_run query commit "docs({scope}): {description}" --files .planning/STATE.md .planning/ROADMAP.md
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+gsd_run query commit "docs({scope}): {description}" --files "$PLANNING_DIR/STATE.md" "$PLANNING_DIR/ROADMAP.md"
 ```
 
 The CLI will return `skipped` (with reason) if `commit_docs` is `false`, `.planning/` is gitignored, or a per-phase `phase_commit_docs.<phase-id>` override resolves `false` for the phase being committed. No manual conditional checks needed.

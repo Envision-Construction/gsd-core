@@ -348,6 +348,8 @@ test('#3409 G4: the milestone summary read does not hang with no summaries', (t)
   //     could create that same path first (a symlink-race primitive) — the
   //     directory removes the race entirely.
   const script = [
+    // The snippet resolves the scoped planning dir through the real `gsd_run`.
+    `. "${LAUNCHER_PATH}"`,
     'shopt -s nullglob',
     'FIFO_DIR=$(mktemp -d)',
     'mkfifo "$FIFO_DIR/f"',
@@ -357,7 +359,7 @@ test('#3409 G4: the milestone summary read does not hang with no summaries', (t)
     snippet,
   ].join('\n');
 
-  const result = runBashScript(t, script, { cwd: root, timeoutMs: G4_TIMEOUT_MS });
+  const result = runBashScript(t, script, { cwd: root, env: { ...process.env, RUNTIME_DIR: REPO_ROOT }, timeoutMs: G4_TIMEOUT_MS });
 
   // RED on the current tree: the bare `cat <glob>` reads from the blocked
   // stdin and never returns within G4_TIMEOUT_MS, so `outcome` is

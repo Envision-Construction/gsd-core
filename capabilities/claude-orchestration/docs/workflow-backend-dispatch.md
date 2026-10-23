@@ -21,7 +21,7 @@
 The Claude orchestration capability is **default-off and BETA**. It activates only
 when ALL of the following hold:
 
-1. `claude_orchestration.enabled` is `true` in `.planning/config.json`, AND
+1. `claude_orchestration.enabled` is `true` in the project's `config.json` (`.planning/[<project>/]config.json`), AND
 2. the active runtime is **Claude Code** (the Workflow tool is Claude / Agent
    SDK-specific), AND
 3. `claude_orchestration.execution_backend` resolves to `workflow` — either

@@ -1283,8 +1283,9 @@ describe('bug #2836: workflows/help.md one-liner reconciliation', () => {
     // Locate the documented "Result: Creates ..." quick-task one-liner and
     // assert it references the per-task SUMMARY filename pattern, not bare
     // SUMMARY.md. We parse by line to avoid false positives elsewhere.
+    // The help text documents the layout as `.planning/[<project>/]quick/` (named projects scope it).
     const resultLines = content.split(/\r?\n/).filter(l =>
-      l.includes('Result: Creates') && l.includes('.planning/quick/')
+      l.includes('Result: Creates') && /\.planning\/(\[<project>\/\])?quick\//.test(l)
     );
     assert.ok(resultLines.length > 0, 'expected a quick-task Result line in help.md');
     for (const line of resultLines) {

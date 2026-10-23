@@ -26,13 +26,13 @@ git log --oneline --since="24 hours ago" --no-merges 2>/dev/null || echo "No rec
 git diff --stat HEAD~10 HEAD 2>/dev/null | tail -1 || echo "No diff available"
 ```
 
-Read `.planning/STATE.md` to get:
+Read STATE.md from the planning directory (`gsd_run query planning.dir --raw`; the selected project's or workstream's, never the root copy when one is selected) to get:
 - Current milestone and phase
 - Progress percentage
 - Active blockers
 - Recent decisions
 
-Read `.planning/ROADMAP.md` to get milestone name and goals.
+Read ROADMAP.md from the same planning directory to get milestone name and goals.
 
 Check for existing reports:
 ```bash

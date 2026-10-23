@@ -145,10 +145,14 @@ function buildFixture(phaseFiles) {
   };
 }
 
+// review.md's build_prompt block resolves PROJECT.md/REQUIREMENTS.md through `gsd_run query planning.dir`
+// (scoped per project); stub it to the root-project answer, cwd/.planning, which these fixtures leave absent.
+const GSD_RUN_STUB = 'gsd_run() { case "$*" in "query planning.dir"*) printf \'%s\\n\' "$PWD/.planning" ;; *) return 1 ;; esac; }\n';
+
 /** Fill the workflow's `{run_dir}` placeholder and stage the script in a file. */
 function stageScript(shell, body, fx) {
   const scriptPath = path.join(fx.root, `block-${shell.name}.sh`);
-  fs.writeFileSync(scriptPath, body.split('{run_dir}').join(fx.runDir));
+  fs.writeFileSync(scriptPath, GSD_RUN_STUB + body.split('{run_dir}').join(fx.runDir));
   return scriptPath;
 }
 

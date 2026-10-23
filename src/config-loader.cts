@@ -15,7 +15,7 @@
  *   - ./configuration.cjs    (normalizeLegacyKeys, isConfigSection, CONFIG_DEFAULTS as CANONICAL_CONFIG_DEFAULTS)
  *   - ./unusable-input.cjs   (warnUnusableInput, UNUSABLE_REASON — #3760)
  *   - ./config-schema.cjs    (VALID_CONFIG_KEYS, DYNAMIC_KEY_PATTERNS)
- *   - ./planning-workspace.cjs (planningDir, planningRoot)
+ *   - ./planning-workspace.cjs (planningDir)
  *   - ./shell-command-projection.cjs (execGit, platformWriteSync, platformReadSync)
  *   - ./core-utils.cjs       (detectSubRepos)
  *   - ./model-catalog.cjs    (KNOWN_RUNTIMES, KNOWN_PROVIDERS, ADAPTIVE_TIER_VALUES)
@@ -30,7 +30,7 @@ import { resolveGsdHome } from './runtime-homes.cjs';
 import { canonicalizeRuntimeName, resolveRuntimeNameFromCandidates } from './runtime-name-policy.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningDir, planningRoot } = planningWorkspace;
+const { planningDir } = planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtilsModule = require('./core-utils.cjs');
 const { detectSubRepos } = coreUtilsModule;
@@ -733,7 +733,9 @@ function loadConfigResolvedInternal(cwd: string, options: Record<string, unknown
 
   let rootParsed: ParsedConfig | null = null;
   if (ws) {
-    const rootConfigPath = path.join(planningRoot(cwd), 'config.json');
+    // A workstream inherits its own project's config (`.planning/[<project>/]config.json`, #3749);
+    // for the root project that is the repo-level `.planning/config.json`.
+    const rootConfigPath = path.join(planningDir(cwd, null), 'config.json');
     try {
       const rootRead = _readConfigFile(rootConfigPath);
       if (rootRead.kind === 'fault') {
@@ -912,7 +914,8 @@ function loadConfigResolvedInternal(cwd: string, options: Record<string, unknown
       commit_docs: (() => {
         const explicit = get('commit_docs', { section: 'planning', field: 'commit_docs' });
         if (explicit !== undefined) return explicit;
-        if (isGitIgnored(cwd, '.planning/')) return false;
+        // The selected project's planning dir (`.planning` for the root project, #3749).
+        if (isGitIgnored(cwd, `${path.relative(cwd, planningDir(cwd, null)).split(path.sep).join('/')}/`)) return false;
         return defaults.commit_docs;
       })(),
       search_gitignored: get('search_gitignored', { section: 'planning', field: 'search_gitignored' }) ?? defaults.search_gitignored,

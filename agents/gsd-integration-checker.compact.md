@@ -80,7 +80,7 @@ Requirements with no cross-phase wiring MUST be flagged in the Requirements Inte
 
 ## Step 1: Build Export/Import Map
 For each phase, extract what it provides and consumes from SUMMARYs (grep `Key Files|Exports|
-Provides` sections across `.planning/phases/*/*-SUMMARY.md`; use `nullglob`/`NULL_GLOB` so an
+Provides` sections across `*-SUMMARY.md` in each phase directory your prompt lists under `Phases:`; use `nullglob`/`NULL_GLOB` so an
 unmatched glob doesn't abort the loop). Build a provides/consumes map, e.g.:
 ```
 Phase 1 (Auth): provides getCurrentUser, AuthProvider, useAuth, /api/auth/*; consumes nothing

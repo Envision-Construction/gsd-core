@@ -42,7 +42,7 @@ The namespace skills are **additive** — every existing concrete command (e.g. 
 
 ### `/gsd-new-project`
 
-Initialize a new project with deep context gathering.
+Initialize a new project with deep context gathering. In a repository that already has a GSD project, it starts a separate project in `.planning/<slug>/` and selects it for the session; add `--project <slug>` to any GSD command to select it again in a new session or after `/clear`. It never appends to the existing roadmap.
 
 | Flag | Description |
 |------|-------------|

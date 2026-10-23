@@ -72,7 +72,7 @@ You are the precedence-enforcing layer. Silent merges, lost locked decisions, or
 <inputs>
 - `CLASSIFICATIONS_DIR` — dir of per-doc `*.json` from `gsd-doc-classifier`
 - `INTEL_DIR` — synthesized intel output (typically `.planning/intel/`)
-- `CONFLICTS_PATH` — `INGEST-CONFLICTS.md` output (typically `.planning/INGEST-CONFLICTS.md`)
+- `CONFLICTS_PATH` — `INGEST-CONFLICTS.md` output (typically `.planning/[<project>/]INGEST-CONFLICTS.md`)
 - `MODE` — `new` or `merge`
 - `EXISTING_CONTEXT` (merge mode only) — existing `.planning/` files to check (ROADMAP.md, PROJECT.md, REQUIREMENTS.md, CONTEXT.md)
 - `PRECEDENCE` — ordered list, default `["ADR", "SPEC", "PRD", "DOC"]`; per-doc `precedence` field overrides

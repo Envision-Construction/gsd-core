@@ -5,11 +5,11 @@
 -->
 ### Memory recall (MemPalace)
 
-**Gate first.** Read `.planning/config.json`. If `mempalace.enabled` is not `true`, or `mempalace.recall_on_discuss` is `false`, **skip this entire section** and continue the discussion unchanged. (This contribution is only injected when the capability is enabled; the `recall_on_discuss` check lets you turn discuss-time recall off without disabling the rest of the capability.)
+**Gate first.** Read the selected project's settings (`gsd_run query config-get mempalace.enabled --default false --raw`, `gsd_run query config-get mempalace.recall_on_discuss --default true --raw`). If `mempalace.enabled` is not `true`, or `mempalace.recall_on_discuss` is `false`, **skip this entire section** and continue the discussion unchanged. (This contribution is only injected when the capability is enabled; the `recall_on_discuss` check lets you turn discuss-time recall off without disabling the rest of the capability.)
 
 Otherwise — before gathering new context, surface what you already know. This is read-only and side-effect-free; if MemPalace is unreachable, note "memory unavailable" and continue — recall never blocks discussion.
 
-1. **Resolve the wing.** Use `mempalace.wing` if set; otherwise derive it from `project_code` (fall back to the project directory name).
+1. **Resolve the wing.** Use `mempalace.wing` if set; otherwise derive it from `project_code` (fall back to the project directory name, with `-<project>` appended for a named project).
 2. **Wake up (cheap, ~600–900 tokens).**
    - Interactive run → call `mempalace_search` after a wake-up read of the wing.
    - Headless/cron run (no MCP server) → run `mempalace wake-up --wing <wing>` via the CLI.

@@ -42,7 +42,7 @@ import planningWorkspace = require('./planning-workspace.cjs');
 // #4257: `resolveEnvWorkstream` is that same module's ONE owner of the env
 // workstream discriminator `planningDir` applies — the name W002's scope
 // clause prints comes from the same resolution point that scoped the reads.
-const { planningPaths, planningRoot, resolvePhaseIdConvention, resolveEnvWorkstream } = planningWorkspace;
+const { planningPaths, planningDir, resolvePhaseIdConvention, resolveEnvWorkstream } = planningWorkspace;
 // #4257: canonical CommonMark code strippers (markdown-sectionizer is the
 // repo's T0 structural seam, adopted per the #2365 composition order — fenced
 // blocks first, then inline spans) so the `statePhaseTokens` harvest sees
@@ -492,13 +492,13 @@ function buildStateFields(statePath: string): StateFields {
  * later health-diagnostic rule can tell "config.json not found" (W003,
  * repairable via `createConfig`) apart from "config.json: JSON parse error"
  * (E005, repairable via `resetConfig`) — the `exists` flag is exactly that
- * discriminator. `config.json` is root-scoped (`planningRoot`), NOT
+ * discriminator. `config.json` is project-scoped (`planningDir(cwd, null)`; repo-level for the root project), NOT
  * workstream-scoped (`planningPaths(cwd).config` would resolve under
  * `.planning/workstreams/<ws>/` instead) — see verify.cts's own
  * rootBase-vs-wsBase split at cmdValidateHealth's top.
  */
 function buildConfigField(cwd: string): { value: Record<string, unknown> | null; scope: Scope; exists: boolean } {
-  const configPath = path.join(planningRoot(cwd), 'config.json');
+  const configPath = path.join(planningDir(cwd, null), 'config.json');
   if (!fs.existsSync(configPath)) {
     return { value: null, scope: SCOPE.UNREADABLE, exists: false };
   }
@@ -690,7 +690,7 @@ function buildPlanningTrackedField(cwd: string): { value: { tracked: boolean; ig
  * (E002/W001), generalized from "does the file include these three fixed
  * strings" to "what headings does the file actually have."
  *
- * PROJECT.md is root-scoped (`planningRoot(cwd)`), NOT workstream-scoped —
+ * PROJECT.md is root-scoped (`planningDir(cwd, null)`), NOT workstream-scoped —
  * mirrors `cmdValidateHealth`'s own `projectPath = path.join(rootBase,
  * 'PROJECT.md')` (`verify.cts:1649`), the same root-vs-workstream split
  * `buildConfigField` already documents for config.json.
@@ -703,7 +703,7 @@ function buildPlanningTrackedField(cwd: string): { value: { tracked: boolean; ig
  * `buildConfigField`'s treatment of a present-but-unparseable config.json.
  */
 function buildProjectSectionsField(cwd: string): { value: string[] | null; scope: Scope; exists: boolean } {
-  const projectPath = path.join(planningRoot(cwd), 'PROJECT.md');
+  const projectPath = path.join(planningDir(cwd, null), 'PROJECT.md');
   if (!fs.existsSync(projectPath)) {
     return { value: null, scope: SCOPE.UNREADABLE, exists: false };
   }
@@ -962,13 +962,13 @@ function buildResearchValidationStatusField(
  * DIRECTORIES, a different target than this field's `milestones/*-ROADMAP.md`
  * FILES — reusing it here would silently answer the wrong question.
  *
- * Root-scoped (`planningRoot(cwd)`), matching `verify.cts`'s own
+ * Root-scoped (`planningDir(cwd, null)`), matching `verify.cts`'s own
  * `rootBase`-based `milestonesPath`/`milestonesArchiveDir`.
  */
 function buildMilestoneArchiveStatusField(
   cwd: string,
 ): { value: { archivedVersions: string[]; documentedVersions: string[] }; scope: Scope } {
-  const rootBase = planningRoot(cwd);
+  const rootBase = planningDir(cwd, null);
   const milestonesArchiveDir = path.join(rootBase, 'milestones');
   const milestonesPath = path.join(rootBase, 'MILESTONES.md');
 
@@ -1012,7 +1012,7 @@ function buildMilestoneArchiveStatusField(
  */
 function buildPlanningRootFilesField(cwd: string): { value: string[]; scope: Scope } {
   try {
-    const entries = fs.readdirSync(planningRoot(cwd), { withFileTypes: true });
+    const entries = fs.readdirSync(planningDir(cwd, null), { withFileTypes: true });
     return { value: entries.filter((e) => e.isFile()).map((e) => e.name), scope: SCOPE.COMPLETE };
   } catch {
     return { value: [], scope: SCOPE.UNREADABLE };

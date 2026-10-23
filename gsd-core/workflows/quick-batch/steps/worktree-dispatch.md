@@ -114,7 +114,7 @@ EXEC_CONCURRENCY=$(printf '%s' "$QB_EXEC_CONC_JSON" | node -e 'let s="";process.
    - Execute all tasks in the plan; commit each task atomically
    - Create summary at: ${ITEM_DIR}/${quick_id}-SUMMARY.md with `status: complete` in frontmatter
    - NEVER invoke /gsd:quick or any other GSD command — you are a leaf, not a coordinator
-   - NEVER write .planning/quick-batches/${BATCH_ID}/BATCH.json
+   - NEVER write ${quick_batches_dir}/${BATCH_ID}/BATCH.json
    - Do NOT update STATE.md or ROADMAP.md — the orchestrator owns those writes after every item in this dispatch round completes (ADR-1239 single-writer invariant)
    - Do NOT commit docs artifacts (SUMMARY.md, STATE.md, PLAN.md) — the orchestrator commits them at completion
    </constraints>

@@ -21,7 +21,7 @@ const PROFILES = [
   {
     name: 'gsd-project-researcher',
     description:
-      'Researches domain ecosystem before roadmap creation. Produces files in .planning/research/ consumed during roadmap creation. Spawned by /gsd:new-project or /gsd:new-milestone orchestrators.',
+      'Researches domain ecosystem before roadmap creation. Produces files in the project research directory consumed during roadmap creation. Spawned by /gsd:new-project or /gsd:new-milestone orchestrators.',
     color: 'cyan',
     tools:
       'Read, Write, Bash, Grep, Glob, Skill, WebSearch, WebFetch, mcp__context7__*, mcp__plugin_context7_context7__*, mcp__firecrawl__*, mcp__exa__*, mcp__tavily__*, mcp__ref__*, mcp__jina__*, mcp__perplexity__*',
@@ -36,7 +36,8 @@ const PROFILES = [
       'gsd_run query classify-confidence',
     ],
     outputContract: [
-      '.planning/research/',
+      // The research directory the orchestrator names (.planning/[<project>/]research/).
+      '{research_dir}/',
       '## RESEARCH COMPLETE',
     ],
   },
@@ -59,7 +60,8 @@ const PROFILES = [
       'gsd_run query package-legitimacy check',
     ],
     outputContract: [
-      '.planning/phases/XX-name/{phase_num}-RESEARCH.md',
+      // The phase directory init resolves for the selected project/workstream.
+      '$PHASE_DIR/$PADDED_PHASE-RESEARCH.md',
       '## RESEARCH COMPLETE',
     ],
   },
@@ -140,7 +142,9 @@ const PROFILES = [
       'gsd_run query commit',
     ],
     outputContract: [
-      '.planning/research/SUMMARY.md',
+      // The research directory the orchestrator names: .planning/research/ for the root
+      // project, .planning/<project>/research/ for a named project.
+      '{research_dir}/SUMMARY.md',
       '## SYNTHESIS COMPLETE',
     ],
   },

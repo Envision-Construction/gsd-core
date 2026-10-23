@@ -20,9 +20,16 @@ Read project-level and prior phase context to avoid re-asking decided questions.
 **Read project files:**
 
 ```bash
-cat .planning/PROJECT.md 2>/dev/null || true
-cat .planning/REQUIREMENTS.md 2>/dev/null || true
-cat .planning/STATE.md 2>/dev/null || true
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+PLANNING_DIR=$(gsd_run query planning.dir ${GSD_WS:+--ws=${GSD_WS##* }} --raw) || exit 1
+PROJECT_DIR=$(gsd_run query planning.dir --pick project_dir) || exit 1
+cat "$PROJECT_DIR/PROJECT.md" 2>/dev/null || true
+cat "$PLANNING_DIR/REQUIREMENTS.md" 2>/dev/null || true
+cat "$PLANNING_DIR/STATE.md" 2>/dev/null || true
 ```
 
 Extract from these:
@@ -33,7 +40,13 @@ Extract from these:
 **Read all prior CONTEXT.md files:**
 
 ```bash
-(find .planning/phases -name "*-CONTEXT.md" 2>/dev/null || true) | sort
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+PLANNING_DIR=$(gsd_run query planning.dir ${GSD_WS:+--ws=${GSD_WS##* }} --raw) || exit 1
+(find "$PLANNING_DIR/phases" -name "*-CONTEXT.md" 2>/dev/null || true) | sort
 ```
 
 For each CONTEXT.md where phase number < current phase:

@@ -16,17 +16,19 @@ allowed-tools:
 
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
+**Project selection:** if the arguments include `--project <name>`, the user is targeting the named project in `.planning/<name>/`. In the first shell command you run for this command (once `gsd_run` is defined), run `gsd_run query project.set <name>` and stop if it fails; then treat the remaining arguments as if `--project <name>` were absent. The selection holds for the rest of the session, including subagents.
+
 <objective>
 Start a new milestone: questioning → research (optional) → requirements → roadmap.
 
 Brownfield equivalent of new-project. Project exists, PROJECT.md has history. Gathers "what's next", updates PROJECT.md, then runs requirements → roadmap cycle.
 
-**Creates/Updates:**
-- `.planning/PROJECT.md` — updated with new milestone goals
-- `.planning/research/` — domain research (optional, NEW features only)
-- `.planning/REQUIREMENTS.md` — scoped requirements for this milestone
-- `.planning/ROADMAP.md` — phase structure (continues numbering)
-- `.planning/STATE.md` — reset for new milestone
+**Creates/Updates** (`<project>/` for a named project, `workstreams/<ws>/` with `--ws`):
+- `.planning/[<project>/]PROJECT.md` — updated with new milestone goals
+- `.planning/[<project>/]research/` — domain research (optional, NEW features only)
+- `.planning/[<project>/][workstreams/<ws>/]REQUIREMENTS.md` — scoped requirements for this milestone
+- `.planning/[<project>/][workstreams/<ws>/]ROADMAP.md` — phase structure (continues numbering)
+- `.planning/[<project>/][workstreams/<ws>/]STATE.md` — reset for new milestone
 
 **After:** `/gsd-plan-phase [N]` to start execution.
 </objective>

@@ -64,8 +64,8 @@ If `.planning/` missing: error.
 <step name="identify_plan">
 ```bash
 # Use plans/summaries from INIT JSON, or list files
-(ls .planning/phases/XX-name/*-PLAN.md 2>/dev/null || true) | sort
-(ls .planning/phases/XX-name/*-SUMMARY.md 2>/dev/null || true) | sort
+(ls "{phase_dir}"/*-PLAN.md 2>/dev/null || true) | sort
+(ls "{phase_dir}"/*-SUMMARY.md 2>/dev/null || true) | sort
 ```
 
 Find first PLAN without matching SUMMARY. Decimal phases supported (`01.1-hotfix/`).
@@ -96,12 +96,12 @@ PLAN_START_EPOCH=$(date +%s)
 <step name="parse_segments">
 ```bash
 # Count tasks — match <task tag at any indentation level
-TASK_COUNT=$(grep -cE '^\s*<task[[:space:]>]' .planning/phases/XX-name/{phase}-{plan}-PLAN.md 2>/dev/null || echo "0")
+TASK_COUNT=$(grep -cE '^\s*<task[[:space:]>]' "{phase_dir}/{phase}-{plan}-PLAN.md" 2>/dev/null || echo "0")
 INLINE_THRESHOLD=$(gsd_run query config-get workflow.inline_plan_threshold --raw 2>/dev/null || echo "2")
 USE_WORKTREES=$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/null || echo "true")
 RUNTIME=$(gsd_run query config-get runtime --default claude --raw 2>/dev/null || echo "claude")
 HUMAN_VERIFY_MODE=$(gsd_run query config-get workflow.human_verify_mode --default end-of-phase --raw 2>/dev/null || echo "end-of-phase")
-grep -n "type=\"checkpoint" .planning/phases/XX-name/{phase}-{plan}-PLAN.md
+grep -n "type=\"checkpoint" "{phase_dir}/{phase}-{plan}-PLAN.md"
 ```
 
 **Primary routing: task count threshold (#1979)**
@@ -204,7 +204,7 @@ Pattern B only (verify-only checkpoints). Skip for A/C.
 
 <step name="load_prompt">
 ```bash
-cat .planning/phases/XX-name/{phase}-{plan}-PLAN.md
+cat "{phase_dir}/{phase}-{plan}-PLAN.md"
 ```
 This IS the execution instructions. Follow exactly. If plan references CONTEXT.md: honor user's vision throughout.
 
@@ -403,7 +403,7 @@ fi
 
 <step name="generate_user_setup">
 ```bash
-grep -A 50 "^user_setup:" .planning/phases/XX-name/{phase}-{plan}-PLAN.md | head -50
+grep -A 50 "^user_setup:" "{phase_dir}/{phase}-{plan}-PLAN.md" | head -50
 ```
 
 If user_setup exists: create `{phase}-USER-SETUP.md` using the template at `~/.claude/gsd-core/templates/user-setup.md` (or its `~/.claude/gsd-core/templates/user-setup.compact.md` variant — resolve per `~/.claude/gsd-core/references/compact-content-gate.md` §"Streams 1b and 4"). Per service: env vars table, account setup checklist, dashboard config, local dev notes, verification commands. Status "Incomplete". Set `USER_SETUP_CREATED=true`. If empty/missing: skip.
@@ -415,7 +415,7 @@ emit narrative output between the Write tool call and the commit tool call.
 Truncation at this boundary is a known failure mode (see #2070 rescue logic in
 execute-phase.md step 5.5).
 
-Create `{phase}-{plan}-SUMMARY.md` at `.planning/phases/XX-name/`. Use the template at `~/.claude/gsd-core/templates/summary.md` (or `summary.compact.md` — same `compact-content-gate.md` resolution as the USER-SETUP template above).
+Create `{phase}-{plan}-SUMMARY.md` in `{phase_dir}/`. Use the template at `~/.claude/gsd-core/templates/summary.md` (or `summary.compact.md` — same `compact-content-gate.md` resolution as the USER-SETUP template above).
 
 **Frontmatter:** phase, plan, subsystem, tags | requires/provides/affects | tech-stack.added/patterns | key-files.created/modified | key-decisions | requirements-completed (**MUST** copy `requirements` array from PLAN.md frontmatter verbatim) | duration ($DURATION), completed ($PLAN_END_TIME date).
 
@@ -539,12 +539,13 @@ Task code already committed per-task. Commit plan metadata:
 ```bash
 # Auto-detect parallel mode: .git is a file in worktrees, a directory in main repo
 IS_WORKTREE=$([ -f .git ] && echo "true" || echo "false")
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1  # scoped: named project / workstream
 
 # In parallel mode: exclude STATE.md and ROADMAP.md (orchestrator commits these)
 if [ "$IS_WORKTREE" = "true" ]; then
-  gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/REQUIREMENTS.md
+  gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files "{phase_dir}/{phase}-{plan}-SUMMARY.md" "$PLANNING_DIR/REQUIREMENTS.md"
 else
-  gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files .planning/phases/XX-name/{phase}-{plan}-SUMMARY.md .planning/STATE.md .planning/ROADMAP.md .planning/REQUIREMENTS.md
+  gsd_run query commit "docs({phase}-{plan}): complete [plan-name] plan" --files "{phase_dir}/{phase}-{plan}-SUMMARY.md" "$PLANNING_DIR/STATE.md" "$PLANNING_DIR/ROADMAP.md" "$PLANNING_DIR/REQUIREMENTS.md"
 fi
 ```
 </step>
@@ -559,7 +560,7 @@ If .planning/codebase/ doesn't exist: skip.
 # in the window (#3926, #4459). The resolver widens to the phase-directory range, and says so
 # in its `status`/`reason`, when the phase has no recorded task commits.
 # Exit 69 (UNAVAILABLE) is "could not look", not "no files changed": say so rather than print nothing.
-SCOPE_JSON=$(gsd_run check evaluation-scope --phase-dir ".planning/phases/XX-name" --raw 2>/dev/null) && SCOPE_RC=0 || SCOPE_RC=$?
+SCOPE_JSON=$(gsd_run check evaluation-scope --phase-dir "{phase_dir}" --raw 2>/dev/null) && SCOPE_RC=0 || SCOPE_RC=$?
 if [ "$SCOPE_RC" -ne 0 ]; then echo "Warning: evaluation scope unavailable (exit ${SCOPE_RC}); no changed-file list, so the map update below is skipped, not 'nothing changed'." >&2; else printf '%s' "$SCOPE_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).changedFiles.join('\n'))}catch{}})" || true; fi
 ```
 

@@ -10,7 +10,7 @@ import path from 'node:path';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspaceMod = require('./planning-workspace.cjs');
-const { planningDir, planningRoot } = planningWorkspaceMod;
+const { planningDir } = planningWorkspaceMod;
 
 function _getNestedConfigValue(
   config: Record<string, unknown>,
@@ -72,7 +72,7 @@ function _readRawConfigKey(
  * Precedence (mirrors _resolveActivationValue):
  *   1. loadConfig result (config arg) — guarded nested-lookup.
  *   2. Workstream config.json at planningDir(cwd)/config.json.
- *   3. Root config.json at planningRoot(cwd)/config.json (only if path differs).
+ *   3. The project's config.json at planningDir(cwd, null)/config.json (only if path differs).
  *   4. registry.configSchema[dotKey].default — schema default.
  *   5. Absent → { found: false, value: undefined }.
  *
@@ -94,7 +94,9 @@ function resolveConfigKey(
   // Level 2 + 3: raw config.json files (only when cwd is available)
   if (cwd) {
     const wsConfigPath = path.join(planningDir(cwd), 'config.json');
-    const rootConfigPath = path.join(planningRoot(cwd), 'config.json');
+    // Level 3 is the project's own config (the repo-level one for the root project, #3749);
+    // a named project does not inherit another project's settings.
+    const rootConfigPath = path.join(planningDir(cwd, null), 'config.json');
 
     const fromWs = _readRawConfigKey(wsConfigPath, dotKey, quiet);
     if (fromWs.found) return { found: true, value: fromWs.value };

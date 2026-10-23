@@ -1,6 +1,6 @@
 # Verification Report Template
 
-Template for `.planning/phases/XX-name/{phase_num}-VERIFICATION.md` — phase goal verification results.
+Template for `.planning/[<project>/]phases/XX-name/{phase_num}-VERIFICATION.md` — phase goal verification results.
 
 ---
 
@@ -13,8 +13,8 @@ verified: YYYY-MM-DDTHH:MM:SSZ
 status: passed | gaps_found | human_needed
 score: N/M must-haves verified
 covered_files: # #4155 — see agents/gsd-verifier.md's "Create VERIFICATION.md" step for what belongs here and how to compute it
-  - .planning/phases/XX-name/{phase_num}-{plan}-PLAN.md
-  - .planning/phases/XX-name/{phase_num}-{plan}-SUMMARY.md
+  - .planning/[<project>/]phases/XX-name/{phase_num}-{plan}-PLAN.md
+  - .planning/[<project>/]phases/XX-name/{phase_num}-{plan}-SUMMARY.md
   - src/{changed-file}.cts
 covered_digest: "v3:sha256:{digest from verification.fingerprint}"
 behavior_unverified: 0 # Count of ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truths (present + wired, behavior not exercised)

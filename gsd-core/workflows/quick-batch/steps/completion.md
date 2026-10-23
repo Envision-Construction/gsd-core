@@ -27,7 +27,7 @@ applicable.
 
 **Final commit.** Stage every artifact produced this run (PLAN.md, SUMMARY.md,
 `--research` RESEARCH.md, `--validate` VERIFICATION.md, per item, plus
-`.planning/STATE.md`) and commit:
+`$STATE_PATH`, the scoped STATE.md `quick-batch complete` wrote) and commit:
 `$BATCH_ARTIFACT_FILES` is a bash ARRAY (not a plain string — a plain
 space-joined string re-splits unpredictably under `set -f`/globbing and
 diverges between bash and zsh, the #4109 word-splitting bug class):

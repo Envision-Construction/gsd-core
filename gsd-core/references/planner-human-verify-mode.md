@@ -1,6 +1,6 @@
 # Planner — Human Verification Mode
 
-> Loaded by `gsd-planner` when deciding whether to emit `<task type="checkpoint:human-verify">` tasks. Read `workflow.human_verify_mode` from `.planning/config.json` (default `end-of-phase` since #3309).
+> Loaded by `gsd-planner` when deciding whether to emit `<task type="checkpoint:human-verify">` tasks. Read `workflow.human_verify_mode` with `gsd_run query config-get workflow.human_verify_mode --default end-of-phase --raw` (default `end-of-phase` since #3309).
 
 ## The two modes
 

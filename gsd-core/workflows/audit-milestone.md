@@ -134,7 +134,8 @@ For each phase's SUMMARY.md, extract `requirements-completed` from YAML frontmat
 # #2962: zsh aborts the block on an unmatched for-list glob (nomatch); bash passes it through. nullglob both.
 shopt -s nullglob 2>/dev/null; setopt NULL_GLOB 2>/dev/null
 
-for summary in .planning/phases/*-*/*-SUMMARY.md; do
+PLANNING_DIR=$(gsd_run query planning.dir --raw) || exit 1
+for summary in "$PLANNING_DIR"/phases/*-*/*-SUMMARY.md; do
   [ -e "$summary" ] || continue
   gsd_run query summary-extract "$summary" --fields requirements_completed --pick requirements_completed
 done
@@ -190,7 +191,9 @@ Discovery only — never auto-calls `/gsd:validate-phase`.
 
 ## 6. Aggregate into v{version}-MILESTONE-AUDIT.md
 
-Create `.planning/v{version}-MILESTONE-AUDIT.md` with:
+`{planning_dir}` is the scoped planning directory (`gsd_run query planning.dir --raw`, `$PLANNING_DIR` in 5c; `.planning` for the root project); `milestone.complete` archives the audit from there.
+
+Create `{planning_dir}/v{version}-MILESTONE-AUDIT.md` with:
 
 ```yaml
 ---
@@ -247,7 +250,7 @@ Output this markdown directly (not as a code block). Route based on status:
 ## ✓ Milestone {version} — Audit Passed
 
 **Score:** {N}/{M} requirements satisfied
-**Report:** .planning/v{version}-MILESTONE-AUDIT.md
+**Report:** {planning_dir}/v{version}-MILESTONE-AUDIT.md
 
 All requirements covered. Cross-phase integration verified. E2E flows complete.
 
@@ -270,7 +273,7 @@ All requirements covered. Cross-phase integration verified. E2E flows complete.
 ## ⚠ Milestone {version} — Gaps Found
 
 **Score:** {N}/{M} requirements satisfied
-**Report:** .planning/v{version}-MILESTONE-AUDIT.md
+**Report:** {planning_dir}/v{version}-MILESTONE-AUDIT.md
 
 ### Unsatisfied Requirements
 
@@ -324,7 +327,7 @@ they may close the gap retroactively without a new phase.
 ---
 
 **Also available:**
-- cat .planning/v{version}-MILESTONE-AUDIT.md — see full report
+- cat {planning_dir}/v{version}-MILESTONE-AUDIT.md — see full report
 - /gsd:complete-milestone {version} — proceed anyway (accept tech debt)
 
 ---
@@ -336,7 +339,7 @@ they may close the gap retroactively without a new phase.
 ## ⚡ Milestone {version} — Tech Debt Review
 
 **Score:** {N}/{M} requirements satisfied
-**Report:** .planning/v{version}-MILESTONE-AUDIT.md
+**Report:** {planning_dir}/v{version}-MILESTONE-AUDIT.md
 
 All requirements met. No critical blockers. Accumulated tech debt needs review.
 
