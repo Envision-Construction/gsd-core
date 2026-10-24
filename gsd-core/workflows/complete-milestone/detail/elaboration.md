@@ -259,21 +259,13 @@ fi
 git checkout "$CURRENT_BRANCH"
 ```
 
-**Delete without merging:**
+**Delete without merging — manual root handoff:**
+
+This selection requests retirement review; it does not prove accepted integration or authorize discarding commits. List the exact branches as retained and follow `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement. Unknown/active ownership or missing independent recovery holds retirement, even when a branch appears merged. Do not use safe-delete followed by a force fallback.
 
 ```bash
-if [ "$BRANCHING_STRATEGY" = "phase" ]; then
-  # Rewrapped through unquoted command substitution (gsd-core#4109): a bare
-  # `$VAR` word-splits under bash but not zsh, collapsing every element onto
-  # one iteration there.
-  for branch in $(printf '%s' "$PHASE_BRANCHES"); do
-    git branch -d "$branch" 2>/dev/null || git branch -D "$branch"
-  done
-fi
-
-if [ "$BRANCHING_STRATEGY" = "milestone" ]; then
-  git branch -d "$MILESTONE_BRANCH" 2>/dev/null || git branch -D "$MILESTONE_BRANCH"
-fi
+echo "BLOCKED: branch retirement held; branches retained for root custody/recovery review." >&2
+exit 1
 ```
 
 **Keep branches:** Report "Branches preserved for manual handling"

@@ -924,16 +924,12 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
     cleanup(tmpDir);
   });
 
-  // `execGit` reports a spawn timeout as `exitCode: 1` (`_spawnResult`:
-  // `result.status ?? 1`) — byte-identical to the code `rev-parse --verify`
-  // returns for a ref that does not exist. So "the probe says no merge" and
-  // "the probe never answered" are the same value, and the #3776 guard read
-  // both as "no merge". These arms pin the conservative reading.
-  //
-  // The seam is `commitWithFailingAdd`'s injected `execGit` with
-  // `gitVerb: 'rev-parse'`: `args[0]` is `rev-parse` and `args[args.length-1]`
-  // is the ref, so `failFor: ['MERGE_HEAD']` selects exactly that one probe and
-  // leaves every other git call real.
+  // RGS-02 supersedes the historical stage-then-let-Git-refuse behavior.
+  // Unknown sequencer state must preserve the exact original index and HEAD.
+  const snapshot = () => ({
+    head: headCount(tmpDir),
+    index: fs.readFileSync(path.join(tmpDir, '.git/index')).toString('hex'),
+  });
 
   // Leaves a conflicted merge or cherry-pick in progress with `bystander`
   // committed and unmodified — the empty-diff shape that reaches the guard.
@@ -960,11 +956,12 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
   }
 
   for (const shape of ['posix', 'windows']) {
-    test(`a timed-out MERGE_HEAD probe (${shape}) reaches git instead of silently abandoning the merge`, () => {
+    test(`a timed-out MERGE_HEAD probe (${shape}) refuses before staging and preserves the merge`, () => {
       conflictedSequence('merge');
       assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
         'fixture must leave a merge in progress');
 
+      const before = snapshot();
       const { result, gitCalls } = commitWithFailingAdd({
         cwd: tmpDir,
         files: [BYSTANDER],
@@ -973,23 +970,19 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
         timeout: shape,
       });
 
-      assert.notEqual(result.reason, 'nothing_to_commit',
-        'an unanswered merge probe must not be read as "no merge in progress" — doing so decides '
-        + 'nothing_to_commit from a pathspec git will not honour and leaves the merge unconcluded');
-      assert.equal(result.reason, 'commit_failed',
-        'git must be the one to refuse the partial commit, loudly, as it did before #3776');
-      assert.ok(gitCalls.some((a) => a[0] === 'commit'),
-        'the guard must fall through to git commit rather than returning early');
-      assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
-        'the merge must still be in progress — silently abandoning it is the defect');
+      assert.equal(result.reason, 'scoped_commit_sequencer_unknown');
+      assert.ok(!gitCalls.some((a) => ['add', 'rm', 'commit', 'update-index'].includes(a[0])));
+      assert.deepEqual(snapshot(), before);
+      assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')));
     });
   }
 
-  test('a timed-out CHERRY_PICK_HEAD probe reaches git too', () => {
+  test('a timed-out CHERRY_PICK_HEAD probe refuses before staging too', () => {
     conflictedSequence('cherry-pick');
     assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
       'fixture must leave a cherry-pick in progress');
 
+    const before = snapshot();
     const { result, gitCalls } = commitWithFailingAdd({
       cwd: tmpDir,
       files: [BYSTANDER],
@@ -998,21 +991,15 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
       timeout: true,
     });
 
-    assert.notEqual(result.reason, 'nothing_to_commit',
-      'the cherry-pick probe carries the identical conflation — #3776 added it, so it is in scope here');
-    assert.equal(result.reason, 'commit_failed');
-    assert.ok(gitCalls.some((a) => a[0] === 'commit'));
-    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
-      'the cherry-pick must still be in progress');
+    assert.equal(result.reason, 'scoped_commit_sequencer_unknown');
+    assert.ok(!gitCalls.some((a) => ['add', 'rm', 'commit', 'update-index'].includes(a[0])));
+    assert.deepEqual(snapshot(), before);
+    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')));
   });
 
-  // THE ADAPTATION, PINNED. The obvious implementation — treat the timeout as
-  // `isMergeInProgress` — also flips `canScope`, which is PRE-EXISTING and
-  // gates the pathspec. A spurious timeout would then turn a scoped commit into
-  // a bare one and record whatever else happened to be staged, under a message
-  // describing only the named file: #2112, reintroduced by the fix for a
-  // misreport. The timeout must reach `partialCommitRefused` and nothing else.
-  test('a timed-out MERGE_HEAD probe outside a merge still commits ONLY the named paths', () => {
+  // A spurious timeout outside a merge is still unknown authority. It must
+  // retain the requested working bytes and the unrelated staged entry.
+  test('a timed-out MERGE_HEAD probe outside a merge preserves all staged work', () => {
     const named = path.posix.join('.planning', 'named.md');
     const unrelated = path.posix.join('.planning', 'unrelated.md');
     fs.writeFileSync(path.join(tmpDir, named), 'seed\n');
@@ -1026,6 +1013,7 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
     fs.writeFileSync(path.join(tmpDir, unrelated), 'unrelated edit\n');
     gitOrThrow(['add', '--', unrelated], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
 
+    const before = snapshot();
     const { result, gitCalls } = commitWithFailingAdd({
       cwd: tmpDir,
       files: [named],
@@ -1034,25 +1022,20 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
       timeout: true,
     });
 
-    assert.equal(result.committed, true, 'the commit must still happen — there is a real diff');
-    const commitCall = gitCalls.find((a) => a[0] === 'commit');
-    assert.ok(commitCall, 'git commit must have run');
-    assert.ok(commitCall.includes('--') && commitCall.includes(named),
-      'the pathspec must survive the timeout: routing it through isMergeInProgress would drop it');
-    assert.deepEqual(committedFiles(tmpDir), [named],
-      'only the named path may land — the staged unrelated file must not be swept in (#2112)');
+    assert.equal(result.reason, 'scoped_commit_sequencer_unknown');
+    assert.ok(!gitCalls.some((a) => ['add', 'rm', 'commit', 'update-index'].includes(a[0])));
+    assert.deepEqual(snapshot(), before);
   });
 
-  // NEGATIVE CONTROL for the conservative reading: outside a merge, treating an
-  // unanswered probe as "refused" must not manufacture a DIFFERENT answer. It
-  // falls through to git, git says there is nothing to commit, and the caller
-  // sees the same reason it would have seen anyway.
-  test('a timed-out MERGE_HEAD probe on a genuinely empty diff still reports nothing_to_commit', () => {
+  // Even an apparently empty requested diff cannot authorize an index refresh
+  // after an unanswered sequencer probe.
+  test('a timed-out MERGE_HEAD probe on an empty diff still preserves the index', () => {
     const rel = path.posix.join('.planning', 'quiet.md');
     fs.writeFileSync(path.join(tmpDir, rel), 'unchanged\n');
     gitOrThrow(['add', '--', rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
     gitOrThrow(['commit', '-m', 'quiet'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
 
+    const before = snapshot();
     const { result, gitCalls } = commitWithFailingAdd({
       cwd: tmpDir,
       files: [rel],
@@ -1061,29 +1044,13 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
       timeout: true,
     });
 
-    assert.equal(result.reason, 'nothing_to_commit',
-      'the conservative reading defers to git, which reports the same thing the guard would have');
-    assert.ok(gitCalls.some((a) => a[0] === 'commit'),
-      'and it gets there by asking git, not by short-circuiting on an unanswered probe');
+    assert.equal(result.reason, 'scoped_commit_sequencer_unknown');
+    assert.ok(!gitCalls.some((a) => ['add', 'rm', 'commit', 'update-index'].includes(a[0])));
+    assert.deepEqual(snapshot(), before);
   });
 
-  // Round 4, review finding 1 + its coverage half. The `stagedPaths.length === 0`
-  // disjunct is NOT gated on `partialCommitRefused`, so an all-missing `--files`
-  // list during a merge or cherry-pick returns `nothing_to_commit` while the
-  // sequencer ref is still live and the resolved content sits staged.
-  //
-  // These arms pin that as the DELIBERATE answer, not an oversight. Gating the
-  // disjunct sends this case to a BARE `git commit` (stagedPaths is empty, so
-  // `canScope` is false), which git permits during a merge and which CONCLUDES
-  // it — recording the whole index under a message naming a path that does not
-  // exist, and reporting `committed: true`. Trading a report that writes nothing
-  // for one that silently writes everything is the trade the timeout routing
-  // above already refuses.
-  //
-  // The behaviour is also pre-existing: before this fix the identical
-  // short-circuit ran ABOVE the MERGE_HEAD probe, so it never consulted the
-  // sequencer either. Nothing here is a regression pin; these are behaviour
-  // pins, and they red on the gated implementation rather than at base.
+  // With every optional addition absent and no removals, no Git mutation is
+  // requested. Returning nothing_to_commit preserves the pending sequencer.
   for (const kind of ['merge', 'cherry-pick']) {
     const ref = kind === 'merge' ? 'MERGE_HEAD' : 'CHERRY_PICK_HEAD';
     test(`all named --files paths missing during a ${kind} reports nothing_to_commit and leaves the ${kind} open`, () => {

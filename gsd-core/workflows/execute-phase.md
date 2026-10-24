@@ -706,8 +706,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
        REQUIRED: SUMMARY.md MUST be committed before you return. In worktree mode the
        git_commit_metadata step in execute-plan.md commits SUMMARY.md and REQUIREMENTS.md
        only (STATE.md and ROADMAP.md are excluded automatically). Do NOT skip or defer
-       this commit — the orchestrator force-removes the worktree after you return, and
-       any uncommitted SUMMARY.md will be permanently lost (#2070).
+       this commit — integration requires durable SUMMARY evidence. Uncommitted or
+       unknown work must remain retained for root inspection (#2070, ORCH-03).
        REQUIRED ORDER: Write SUMMARY.md → commit → only then any narration. No text between Write and commit (truncation risk; #2070 rescue is not primary defense).
 
        </parallel_execution>
@@ -828,31 +828,46 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
 5. **Post-wave hook validation (parallel mode only):** Hooks run on every executor commit by default (#2924); this post-wave run only fires when `workflow.worktree_skip_hooks=true` opted out of per-commit hooks:
    ```bash
-   SKIP_HOOKS=$(gsd_run query config-get workflow.worktree_skip_hooks --raw 2>/dev/null || echo "false")
+   SKIP_HOOKS=$(gsd_run query config-get workflow.worktree_skip_hooks --default false --raw) || exit $?
+   case "$SKIP_HOOKS" in true|false) ;; *) echo "BLOCKED: invalid hook policy; preserve work for root review." >&2; exit 1;; esac
    if [ "$SKIP_HOOKS" = "true" ]; then
-     # Stash uncommitted changes under a named ref so we always pop (bare `git stash` strands them on hook/script failure). #3542: `refs/stash` is shared across worktrees, so this helper runs ONLY in the orchestrator's main checkout after all wave worktrees have been merged + removed; executors are forbidden from running any `git stash` subcommand (see `<destructive_git_prohibition>` in `agents/gsd-executor.md`).
-     STASHED=false
-     if (! git diff --quiet || ! git diff --cached --quiet) && git stash push -u -m "gsd-post-wave-hook-$$" >/dev/null 2>&1; then STASHED=true; fi
-     git hook run pre-commit 2>&1 || echo "⚠ Pre-commit hooks failed — review before continuing"
-     [ "$STASHED" = "true" ] && (git stash pop >/dev/null 2>&1 || echo "⚠ Could not pop gsd-post-wave-hook stash — recover manually")
+     # No uncommitted parent data is accounted by this block. Inventory errors,
+     # diagnostics, untracked AND ignored data all hold; no stash/restore.
+     PARENT_INVENTORY=$(git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain=v1 --untracked-files=all --ignored=matching --ignore-submodules=none 2>&1) || {
+       echo "BLOCKED: parent inventory is unknown; retain work for root review." >&2
+       exit 1
+     }
+     [ -z "$PARENT_INVENTORY" ] || {
+       echo "BLOCKED: parent has unaccounted tracked, untracked or ignored data; retain work for root review." >&2
+       exit 1
+     }
+     TRACKED_INVENTORY=$(git --no-optional-locks ls-files --stage -v 2>&1) || exit 1
+     # Hidden tracked flags, unmerged entries and nested gitlinks are unknown.
+     printf '%s\n' "$TRACKED_INVENTORY" | node -e '
+       const text = require("fs").readFileSync(0, "utf8");
+       const records = text === "\n" ? [] : text.replace(/\n$/, "").split("\n");
+       if (records.some(row => !/^H (100644|100755|120000) ([0-9a-f]{40}|[0-9a-f]{64}) 0\t.+$/.test(row))) process.exitCode = 1;
+     ' || { echo "BLOCKED: tracked inventory is unverified; retain work for root review." >&2; exit 1; }
+     if ! git diff --quiet || ! git diff --cached --quiet; then
+       echo "BLOCKED: post-wave hook requires a clean, accounted orchestrator tree; preserve current work for root review." >&2
+       exit 1
+     fi
+     HOOK_RC=0
+     git hook run pre-commit || HOOK_RC=$?
+     [ "$HOOK_RC" -eq 0 ] || { echo "BLOCKED: pre-commit failed; retain work and report exit $HOOK_RC." >&2; exit "$HOOK_RC"; }
    fi
    ```
-   If hooks fail: report the failure and ask "Fix hook issues now?" or "Continue to next wave?"
+   This block permits no unaccounted ignored data, including build/cache output. Root must account for parent writers and surviving hooks before invoking it. The inventory is an observation, not an exclusive writer lease or protection against later concurrent writes. A dirty/unknown inventory or failed hook holds progression. Preserve and report the actual status for root review; do not stash work, hide failure or continue the wave on unknown acceptance.
 
-5.5. **Worktree cleanup (when `isolation="worktree"` was used):**
+5.5. **Accepted integration and retained worktree handoff (when worktree isolation was used):**
 
-   **Standard wave contract:** Each wave's worktrees merge to main via the templated path below before the next wave's worktrees fork. The cleanup loop runs once per wave at the end of the wave lifecycle. Worktrees created in wave N must be fully removed before wave N+1 forks new ones.
+   Each wave integrates only its dispatch-time `WAVE_WORKTREE_MANIFEST` before dependent work forks. Worktrees, branch refs and registrations remain retained; removal is not a prerequisite for project verification or a claim of phase acceptance. Do not reuse a retained path or overwrite its manifest.
 
-   **Cross-wave dependency deviation (supported execution mode):** When the orchestrator legitimately deviates from the standard wave model — for example, a phase with cross-wave plan dependencies that requires custom inter-worktree base-update merges (e.g., `merge: bring 09-01 + 09-02 into 09-03 base`) — the cleanup loop below is NOT automatically re-entered for those custom merges. The deviation path produces correct final history but bypasses this loop, leaving `worktree-agent-*` directories in place. Use the **cleanup-tail snippet** below to remove any residual worktrees after such a deviation.
+   Both standard merges and cross-wave custom merges use this SAME bounded helper path. There is no separate cleanup-tail that unlocks, removes or prunes residual worktrees. Custom history is not evidence of owner completion, accepted HEAD or independently retained recovery.
 
-   When executor agents ran in worktree isolation, their commits land on temporary branches in separate working trees. After the wave completes, merge these changes back and clean up:
+   Read `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement. Root acceptance must already name the completed owner, exact accepted SHA and independent recovery ref in each manifest entry; do not manufacture it from SUMMARY, ancestry, age or a dead PID. Missing native owner evidence retains the work and holds integration.
 
-   **Manifest source of truth (#3384):** Cleanup consumes the `WAVE_WORKTREE_MANIFEST` created and populated during executor dispatch in step 3. Do not recreate or truncate it here.
-
-   Prefer the bounded helper, which validates branch identity, expected base, deletion
-   diffs, merge result, and worktree removal before deleting the temporary branch.
-   If the helper reports a blocked cleanup, resolve the reported manifest entry and
-   rerun the same command. Do not fall back to broad worktree discovery.
+   Before invoking integration, root must account for parent writers and surviving hooks. The helper permits only an observed clean parent with tracked recovery in its recorded `parent_head_before_merge`; untracked/ignored data, hidden tracked flags, nested gitlinks or unknown inventory hold for manual root accounting. A rescued uncommitted SUMMARY also holds until root accounts for it. The preflight reads do not establish an exclusive writer lease and cannot protect against writers arriving after the last read.
 
    ```bash
    [ -n "${WAVE_WORKTREE_MANIFEST:-}" ] && [ -f "$WAVE_WORKTREE_MANIFEST" ] || {
@@ -860,72 +875,67 @@ increases monotonically across waves. `{status}` is `complete` (success),
      exit 1
    }
 
-   # Guard: pin cleanup back to the orchestrator's OWN worktree and fail on branch drift (#3174, #630).
-   # Resolve from the dispatch-time orchestrator root persisted in the manifest — NOT `git worktree
-   # list`'s first entry, which is always the main checkout and would pin a non-primary (per-phase
-   # lane) orchestrator off its own branch, tripping the #3174 assertion below (#630). Byte-identical
-   # for a primary orchestrator (its root IS the first entry); the fallback covers pre-#630 manifests.
-   PRIMARY_WT=$(MANIFEST="$WAVE_WORKTREE_MANIFEST" node -e 'const fs=require("fs");try{const j=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"));if(j&&j.orchestrator_root)process.stdout.write(String(j.orchestrator_root))}catch(e){}')
-   [ -n "$PRIMARY_WT" ] || PRIMARY_WT=$(git worktree list --porcelain | awk '/^worktree /{print substr($0,10); exit}')
+   # The dispatch-time root is required; a missing/invalid manifest must not select another checkout.
+   PRIMARY_WT=$(MANIFEST="$WAVE_WORKTREE_MANIFEST" node -e 'const fs=require("fs");try{const j=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"));if(typeof j.orchestrator_root!=="string"||!j.orchestrator_root)throw new Error("missing orchestrator_root");process.stdout.write(j.orchestrator_root)}catch(e){console.error(e.message);process.exit(1)}') || exit 1
    if [ -z "$PRIMARY_WT" ]; then
      echo "FATAL: could not resolve orchestrator worktree before cleanup" >&2
      exit 1
    fi
    if [ -n "$PRIMARY_WT" ] && [ "$(pwd -P 2>/dev/null)" != "$(cd "$PRIMARY_WT" 2>/dev/null && pwd -P)" ]; then echo "⚠ Orchestrator CWD drifted to $(pwd) — pinning to $PRIMARY_WT before worktree cleanup (#3174)"; cd "$PRIMARY_WT" || { echo "FATAL: cannot cd to primary worktree $PRIMARY_WT" >&2; exit 1; }; fi
-   ORCH_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   ORCH_BRANCH=$(git rev-parse --abbrev-ref HEAD) || exit $?
    [ -z "${EXPECTED_BRANCH:-}" ] || [ "$ORCH_BRANCH" = "$EXPECTED_BRANCH" ] || { echo "FATAL: orchestrator on '$ORCH_BRANCH' but expected '$EXPECTED_BRANCH' before worktree cleanup — refusing to merge (#3174-class drift)" >&2; exit 1; }
 
-   # Fail closed: SDK refusal (safety guard #3174/#3384) must surface — do not swallow exit 1.
-   gsd_run query worktree.cleanup-wave --manifest "$WAVE_WORKTREE_MANIFEST" || exit 1
+   RETENTION_MANIFEST="$WAVE_WORKTREE_MANIFEST"
+   # Capture the v1 CLI exit without erasing it; retained integration exits 1 too.
+   RETENTION_RC=0
+   RETENTION_RESULT=$(gsd_run query worktree.cleanup-wave --manifest "$RETENTION_MANIFEST" --exit-contract=v1) || RETENTION_RC=$?
+   printf '%s\n' "$RETENTION_RESULT"
+   RETENTION_REPORT_RC=0
+   # shellcheck disable=SC2016 # JavaScript template expressions must reach node literally.
+   printf '%s\n' "$RETENTION_RESULT" | RETENTION_MANIFEST="$RETENTION_MANIFEST" RETENTION_EXIT="$RETENTION_RC" node -e '
+   const fs = require("fs");
+   try {
+     const response = JSON.parse(fs.readFileSync(0, "utf8"));
+     const manifest = JSON.parse(fs.readFileSync(process.env.RETENTION_MANIFEST, "utf8"));
+     const expected = Array.isArray(manifest) ? manifest : manifest.worktrees;
+     const result = response.result;
+     if (!Array.isArray(expected) || !expected.length || !result ||
+         !Array.isArray(result.entries) || result.entries.length !== expected.length ||
+         !Array.isArray(result.pending) || result.pending.length ||
+         response.ok !== false || result.ok !== false || result.reason !== "cleanup_blocked") {
+       throw new Error("incomplete or unexpected cleanup response; retain every entry");
+     }
+     const key = e => JSON.stringify([e.agent_id, e.worktree_path, e.branch]);
+     const wanted = new Map(expected.map(e => [key(e), e]));
+     if (wanted.size !== expected.length) throw new Error("duplicate manifest identities");
+     let confirmed = process.env.RETENTION_EXIT === "1";
+     for (const entry of result.entries) {
+       const requested = wanted.get(key(entry));
+       if (!requested) throw new Error("unmatched result identity");
+       wanted.delete(key(entry));
+       console.error(`${entry.status}: integrated=${JSON.stringify(entry.integrated)}; reason=${entry.reason}; retained ${entry.worktree_path}`);
+       const accepted = requested.retirement_authorization;
+       if (entry.integrated !== true || entry.status !== "integrated_retained" ||
+           entry.reason !== "retirement_manual_root_handoff_required" || !accepted ||
+           entry.retirement_authorization?.accepted_head !== accepted.accepted_head) confirmed = false;
+     }
+     if (!confirmed) throw new Error("integration or retirement evidence needs root review; hold progression");
+     console.error("Accepted integration confirmed; manual retirement held. Project verification may proceed separately; cleanup and phase acceptance are not complete.");
+   } catch (error) {
+     console.error(`BLOCKED: ${error.message}`);
+     process.exitCode = 1;
+   }
+   ' || RETENTION_REPORT_RC=$?
+   # Preserve the command failure even when accepted integration was observed.
+   [ "$RETENTION_RC" -eq 0 ] || exit "$RETENTION_RC"
+   [ "$RETENTION_REPORT_RC" -eq 0 ] || exit "$RETENTION_REPORT_RC"
+   echo "BLOCKED: unexpected cleanup success; root review required before progression." >&2
+   exit 1
    ```
 
-   **Cleanup-tail snippet (use after any wave whose merges did not flow through the templated path above):**
+   The snippet deliberately preserves exit 1 for cleanup held. Inspect its printed JSON and report: `integrated:true` / `integrated_retained` with reason `retirement_manual_root_handoff_required` means accepted integration with manual retirement pending. Only when EVERY requested entry has that result, no entries are pending, and the reporter confirms it, proceed to step 5.6 while carrying the retirement hold. This does not report cleanup success. `integrated:false` (normally `status:blocked`), `integrated:null` / `integration_unknown_retained`, missing/mismatched entries, another retention reason, invalid output or any other command exit holds progression for root review. Keep any already-integrated commits; do not retry unchanged failures or run a legacy deletion fallback.
 
-   If the orchestrator deviated from the standard wave merge path (e.g., custom inter-worktree base-update merges with `merge: bring …` style messages), run this snippet after the custom merges are complete. It reads only `WAVE_WORKTREE_MANIFEST`; do not discover unrelated `worktree-agent-*` worktrees.
-
-   ```bash
-   # Cleanup-tail: pin orchestrator CWD to its OWN worktree before cleanup-tail (#3174, #630).
-   # Same fix as the templated path: resolve the dispatch-time orchestrator root from the manifest,
-   # not `git worktree list`'s first entry (always the main checkout — wrong for a lane orchestrator).
-   PRIMARY_WT=$(MANIFEST="$WAVE_WORKTREE_MANIFEST" node -e 'const fs=require("fs");try{const j=JSON.parse(fs.readFileSync(process.env.MANIFEST,"utf8"));if(j&&j.orchestrator_root)process.stdout.write(String(j.orchestrator_root))}catch(e){}')
-   [ -n "$PRIMARY_WT" ] || PRIMARY_WT=$(git worktree list --porcelain | awk '/^worktree /{print substr($0,10); exit}')
-   if [ -n "$PRIMARY_WT" ] && [ "$(pwd -P 2>/dev/null)" != "$(cd "$PRIMARY_WT" 2>/dev/null && pwd -P)" ]; then echo "⚠ Orchestrator CWD drifted to $(pwd) — pinning to $PRIMARY_WT before cleanup-tail (#3174)"; cd "$PRIMARY_WT" || { echo "FATAL: cannot cd to primary worktree $PRIMARY_WT" >&2; exit 1; }; fi
-   # Cleanup-tail: remove residual agent worktrees after a cross-wave-dependency deviation.
-   # Uses only the current wave manifest to avoid touching unrelated active agents (#3384).
-   WT_PATHS_FILE=$(mktemp "${TMPDIR:-/tmp}/gsd-worktree-paths-XXXXXX")
-   node -e 'const fs=require("fs");const p=process.env.WAVE_WORKTREE_MANIFEST;try{if(!p)throw new Error("WAVE_WORKTREE_MANIFEST is unset");if(!fs.existsSync(p))throw new Error("manifest does not exist");const s=fs.readFileSync(p,"utf8");if(!s.trim())throw new Error("manifest is empty");const j=JSON.parse(s);for(const w of j.worktrees||[])if(w.worktree_path)console.log(w.worktree_path)}catch(e){console.error(`ERROR: cannot read worktree manifest ${p||"(unset)"}: ${e.message}`);process.exit(1)}' > "$WT_PATHS_FILE" || { echo "BLOCKED: cannot read WAVE_WORKTREE_MANIFEST; refusing cleanup (#3384)." >&2; exit 1; }
-   while IFS= read -r WT; do
-     [ -z "$WT" ] && continue
-     WT_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)
-     [ -z "$WT_BRANCH" ] || [ "$WT_BRANCH" = "HEAD" ] && continue
-     echo "Cleaning up residual worktree: $WT (branch: $WT_BRANCH)"
-     git worktree unlock "$WT" 2>/dev/null || true
-     if ! git worktree remove "$WT" --force; then
-       WT_NAME=$(basename "$WT")
-       if [ -f ".git/worktrees/${WT_NAME}/locked" ]; then
-         echo "⚠ Worktree $WT is locked — unlock failed; manual cleanup required:"
-         echo "    git worktree unlock \"$WT\" && git worktree remove \"$WT\" --force && git branch -D \"$WT_BRANCH\""
-       else
-         echo "⚠ Residual worktree at $WT — remove failed; manual cleanup required"
-       fi
-     else
-       git branch -D "$WT_BRANCH" 2>/dev/null || true
-     fi
-   done < "$WT_PATHS_FILE"
-   git worktree prune
-   ```
-
-   **When to skip step 5.5:**
-
-   **If no plan in this wave used worktree isolation** (project-level `USE_WORKTREES=false` OR every plan in the wave had `USE_WORKTREES_FOR_PLAN=false` — i.e. `WAVE_WORKTREE_PLANS` from step 2.5 is empty): all agents ran on the main working tree — skip this step entirely.
-
-   **If the orchestrator merged via custom messages (cross-wave-dependency deviation):** the templated cleanup loop above was not triggered for those merges. Run the cleanup-tail snippet above instead. After the snippet completes, proceed to step 5.6.
-
-   **If at least one plan used worktrees but others did not:** still run this cleanup — it iterates over actual `git worktree list` output and only merges back the worktrees that were created, leaving sequential plans' commits on the main tree untouched.
-
-   **If no worktrees found at runtime:** Skip silently — agents may have been spawned without worktree isolation, or the orchestrator already cleaned them up.
-
-   If the user declines to merge a worktree or a worktree over-reached scope, apply the worktree recovery policy (`execute-phase/steps/worktree-recovery-policy.md`) — never default to editing `main`.
+   **When to skip step 5.5:** Skip only if `WAVE_WORKTREE_PLANS` is empty because no plan used worktree isolation. Mixed waves process exactly the manifest entries. A missing worktree at runtime is retained/unknown evidence, not a silent success. For custom merges, run the same guarded snippet above once; never discover unrelated worktrees for cleanup.
 
 5.6. **Post-merge build & test gate:**
 

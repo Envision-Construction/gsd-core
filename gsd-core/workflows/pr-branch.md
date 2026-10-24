@@ -454,27 +454,16 @@ UNMERGED_PATHS_EOF
 
   # Anything still unmerged is a REAL conflict, outside the filter. Halt — do not
   # improvise a resolution and do not continue, which would drop the rest of the queue.
-  # Unwind first: this loop runs in the user's own checkout, so exiting mid-sequence
-  # would strand them on a half-built branch with cherry-pick state still live.
+  # Hold the partial branch with cherry-pick state intact for explicit root recovery.
   if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
     echo "Conflict outside the .planning/ filter while picking $HASH:" >&2
     git diff --name-only --diff-filter=U >&2
-    # Order matters. `--quit` drops the sequencer state but leaves the unmerged index
-    # in place, and an unmerged index makes `git checkout` refuse — so reset first.
-    # $PR_BRANCH is disposable and every commit on it was cherry-picked, and the
-    # clean-tree precondition guarantees the user had nothing uncommitted, so a hard
-    # reset here cannot destroy anything of theirs.
-    git cherry-pick --quit 2>/dev/null || true
-    git reset -q --hard HEAD
-    if git checkout -q "$CURRENT_BRANCH"; then
-      git branch -q -D "$PR_BRANCH" 2>/dev/null || true
-      echo "Restored $CURRENT_BRANCH and removed the partial $PR_BRANCH." >&2
-    else
-      # Never claim a restore that did not happen — say exactly where they are.
-      echo "Could not return to $CURRENT_BRANCH; you are still on $PR_BRANCH." >&2
-      echo "Run: git checkout $CURRENT_BRANCH && git branch -D $PR_BRANCH" >&2
-    fi
-    echo "Resolve the conflict against $TARGET, then re-run /gsd:pr-branch." >&2
+    # Preserve the partial branch and sequencer/index evidence. A clean-tree
+    # precondition and cherry-picked ancestry do not establish exclusive custody.
+    echo "Partial PR branch $PR_BRANCH retained with its conflict state; current branch has not been restored." >&2
+    echo "Root must account for all writers, fresh status/registration/HEAD and independent recovery before manual retirement." >&2
+    # Follow execute-phase/steps/worktree-recovery-policy.md; no reset/delete fallback.
+    echo "Hold for root recovery of the conflict against $TARGET; do not rerun while sequencer state is unresolved." >&2
     exit 1
   fi
 

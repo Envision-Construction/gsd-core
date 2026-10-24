@@ -33,6 +33,7 @@ const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const { executeWorktreeWaveCleanupPlan, planWorktreeWaveCleanup } = require('../gsd-core/bin/lib/worktree-safety.cjs');
+const { authorizeFixturePlan } = require('./helpers/custody-fixture.cjs');
 const { routeMergeOutcome } = require('../gsd-core/bin/lib/quick-batch-dispatch.cjs');
 
 const SUBPROCESS_TIMEOUT_MS = 30_000;
@@ -93,7 +94,7 @@ describe('quick-batch merge routing — real worktree preserved on merge_failed 
         }],
       };
 
-      const result = executeWorktreeWaveCleanupPlan(plan);
+      const result = executeWorktreeWaveCleanupPlan(authorizeFixturePlan(plan), { isPidAlive: () => false });
 
       assert.equal(result.entries[0].status, 'blocked', `expected a blocked entry, got: ${JSON.stringify(result.entries[0])}`);
       assert.equal(result.entries[0].reason, 'merge_failed');
@@ -118,7 +119,7 @@ describe('quick-batch merge routing — real worktree preserved on merge_failed 
 });
 
 describe('quick-batch merge routing — real undeclared-deletion detection (row 35)', () => {
-  test('a real, undeclared file deletion blocks the merge and preserves the worktree; a declared one merges and removes it', () => {
+  test('a real, undeclared file deletion blocks the merge and preserves the worktree; an accepted declared deletion integrates and retains it', () => {
     const tmpBase = createTempDir('qb-merge-deletion-');
     try {
       const repoDir = path.join(tmpBase, 'repo');
@@ -188,9 +189,10 @@ describe('quick-batch merge routing — real undeclared-deletion detection (row 
         }],
       };
 
-      const declaredResult = executeWorktreeWaveCleanupPlan(declaredPlan);
-      assert.equal(declaredResult.entries[0].status, 'merged_removed', `expected a declared deletion to merge cleanly, got: ${JSON.stringify(declaredResult.entries[0])}`);
-      assert.ok(!fs.existsSync(wtDirDeclared), 'worktree with a fully declared deletion must be removed after a successful merge');
+      const declaredResult = executeWorktreeWaveCleanupPlan(authorizeFixturePlan(declaredPlan), { isPidAlive: () => false });
+      assert.equal(declaredResult.entries[0].status, 'integrated_retained', `expected a declared deletion to merge cleanly, got: ${JSON.stringify(declaredResult.entries[0])}`);
+      assert.ok(fs.existsSync(wtDirDeclared), 'accepted deletion integrates while checkout and branch remain for root retirement');
+      assert.equal(declaredResult.entries[0].integrated, true);
 
       const mergedRouting = routeMergeOutcome({ kind: 'merged' });
       assert.equal(mergedRouting.action, 'complete');
@@ -446,11 +448,12 @@ describe('quick-batch merge routing — advisory scope drift merges but warns (S
         }],
       };
 
-      const result = executeWorktreeWaveCleanupPlan(plan);
+      const result = executeWorktreeWaveCleanupPlan(authorizeFixturePlan(plan), { isPidAlive: () => false });
 
       // Advisory only: the merge still SUCCEEDS despite the drift.
-      assert.equal(result.entries[0].status, 'merged_removed', `scope drift must be advisory, not blocking — got: ${JSON.stringify(result.entries[0])}`);
-      assert.ok(!fs.existsSync(wtDir), 'worktree removed after a successful (advisory-only) merge');
+      assert.equal(result.entries[0].status, 'integrated_retained', `scope drift must be advisory, not blocking — got: ${JSON.stringify(result.entries[0])}`);
+      assert.ok(fs.existsSync(wtDir), 'advisory-only integration does not authorize retirement');
+      assert.equal(result.entries[0].integrated, true);
       assert.ok(fs.existsSync(path.join(repoDir, 'drifted.txt')), 'the undeclared file is still merged in, not rejected');
 
       // But the drift is surfaced, not silently swallowed.
@@ -495,8 +498,8 @@ describe('quick-batch merge routing — advisory scope drift merges but warns (S
         }],
       };
 
-      const result = executeWorktreeWaveCleanupPlan(plan);
-      assert.equal(result.entries[0].status, 'merged_removed');
+      const result = executeWorktreeWaveCleanupPlan(authorizeFixturePlan(plan), { isPidAlive: () => false });
+      assert.equal(result.entries[0].status, 'integrated_retained');
       assert.equal(result.warnings.length, 0, 'an exact declared-scope match must produce no advisory warnings');
     } finally {
       cleanup(tmpBase);
@@ -504,7 +507,106 @@ describe('quick-batch merge routing — advisory scope drift merges but warns (S
   });
 });
 
-describe('quick-batch merge routing — real .gitmodules submodule integration (Scheduling AC)', () => {
+describe('quick-batch merge routing — real submodule custody holds (Scheduling AC)', () => {
+  const { createHash } = require('node:crypto');
+  const { execGit } = require('../gsd-core/bin/lib/shell-command-projection.cjs');
+
+  // Root accepted the conservative contract: every parent gitlink holds for
+  // nested-custody accounting, even when the worker changes an unrelated file.
+  // These are observations of fixture state, not a writer lease or a bypass.
+  function snapshotSubmoduleFixture(tmpBase, entry) {
+    const repoDir = path.join(tmpBase, 'repo');
+    const nestedDir = path.join(repoDir, 'vendor/sub');
+    const readGit = (args, dir = repoDir) => git(['--no-optional-locks', ...args], dir).trim();
+    const indexBytes = dir => fs.readFileSync(path.resolve(dir, readGit(['rev-parse', '--git-path', 'index'], dir))).toString('hex');
+    const state = {
+      parentHead: readGit(['rev-parse', 'HEAD']),
+      parentTree: readGit(['rev-parse', 'HEAD^{tree}']),
+      parentGitlink: readGit(['ls-tree', 'HEAD', 'vendor/sub']),
+      parentIndexGitlink: readGit(['ls-files', '--stage', 'vendor/sub']),
+      parentIndex: indexBytes(repoDir),
+      nestedHead: readGit(['rev-parse', 'HEAD'], nestedDir),
+      nestedIndex: indexBytes(nestedDir),
+      nestedData: fs.readFileSync(path.join(nestedDir, 'f.txt')).toString('hex'),
+      workerHead: readGit(['rev-parse', 'HEAD'], entry.worktree_path),
+      workerGitlink: readGit(['ls-tree', 'HEAD', 'vendor/sub'], entry.worktree_path),
+      workerIndex: indexBytes(entry.worktree_path),
+      branchHead: readGit(['rev-parse', `refs/heads/${entry.branch}`]),
+      recoveryHead: readGit(['rev-parse', entry.retirement_authorization.recovery_ref]),
+      refs: readGit(['show-ref']),
+      registrations: readGit(['worktree', 'list', '--porcelain']),
+      ownerRecord: fs.readFileSync(entry.worktree_path + '.worker.json').toString('hex'),
+    };
+    const files = {};
+    const walk = dir => {
+      for (const name of fs.readdirSync(dir).sort()) {
+        const full = path.join(dir, name);
+        const rel = path.relative(tmpBase, full);
+        const stat = fs.lstatSync(full);
+        const mode = stat.mode;
+        if (stat.isSymbolicLink()) files[rel] = { mode, link: fs.readlinkSync(full) };
+        else if (stat.isDirectory()) { files[rel] = { mode, directory: true }; walk(full); }
+        else {
+          assert.ok(stat.isFile(), 'fixture inventory must not silently omit an unsupported file type');
+          const bytes = fs.readFileSync(full);
+          files[rel] = { mode, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+        }
+      }
+    };
+    // Includes the entire parent/.git, nested checkout and module Git dir,
+    // worker checkout/registration, source remote and sibling owner record.
+    walk(tmpBase);
+    return { ...state, files, treeSha256: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
+  }
+
+  function assertSubmoduleInventoryHeld(tmpBase, plan, sub1, workerGitlink) {
+    // Authorization creates the recovery ref and owner record. Snapshot AFTER
+    // those fixture writes and BEFORE invoking the actual cleanup primitive.
+    const authorized = authorizeFixturePlan(plan);
+    const entry = authorized.entries[0];
+    const before = snapshotSubmoduleFixture(tmpBase, entry);
+    assert.equal(before.parentHead, entry.expected_base);
+    assert.equal(before.parentGitlink, `160000 commit ${sub1}\tvendor/sub`);
+    assert.equal(before.parentIndexGitlink, `160000 ${sub1} 0\tvendor/sub`);
+    assert.equal(before.nestedHead, sub1);
+    assert.equal(before.nestedData, Buffer.from('hello\n').toString('hex'));
+    assert.equal(before.workerGitlink, `160000 commit ${workerGitlink}\tvendor/sub`);
+    assert.equal(before.workerHead, entry.retirement_authorization.accepted_head);
+    assert.equal(before.branchHead, before.workerHead);
+    assert.equal(before.recoveryHead, before.workerHead);
+    const calls = [];
+    const result = executeWorktreeWaveCleanupPlan(authorized, {
+      isPidAlive: () => false,
+      execGit: (args, opts) => {
+        calls.push(args);
+        return execGit(args, { ...opts, timeout: SUBPROCESS_TIMEOUT_MS });
+      },
+    });
+    const after = snapshotSubmoduleFixture(tmpBase, entry);
+    const evidence = process.env.GSD_PARENT_CUSTODY_EVIDENCE;
+    if (evidence) {
+      fs.mkdirSync(evidence, { recursive: true });
+      fs.writeFileSync(path.join(evidence, entry.agent_id + '.json'), JSON.stringify({
+        fixture: tmpBase, plan: authorized, result, calls, before, after,
+      }, null, 2) + '\n');
+    }
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'cleanup_blocked');
+    assert.equal(result.entries.length, 1);
+    assert.deepEqual(result.pending, []);
+    assert.equal(result.entries[0].status, 'blocked');
+    assert.equal(result.entries[0].reason, 'integration_parent_inventory_unverified');
+    assert.equal(result.entries[0].integrated, false);
+    assert.match(result.entries[0].stderr, /manual root accounting/);
+    assert.ok(calls.some(args => args.includes('ls-files') && args.includes('-z')), 'real parent inventory must be reached');
+    assert.equal(calls.some(args => args.includes('merge')), false, 'a gitlink hold must precede any merge attempt');
+    assert.equal(calls.some(args => ['reset', 'stash', 'restore', 'checkout', 'add', 'rm', 'clean', 'update-ref', 'branch'].includes(args[0])
+      || (args[0] === 'worktree' && ['remove', 'unlock', 'prune'].includes(args[1]))), false, 'no retirement or recovery mutation is authorized');
+    assert.deepEqual(after, before, 'parent HEAD/tree/gitlink/raw index, nested bytes, worker, refs, recovery and full fixture tree must be exactly preserved');
+    assert.ok(fs.existsSync(entry.worktree_path), 'held worker checkout must remain available to root');
+    return result;
+  }
+
   /**
    * Builds `<repoDir>/vendor/sub` as a REAL git submodule (local file://
    * remote, no network) pinned at `sub1`, committed on repoDir's primary
@@ -566,10 +668,10 @@ describe('quick-batch merge routing — real .gitmodules submodule integration (
     assert.equal(gitlinkAt(wtDir, 'HEAD'), sha, 'the branch must carry the bumped gitlink before the merge runs');
   }
 
-  test('a repo with .gitmodules and a plan that never touches the submodule merges cleanly through the cleanup primitive', () => {
+  test('a parent submodule holds unrelated worker changes for root inventory accounting and preserves the entire fixture', () => {
     const tmpBase = createTempDir('qb-submodule-untouched-');
     try {
-      const { repoDir } = buildRepoWithSubmodule(tmpBase);
+      const { repoDir, sub1 } = buildRepoWithSubmodule(tmpBase);
       const wtDir = path.join(tmpBase, 'wt-unrelated');
       const branchName = 'worktree-agent-sub-unrelated';
       addWorktree(repoDir, wtDir, branchName);
@@ -593,18 +695,19 @@ describe('quick-batch merge routing — real .gitmodules submodule integration (
         }],
       };
 
-      const result = executeWorktreeWaveCleanupPlan(plan);
-      assert.equal(result.entries[0].status, 'merged_removed', `a .gitmodules-bearing repo must not break an unrelated merge — got: ${JSON.stringify(result.entries[0])}`);
+      const result = assertSubmoduleInventoryHeld(tmpBase, plan, sub1, sub1);
       assert.equal(result.warnings.length, 0);
+      assert.equal(fs.existsSync(path.join(repoDir, 'unrelated.txt')), false, 'the worker change must not enter the parent');
+      assert.equal(fs.readFileSync(path.join(wtDir, 'unrelated.txt'), 'utf8'), 'nothing to do with the submodule\n');
     } finally {
       cleanup(tmpBase);
     }
   });
 
-  test('a real submodule pointer bump (sub1 -> sub2) merges cleanly and the superproject tree reflects the new pinned commit', () => {
+  test('a declared real submodule pointer bump holds for root inventory accounting and retains both exact pinned commits', () => {
     const tmpBase = createTempDir('qb-submodule-bump-');
     try {
-      const { repoDir, sub2 } = buildRepoWithSubmodule(tmpBase);
+      const { repoDir, sub1, sub2 } = buildRepoWithSubmodule(tmpBase);
       const wtDir = path.join(tmpBase, 'wt-bump');
       const branchName = 'worktree-agent-sub-bump';
       addWorktree(repoDir, wtDir, branchName);
@@ -626,24 +729,24 @@ describe('quick-batch merge routing — real .gitmodules submodule integration (
         }],
       };
 
-      const result = executeWorktreeWaveCleanupPlan(plan);
-      assert.equal(result.entries[0].status, 'merged_removed', `a real gitlink pointer bump must merge like any other file change — got: ${JSON.stringify(result.entries[0])}`);
+      const result = assertSubmoduleInventoryHeld(tmpBase, plan, sub1, sub2);
       assert.equal(result.warnings.length, 0, 'declaring vendor/sub in files_modified must suppress the scope-drift advisory for this exact bump');
 
-      // The superproject's own tree now points at the new submodule commit —
-      // the concrete, diagnosable outcome of a "submodule-touch" merge.
+      // The parent retains sub1; the accepted worker/recovery ref retains sub2
+      // until a separately accounted manual root operation integrates it.
       const treeEntry = git(['ls-tree', 'HEAD', 'vendor/sub'], repoDir).trim();
       assert.match(treeEntry, /^160000 commit /, 'vendor/sub must remain a gitlink (mode 160000), never mis-parsed as a regular file');
-      assert.equal(gitlinkAt(repoDir, 'HEAD'), sub2, 'the merged tree must point at the bumped submodule commit');
+      assert.equal(gitlinkAt(repoDir, 'HEAD'), sub1, 'the held parent tree must keep its original pinned commit');
+      assert.equal(gitlinkAt(wtDir, 'HEAD'), sub2, 'the retained worker tree must keep its proposed pointer bump');
     } finally {
       cleanup(tmpBase);
     }
   });
 
-  test('a submodule pointer bump NOT declared in files_modified still merges (advisory, not blocking) but surfaces a scope warning naming vendor/sub', () => {
+  test('an undeclared real submodule pointer bump retains its scope advisory while the parent inventory gate holds integration', () => {
     const tmpBase = createTempDir('qb-submodule-undeclared-');
     try {
-      const { repoDir, sub2 } = buildRepoWithSubmodule(tmpBase);
+      const { repoDir, sub1, sub2 } = buildRepoWithSubmodule(tmpBase);
       const wtDir = path.join(tmpBase, 'wt-bump-undeclared');
       const branchName = 'worktree-agent-sub-bump-undeclared';
       addWorktree(repoDir, wtDir, branchName);
@@ -665,11 +768,11 @@ describe('quick-batch merge routing — real .gitmodules submodule integration (
         }],
       };
 
-      const result = executeWorktreeWaveCleanupPlan(plan);
-      assert.equal(result.entries[0].status, 'merged_removed', 'an undeclared submodule touch is advisory-only, same as any other undeclared modification');
+      const result = assertSubmoduleInventoryHeld(tmpBase, plan, sub1, sub2);
       assert.equal(result.warnings.length, 1);
       assert.equal(result.warnings[0].code, 'scope_out_of_declared');
       assert.equal(result.warnings[0].path, 'vendor/sub');
+      assert.deepEqual(result.entries[0].warnings, result.warnings, 'scope drift remains advisory; the refusal reason must be the independent inventory gate');
     } finally {
       cleanup(tmpBase);
     }

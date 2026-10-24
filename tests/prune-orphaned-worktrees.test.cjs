@@ -163,7 +163,7 @@ describe('pruneOrphanedWorktrees', () => {
   });
 
   // Test 4: runs git worktree prune to clear stale references
-  test('runs git worktree prune to clear stale references', () => {
+  test('retains stale references pending root owner and recovery accounting', () => {
     const repoDir = path.join(tmpBase, 'repo4');
     const worktreeDir = path.join(tmpBase, 'wt-stale');
 
@@ -192,8 +192,8 @@ describe('pruneOrphanedWorktrees', () => {
 
     // Assert: git worktree list no longer shows the stale entry.
     assert.ok(
-      !listedWorktreePaths(repoDir).has(wantedKey),
-      'git worktree list still shows stale entry after prune'
+      listedWorktreePaths(repoDir).has(wantedKey),
+      'unaccounted stale registration must remain available for root reconciliation'
     );
   });
 });

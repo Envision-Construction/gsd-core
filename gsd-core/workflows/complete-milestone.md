@@ -649,7 +649,7 @@ Check the project's `branching_strategy` (from `init.execute-phase`/`init.comple
 BASE_BRANCH=$(gsd_run query git.base-branch)
 ```
 
-If branches exist, present them and ask (AskUserQuestion): **Squash merge** (recommended) / **Merge with history** / **Delete without merging** / **Keep branches**. All three merge/delete options iterate every matching branch (phase strategy) or the one milestone branch, checking out `BASE_BRANCH` first and returning to the original branch after; both merge options strip `.planning/` from staging first when `commit_docs` is false. "Keep branches" just reports them as preserved for manual handling.
+If branches exist, present them and ask (AskUserQuestion): **Squash merge** (recommended) / **Merge with history** / **Delete without merging** / **Keep branches**. Both merge options iterate matching branches and strip `.planning/` from staging first when `commit_docs` is false; they preserve branch refs. "Delete without merging" is a manual root retirement request and stops with branches retained under `execute-phase/steps/worktree-recovery-policy.md`; it is not a force-delete fallback. "Keep branches" reports them preserved. Milestone/product acceptance does not establish retirement authority.
 
 Exact bash for each of the four options (squash, history-preserving merge, delete, keep): `gsd-core/workflows/complete-milestone/detail/elaboration.md` § 2.
 

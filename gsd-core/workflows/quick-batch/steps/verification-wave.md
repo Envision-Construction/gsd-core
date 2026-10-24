@@ -70,10 +70,7 @@ QB_VERIFY_ROUTE_JSON=$(gsd_run quick-batch verification-routing --status "$STATU
 | `human_needed` | Verifier flagged manual review | **Terminal for this item.** Do NOT call `quick-batch complete` — no STATE row is appended (row 30). Display the items needing manual check; continue with the rest of the batch. |
 | `fail` | `STATUS == "gaps_found"` (or `missing`/`stale`/`unparseable`/`phase_dir_not_found` — anything the query could not resolve to a real answer) | Mark the item `failed` with the routing's `failureReason`. NO automatic gap-fix retry (v1 exclusion), NO rollback of the already-merged commit (row 31/34). Continue with the rest of the batch. |
 
-An item this step marks `human_needed` or `failed` is NOT reverted — its
-worktree was already removed by the successful merge in Step 7 (verification
-runs post-merge, unlike a `merge_failed`/`scope_violation` routing, which
-never reaches this step because the item never merged).
+An item this step marks `human_needed` or `failed` is NOT reverted. Step 7 confirmed accepted integration while retaining its worktree, branch, registration and durable recovery fields for manual root retirement. Verification runs after integration and cannot authorize retirement. False/unknown integration never reaches this step; another retention reason remains held for root review.
 
 Continue to Step 9 once every merged item has been verified (or explicitly
 routed to `human_needed`/`failed`).

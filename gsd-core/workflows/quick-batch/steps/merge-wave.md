@@ -41,7 +41,7 @@ _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-pars
        --expected-base "$EXPECTED_BASE" \
        --allowed-bases '["'"$EXPECTED_BASE"'"]' \
        --plan-content "$PLAN_CONTENT" --raw)
-     # append $ENTRY_JSON to the merge manifest's "entries" array, in order
+     # append $ENTRY_JSON to the merge manifest's "worktrees" array, in order
    done
    ```
    (`$WT_PATH`/`$WT_BRANCH`/`$EXPECTED_BASE` per item come from the recorded
@@ -67,34 +67,81 @@ _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-pars
 4. **Merge, one at a time, via the SAME bounded primitive every other worktree
    consumer uses** (never hand-roll `git merge`):
    ```bash
-   QB_CLEANUP_RESULT=$(gsd_run query worktree.cleanup-wave --manifest "$MERGE_MANIFEST_PATH" --raw) || true
+   RETENTION_MANIFEST="$MERGE_MANIFEST_PATH"
+   # Capture the v1 CLI exit without erasing it; retained integration exits 1 too.
+   RETENTION_RC=0
+   RETENTION_RESULT=$(gsd_run query worktree.cleanup-wave --manifest "$RETENTION_MANIFEST" --exit-contract=v1) || RETENTION_RC=$?
+   printf '%s\n' "$RETENTION_RESULT"
+   RETENTION_REPORT_RC=0
+   # shellcheck disable=SC2016 # JavaScript template expressions must reach node literally.
+   printf '%s\n' "$RETENTION_RESULT" | RETENTION_MANIFEST="$RETENTION_MANIFEST" RETENTION_EXIT="$RETENTION_RC" node -e '
+   const fs = require("fs");
+   try {
+     const response = JSON.parse(fs.readFileSync(0, "utf8"));
+     const manifest = JSON.parse(fs.readFileSync(process.env.RETENTION_MANIFEST, "utf8"));
+     const expected = Array.isArray(manifest) ? manifest : manifest.worktrees;
+     const result = response.result;
+     if (!Array.isArray(expected) || !expected.length || !result ||
+         !Array.isArray(result.entries) || result.entries.length !== expected.length ||
+         !Array.isArray(result.pending) || result.pending.length ||
+         response.ok !== false || result.ok !== false || result.reason !== "cleanup_blocked") {
+       throw new Error("incomplete or unexpected cleanup response; retain every entry");
+     }
+     const key = e => JSON.stringify([e.agent_id, e.worktree_path, e.branch]);
+     const wanted = new Map(expected.map(e => [key(e), e]));
+     if (wanted.size !== expected.length) throw new Error("duplicate manifest identities");
+     let confirmed = process.env.RETENTION_EXIT === "1";
+     for (const entry of result.entries) {
+       const requested = wanted.get(key(entry));
+       if (!requested) throw new Error("unmatched result identity");
+       wanted.delete(key(entry));
+       console.error(`${entry.status}: integrated=${JSON.stringify(entry.integrated)}; reason=${entry.reason}; retained ${entry.worktree_path}`);
+       const accepted = requested.retirement_authorization;
+       if (entry.integrated !== true || entry.status !== "integrated_retained" ||
+           entry.reason !== "retirement_manual_root_handoff_required" || !accepted ||
+           entry.retirement_authorization?.accepted_head !== accepted.accepted_head) confirmed = false;
+     }
+     if (!confirmed) throw new Error("integration or retirement evidence needs root review; hold progression");
+     console.error("Accepted integration confirmed; manual retirement held. Project verification may proceed separately; cleanup and phase acceptance are not complete.");
+   } catch (error) {
+     console.error(`BLOCKED: ${error.message}`);
+     process.exitCode = 1;
+   }
+   ' || RETENTION_REPORT_RC=$?
+   # Preserve the command failure even when accepted integration was observed.
+   [ "$RETENTION_RC" -eq 0 ] || exit "$RETENTION_RC"
+   [ "$RETENTION_REPORT_RC" -eq 0 ] || exit "$RETENTION_REPORT_RC"
+   echo "BLOCKED: unexpected cleanup success; root review required before progression." >&2
+   exit 1
    ```
-   `executeWorktreeWaveCleanupPlan` isolates each entry's failure by default
-   (a blocked entry does not stop the rest of the manifest) except the one
-   carve-out where the repo is left genuinely mid-merge, which halts the
-   remaining entries in THIS manifest — resume picks them up on the next
-   round/invocation.
+   Before invoking integration, root must account for parent writers and
+   surviving hooks. The helper holds unaccounted tracked, untracked, ignored
+   or unknown parent inventory for manual root handling; clean tracked data
+   has the observed `parent_head_before_merge` recovery boundary. Preflight
+   reads are not an exclusive writer lease against later concurrent writes.
 
-5. **Route each entry's result:**
-   - `status == "merged_removed"`: success. Mark the item's completion pending
-     (Step 9 calls `quick-batch complete` for it — do NOT call it here; a
-     `--validate` item still has verification ahead of it). **Clear the
-     durable worktree-recovery fields now (#3677)** — the worktree no
-     longer exists on disk, so its `dispatched_worktree`/`dispatched_branch`/
-     `dispatched_base` must not keep pointing at a removed path:
-     ```bash
-     gsd_run quick-batch update --batch "$BATCH_ID" --updates '[{"quickId":"'"$quick_id"'","dispatchedWorktree":null,"dispatchedBranch":null,"dispatchedBase":null}]'
-     ```
-   - Any other status: route via
+   `executeWorktreeWaveCleanupPlan` may evaluate pre-integration entry
+   refusals independently. Every attempted failed or unverified merge halts
+   the wave, including clean refusals, transport errors, timeouts/signals and
+   success without verified integration. Absence of `MERGE_HEAD` does not
+   authorize continuation. All pending entries remain retained for manual
+   root recovery; no next round/invocation automatically resumes them. Before
+   resume, root must account for the actual command-return index, worktree,
+   sequencer/autostash state, recovery refs and all surviving writers/hooks,
+   then reconcile current accepted evidence. Never abort/reset/stash/restore
+   shared work as automatic recovery.
+
+5. **Route each entry in the printed `response.result.entries`, retaining the actual command exit:**
+   Read `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement. The helper emits ordinary JSON with nested `result.entries`, `result.pending` and top-level `ok`; `--raw` does not create a different cleanup result. The snippet preserves v1 exit 1, including for accepted integration with retirement held. Never use `|| true` to hide it. Missing/malformed output, an unexpected exit, omitted/mismatched entries or pending entries holds the affected wave for root review; do not complete those items or infer success from the invocation.
+
+   - `integrated === true`, `status == "integrated_retained"`, reason `retirement_manual_root_handoff_required`, and confirmed by the reporter: accepted integration, **manual retirement pending**. The item may proceed to its independent verification/review and Step 9 completion gates. Keep `dispatched_worktree`/`dispatched_branch`/`dispatched_base` and the manifest intact; the worktree, ref and registration still exist. Do not call this cleanup success and do not re-merge an item whose accepted integration has already been observed this run.
+   - `integrated === false` (`status == "blocked"`), `integrated === null` / `integration_unknown_retained`, another retention reason or any unrecognized legacy status: hold this item. Report observed integration and the exact reason, then route via:
      ```bash
      gsd_run quick-batch merge-routing --kind merge_failed --detail "$reason" --raw
      ```
-     (or `--kind scope_violation` when `$reason` names an undeclared
-     deletion — `partitionDeclaredDeletions`'s own guard). The routing result
-     always carries `preserveWorktree: true` — do NOT remove the worktree or
-     branch for this item; leave it for diagnosis (row 28/34/35). Do NOT call
-     `quick-batch complete` for it. Continue with the rest of the batch (row
-     33 — unrelated items are unaffected).
+     (or `--kind scope_violation` when `$reason` names an undeclared deletion). Preserve all work/recovery fields (`preserveWorktree: true`), do NOT call `quick-batch complete`, and continue only unrelated items/waves whose separate manifest responses independently confirm integration. A mixed response holds completion for this manifest pending root review. An already-integrated but differently blocked entry is not a failed-to-integrate claim; it needs root review. Do not blindly repeat a held merge on the next round; reconcile current accepted evidence first.
+
+   The cleanup manifest must use a top-level `worktrees` array (or the supported array form), never an `entries` property. `quick-batch cleanup-entry` supplies scope metadata, not owner acceptance: preserve root-reviewed `retirement_authorization` for that exact recorded entry when assembling the manifest. Missing acceptance or native owner completion is a genuine hold; never synthesize it from a SUMMARY, process age or a matching email.
 
 Continue to Step 9 (`--validate` routes through the verification step first)
 once every wave with a mergeable prefix has been processed this round.

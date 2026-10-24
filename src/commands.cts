@@ -1979,6 +1979,26 @@ function stageDeclaredRemovals(cwd: string, removedDeclared: string[]): {
   return { removedEntries, removedPathspec, failures };
 }
 
+/** A failed sequencer read is unknown, never proof that a partial commit is safe. */
+function scopedCommitSequencer(cwd: string): { reason: string; state: string; error: string } | null {
+  for (const [ref, state] of [['MERGE_HEAD', 'merge'], ['CHERRY_PICK_HEAD', 'cherry-pick'], ['REVERT_HEAD', 'revert']]) {
+    const probe = execGit(['rev-parse', '-q', '--verify', ref], { cwd });
+    const answered = !probe.timedOut && !isSpawnTimeout(probe) && !probe.signal && !probe.error;
+    if (answered && probe.exitCode === 1 && probe.stdout === '' && probe.stderr === '') continue;
+    if (answered && probe.exitCode === 0 && /^(?:[0-9a-f]{40}|[0-9a-f]{64})\s*$/.test(probe.stdout) && probe.stderr === '') {
+      return {
+        reason: 'scoped_commit_refused_during_merge', state,
+        error: `refusing an explicit scoped commit during an in-progress ${state}; nothing was staged or committed. Resolve the sequencer separately.`,
+      };
+    }
+    return {
+      reason: 'scoped_commit_sequencer_unknown', state: ref,
+      error: `cannot establish ${ref} state (${probe.stderr.trim() || 'failed or malformed probe'}); nothing was staged or committed.`,
+    };
+  }
+  return null;
+}
+
 function cmdCommit(cwd: string, message: string | undefined, files: string[] | undefined, raw: boolean, amend: boolean, noVerify: boolean, filesRemoved?: string[]): void {
   if (!message && !amend) {
     error('commit message required');
@@ -2014,6 +2034,28 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
       reason: COMMIT_DOCS_SKIP_REASON[commitDocsPolicy.source as Exclude<CommitDocsSource, 'default'>],
     };
     output(result, raw, 'skipped');
+    return;
+  }
+
+  // RGS-01/02: guard ALL declared mutations, including removal-only scopes,
+  // before branch checkout or any staging can refresh or change the index.
+  const removedDeclared = filesRemoved ?? [];
+  const explicitFiles = (files && files.length > 0) || removedDeclared.length > 0;
+  const filesToStage = explicitFiles ? (files ?? []) : ['.planning/'];
+  const guardApplies = explicitFiles;
+  const hasScopedMutation = explicitFiles && (removedDeclared.length > 0
+    || filesToStage.some((f) => fs.existsSync(path.resolve(cwd, f))));
+  if (hasScopedMutation) {
+    const refusal = scopedCommitSequencer(cwd);
+    if (refusal) {
+      output({ committed: false, hash: null, reason: refusal.reason, merge_state: refusal.state, error: refusal.error }, raw, 'failed');
+      return;
+    }
+  }
+  // Optional additions that are all absent must remain a genuine no-write exit,
+  // including when a merge is pending or an amend was requested.
+  if (explicitFiles && !hasScopedMutation) {
+    output({ committed: false, hash: null, reason: 'nothing_to_commit', skipped_files: filesToStage }, raw, 'nothing');
     return;
   }
 
@@ -2185,12 +2227,6 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   }
 
   // Stage files
-  // #4208: `--files-removed` is a declared scope in its own right — a caller
-  // that names only removals must not fall through to the unscoped
-  // `.planning/` sweep, which would commit everything under it.
-  const removedDeclared = filesRemoved ?? [];
-  const explicitFiles = (files && files.length > 0) || removedDeclared.length > 0;
-  const filesToStage = explicitFiles ? (files ?? []) : ['.planning/'];
   const stagedPaths: string[] = [];
   // #2608: a `git add` that fails must abort the commit, not be skipped.
   // #2523 stopped a failed path entering the commit pathspec, but skipping it
@@ -2223,6 +2259,7 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     execGit(['diff', '--cached', '--name-only', '-z', '--relative'], { cwd })
       .stdout.split('\0').filter(Boolean),
   );
+
   for (const file of filesToStage) {
     const fullPath = path.resolve(cwd, file);
     if (!fs.existsSync(fullPath)) {
@@ -2411,203 +2448,22 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     return;
   }
 
-  // Commit — when the caller declared a scope (--files), append a pathspec so
-  // only the declared files land in the commit, not the entire index (#2112).
-  // The pathspec uses stagedPaths (not filesToStage) so skipped missing files
-  // are excluded — otherwise git would record them as deletions (#2014).
-  // During a merge, git refuses partial commits — fall back to a bare commit.
-  // --amend is left without a pathspec: amending with -- <paths> is a different
-  // operation that rewrites the tip with only those paths.
-  const mergeHeadProbe = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd });
-  const isMergeInProgress = mergeHeadProbe.exitCode === 0;
-  // PROVENANCE FOR THIS WHOLE BLOCK: every behavioural claim below was DRIVEN
-  // against git 2.54, not reasoned by analogy. Individual claims state what was
-  // observed and omit the version; where a claim is version-SENSITIVE rather
-  // than merely version-observed, it says so at the claim.
+  // Scoped commits always retain their pathspec, including amend. Live or
+  // unknown sequencer states were refused before staging; an all-missing
+  // optional scope returned without any index or branch mutation.
   //
-  // #3776: git refuses a PARTIAL commit (`git commit -- <paths>`) while a merge
-  // or a cherry-pick is in progress, so in those states the pathspec describes
-  // nothing about what would actually land and the empty-diff decision below
-  // must not be made from it. The three sequencer states do NOT agree:
-  //   MERGE_HEAD        -> `fatal: cannot do a partial commit during a merge.`
-  //   CHERRY_PICK_HEAD  -> `fatal: cannot do a partial commit during a cherry-pick.`
-  //   REVERT_HEAD       -> permitted; behaves like an ordinary commit.
-  // REVERT_HEAD is therefore deliberately absent: including it would suppress
-  // this fix during a revert, reintroducing the very misreport it removes.
-  // `canScope` below keeps its narrower merge-only test on purpose — widening it
-  // would change pre-existing cherry-pick behaviour, which is outside this fix.
-  // Only the scoped, non-amend call can return through the guard below, so the
-  // cherry-pick probe and the guard's own probes are gated on that — an
-  // unscoped commit or an --amend would otherwise pay for git invocations whose
-  // answer it can never use. The MERGE_HEAD probe above predates this fix and
-  // stays unconditional: `canScope` needs it on every path.
-  // A non-zero exit from either sequencer probe means "not in that state" AND
-  // "the probe never answered" — `execGit` surfaces a spawn timeout as
-  // `exitCode: 1` (`_spawnResult`: `result.status ?? 1`), which is the exact
-  // code `rev-parse --verify` returns for a ref that does not exist. Conflating
-  // them is the one path in this fix that does NOT fail toward the old
-  // behaviour: a timeout during a real merge would leave `partialCommitRefused`
-  // false, the guard would decide `nothing_to_commit` from a pathspec git will
-  // not honour, and the merge would be silently abandoned where it previously
-  // reported a loud `commit_failed`. So an unanswered probe is treated as
-  // "assume the partial commit would be refused" — the conservative reading,
-  // which falls through to `git commit` and lets git speak for itself.
+  // #3776: avoid running commit hooks on a genuinely empty declared diff.
+  // Compare the working tree to HEAD because partial commit reads working
+  // bytes, not just staged bytes. Pin submodule/textconv behavior to the
+  // commit's interpretation. An unborn HEAD or failed diff must reach Git's
+  // normal commit/error path rather than manufacture a no-op.
   //
-  // This is deliberately routed into `partialCommitRefused` ONLY, never into
-  // `isMergeInProgress`: that flag also feeds the pre-existing `canScope` below,
-  // where a spurious timeout would convert a scoped commit into a bare one and
-  // record the whole index instead of the named paths. Suppressing a misreport
-  // must not be paid for by committing content the caller never named.
-  const guardApplies = explicitFiles && !amend;
-  const cherryPickProbe = guardApplies
-    ? execGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], { cwd })
-    : null;
-  const partialCommitRefused = isMergeInProgress
-    || isSpawnTimeout(mergeHeadProbe)
-    || (cherryPickProbe !== null
-      && (cherryPickProbe.exitCode === 0 || isSpawnTimeout(cherryPickProbe)));
-  // `stagedPaths` records paths whose `git add` exited 0 — that is "did
-  // staging succeed", not "is there anything to commit". Staging an
-  // already-committed, unmodified file succeeds while contributing no diff, so
-  // `length === 0` is reachable only when EVERY named path was missing from
-  // disk. For the ordinary empty-diff case control fell through to `git commit`,
-  // and the only thing converting that back to `nothing_to_commit` was the
-  // string match on git's output below — which a rejecting pre-commit hook
-  // pre-empts, because git runs the hook before it decides there is nothing to
-  // commit. The caller was then handed `commit_failed` carrying a gate message
-  // about a commit that had nothing to gate. Ask git whether the named paths
-  // actually differ instead. Three things about that probe are load-bearing:
-  //  - it compares the WORKING TREE to HEAD (`diff HEAD`), not the index
-  //    (`diff --cached`). `git commit -- <paths>` is a partial commit: it takes
-  //    the working-tree content of those paths and ignores what is staged. A
-  //    probe against the index therefore answers a different question than the
-  //    commit asks, and a working-tree write landing between the `git add`
-  //    above and this line — another process in a shared checkout — would make
-  //    the index say "empty" while the commit would still have recorded the new
-  //    content. Driven: `diff --cached` rc 0 and `diff HEAD` rc 1 on the same
-  //    path, with `git commit -- <path>` then committing it.
-  //  - the `length === 0` short-circuit keeps the all-missing-paths case exact.
-  //    Spreading an empty array yields a pathspec-less `diff`, which tests the
-  //    WHOLE tree — unrelated work elsewhere would then suppress the guard and
-  //    regress the skip-missing contract (#2014).
-  //    It is deliberately NOT gated on `partialCommitRefused`, and gating it
-  //    would be a REGRESSION rather than a hardening. With every named path
-  //    missing, `stagedPaths` is empty, so `canScope` is false and the
-  //    fall-through reaches a BARE `git commit` — which git PERMITS during a
-  //    merge, and which then CONCLUDES that merge: rc 0, a two-parent merge
-  //    commit recording the entire index, under a message naming a path that
-  //    does not exist, reported to the caller as `committed: true` (driven).
-  //    Today's answer writes nothing at all. That is the same trade the timeout
-  //    routing above already refuses — a misreport must not be paid for by
-  //    committing content the caller never named — which is why the sequencer
-  //    states gate the DIFF branch only. The behaviour is also PRE-EXISTING and
-  //    unchanged by this fix: before it the identical short-circuit ran ABOVE
-  //    the MERGE_HEAD probe, so it never consulted the sequencer either. The
-  //    residual it leaves — a merge held open behind a `nothing_to_commit`
-  //    report — is offered as a separate issue with the other three, not folded
-  //    in here. Both sequencer shapes are pinned in
-  //    tests/commit-files-pathspec.test.cjs.
-  //  - `!partialCommitRefused`: see above — deciding "nothing to commit" from a
-  //    pathspec git will not honour would abandon an in-progress merge, so those
-  //    states keep their pre-existing behaviour untouched.
-  //  - the probe is pinned against user configuration that would make `git diff`
-  //    answer a DIFFERENT question than `git commit -- <paths>` asks. `git diff`
-  //    is porcelain and honours settings the commit does not, so without these
-  //    flags a caller's config decides whether the guard fires. Each vector
-  //    below was driven with the paired `git commit -- <path>` confirmed to
-  //    record the change the probe reported as absent:
-  //      `diff.ignoreSubmodules=all`   -> a gitlink bump is invisible to the probe
-  //      `.gitmodules` `ignore = all`  -> the same, and it needs NO local config:
-  //                                       it is checked in, so it arrives with a
-  //                                       clone
-  //      `diff=<driver>` + `textconv`  -> two different blobs converge to one
-  //                                       text, so the probe sees no change at
-  //                                       all; no submodule involved
-  //    `--ignore-submodules=dirty` rather than `=none`, because `dirty` is what
-  //    a partial commit of a submodule path actually means: it records the
-  //    GITLINK, and the gitlink moves only when the submodule's HEAD does. Under
-  //    `=none` a merely dirty submodule WORKTREE reports a difference the commit
-  //    would not record, sending an empty call back to `git commit` — the #3776
-  //    misreport, re-entered from the other side. `dirty` still overrides both
-  //    `diff.ignoreSubmodules` and a checked-in `.gitmodules` `ignore`, so the
-  //    gitlink vectors above stay closed (driven: rc 1 under every one of them).
-  //    `--no-ext-diff` is deliberately absent: `--quiet` short-circuits ahead of
-  //    an external diff driver, so an external `diff.<driver>.command` cannot
-  //    invert the probe (driven: rc 1 with and without the flag).
-  // Any other non-zero exit from the probe (a genuine git error, or an unborn
-  // HEAD) leaves the guard shut and falls through to the commit — failing toward
-  // today's path rather than manufacturing a no-op.
-  // THE ONE STATE WHERE `git diff` AND `git commit -- <paths>` GENUINELY DISAGREE.
-  // `--assume-unchanged` tells git to skip the worktree stat for a path, so
-  // `git add` stages nothing and BOTH diff forms report no difference — while
-  // `git commit -- <path>` reads the working tree directly and records it
-  // (driven: probe rc 0, commit rc 0, new content in the tree). Left
-  // to the diff probe alone the guard reports `nothing_to_commit` about content
-  // the caller explicitly named in `--files` and git would have written. #3776
-  // is a purely diagnostic bug — nothing is corrupted and no wrong commit is
-  // made — so suppressing its misreport must not be paid for by dropping named
-  // content. The same rule the timeout routing already follows one block up.
-  //
-  // `git ls-files -v` is the discriminator for the STATE: it tags an
-  // assume-unchanged path with a LOWERCASE letter (`h`), where
-  // `--skip-worktree` is an uppercase `S` and never reaches THIS branch:
-  // `git add` exits 1 under it, so a present-but-modified skip-worktree path
-  // fails closed as `staging_failed` above the guard. (An ABSENT one is skipped
-  // before `git add` runs at all per #2014, and is answered by the
-  // `stagedPaths.length === 0` arm above — correctly, and exactly as it was
-  // pre-fix. Both shapes are pinned.)
-  //
-  // Then ASK GIT, rather than reconstructing its answer. `git commit --dry-run`
-  // is the same decision the real commit makes, and `--no-verify` is what keeps
-  // it a DECISION rather than an execution. git 2.54 already declines to run
-  // `pre-commit` on a dry run (driven: a rejecting one neither fires nor writes
-  // its marker), which is the property that matters here, because a firing
-  // `pre-commit` is the whole of #3776 — but that is an observed behaviour of
-  // one version, and the failure it would produce on a version that differs is
-  // SILENT. A `pre-commit` that fires and rejects exits 1, the same code git
-  // returns for `nothing to record`, so the closure below would read it as a
-  // CONFIRMED empty answer, drop the content the caller named, and report
-  // `nothing_to_commit` — #3776's exact shape, in #3776's exact configuration.
-  // `--no-verify` forecloses that structurally instead of resting on the
-  // version, and is behaviour-neutral where the version already agrees (driven:
-  // rc 0 would-record / rc 1 nothing, identical with and without it). This is
-  // VERSION-SENSITIVE reasoning, hence stated at the claim per the provenance
-  // note above.
-  //
-  // It is still NOT hook-free in general, and `--no-verify` does not widen that
-  // claim: `post-index-change` fires on this call with or without the flag
-  // (driven both ways), so a repo using that hook sees TWO extra invocations
-  // for the probe — git fires it twice per `commit --dry-run`, and twice again
-  // for the real commit (driven: 2/2/2 across flagged probe, unflagged probe
-  // and real commit). Stated rather than claimed away; the narrower
-  // claim is the true one. `--porcelain` keeps the output to a couple
-  // of machine-readable lines instead of a full status listing — the rc is
-  // identical either way (driven: 0 would-record / 1 nothing), but the plain
-  // form prints every untracked path, which on a large tree is output this
-  // probe has no use for and `execGit` would have to buffer. rc 0 means the
-  // commit would record something, so the guard must stand aside.
-  //
-  // Reconstructing it was tried and is WRONG in three measured ways, all of
-  // them silent drops of named content. Comparing `git hash-object` against
-  // `HEAD:<path>` misses a mode-only change (`chmod +x` leaves the blob
-  // identical while `git commit -- <path>` records `100755`); it cannot hash a
-  // submodule path at all (`fatal: Unable to hash sub`, while the commit
-  // advances the gitlink); and the path it needs must be parsed out of
-  // `ls-files` output, which `core.quotePath` renders as `"caf\303\251.md"`
-  // by default, so the probe reads a filename that does not exist. Asking git
-  // needs no path parsed and no case enumerated.
-  //
-  // Scoped to this branch on purpose. The diff probe above answers the ordinary
-  // case cheaply and is pinned against the configuration vectors below; the
-  // dry run is the heavier, exact answer, and it runs only when an
-  // assume-unchanged path is actually present.
-  //
-  // The `ls-files` read is an OPTIMISATION, never a gate — so an unreadable one
-  // must not decide anything. It exists only to keep the dry run off the hot
-  // path when no assume-unchanged entry is present; when it cannot answer, the
-  // dry run simply runs, because the dry run needs nothing from it. Both
-  // failing-closed (drop the content) and failing-open (re-enter #3776) are
-  // wrong answers to a question we can just ask directly.
+  // An assume-unchanged path can have working content that diff ignores but
+  // partial commit would record. Ask Git with a no-verify dry run for that
+  // case. The ls-files read is only an optimization: if it cannot answer,
+  // perform the dry run. Its timeout/error is unknown, never proof of no-op.
+  // --no-verify prevents pre-commit/commit-msg hooks; post-index-change can
+  // still run, so this is not a promise of a hook-free dry run.
   const assumeUnchangedWouldRecord = (): boolean => {
     const listed = execGit(['ls-files', '-v', '--', ...stagedPaths.map(asPathspec)], { cwd });
     // Only the TAG is read; the path is deliberately never parsed out — see the
@@ -2637,7 +2493,7 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   };
   const nothingToCommit = guardApplies
     && (stagedPaths.length === 0
-      || (!partialCommitRefused
+      || (!amend
         && execGit(
           ['diff', '--quiet', '--ignore-submodules=dirty', '--no-textconv', 'HEAD', '--', ...stagedPaths.map(asPathspec)],
           { cwd },
@@ -2665,8 +2521,9 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     output(result, raw, 'nothing');
     return;
   }
-  const canScope = explicitFiles && stagedPaths.length > 0 && !amend
-    && !isMergeInProgress;
+  // A declared scope always keeps its pathspec, including scoped amend.
+  // A sequencer that starts after preflight can make Git refuse, never widen it.
+  const canScope = explicitFiles && stagedPaths.length > 0;
   const commitArgs = amend
     ? ['commit', '--amend', '--no-edit']
     : ['commit', '-m', sanitizedMessage as string];
@@ -2737,12 +2594,7 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
       // leaves its own staged paths in place there too.
       const rv = restoreRemovedEntries();
       if (rv !== 'restored') { output(removalsLeftStaged(rv), raw, 'failed'); return; }
-      // #4454: this is the residual window the surrounding comments already
-      // document (a partial skip + partialCommitRefused bypassing the diff
-      // probe + git's own empty-commit refusal) — skippedFiles can be
-      // non-empty here too, and omitting it would be the same misreport
-      // this fix exists to close, just on the other branch that reaches
-      // "nothing to commit".
+      // Preserve the optional-path disclosure on Git's own no-op exit too.
       const result = {
         committed: false,
         hash: null,
@@ -2865,6 +2717,11 @@ function cmdCommitToSubrepo(cwd: string, message: string | undefined, files: str
       execGit(['diff', '--cached', '--name-only'], { cwd: repoCwd })
         .stdout.split('\n').map(s => s.trim()).filter(Boolean),
     );
+    const refusal = scopedCommitSequencer(repoCwd);
+    if (refusal) {
+      repos[repo] = { committed: false, hash: null, files: repoFiles, reason: refusal.reason, error: refusal.error };
+      continue;
+    }
     const stagedRelPaths: string[] = [];
     const subStagingFailures: Array<{ file: string; error: string; timed_out: boolean }> = [];
     for (const file of repoFiles) {
@@ -2896,12 +2753,13 @@ function cmdCommitToSubrepo(cwd: string, message: string | undefined, files: str
       continue;
     }
 
-    // Commit — pathspec limits the commit to the staged files only (#2112)
-    const isMergeInProgressSub = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repoCwd }).exitCode === 0;
-    const canScopeSub = stagedRelPaths.length > 0 && !isMergeInProgressSub;
-    const commitArgs = canScopeSub
-      ? ['commit', '-m', message, '--', ...stagedRelPaths]
-      : ['commit', '-m', message];
+    // Every subrepository call is scoped. An empty path list never falls back
+    // to a whole-index commit.
+    if (stagedRelPaths.length === 0) {
+      repos[repo] = { committed: false, hash: null, files: repoFiles, reason: 'nothing_to_commit' };
+      continue;
+    }
+    const commitArgs = ['commit', '-m', message, '--', ...stagedRelPaths];
     // #3859 follow-up fix as cmdCommit above (line ~2081) — git 2.39.5 needs
     // this override for pathspec-scoped AND whole-index commits alike.
     const commitEnvSub: Record<string, string> = {

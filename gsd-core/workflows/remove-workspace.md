@@ -1,5 +1,5 @@
 <purpose>
-Remove a GSD workspace, cleaning up git worktrees and deleting the workspace directory.
+Inventory a GSD workspace for manual root retirement; retain files, worktrees and registrations pending custody and recovery review.
 </purpose>
 
 <required_reading>
@@ -46,66 +46,24 @@ Cannot remove workspace "$WORKSPACE_NAME" — the following repos have uncommitt
   - repo1
   - repo2
 
-Commit or stash changes in these repos before removing the workspace:
-  cd "$WORKSPACE_PATH/repo1"
-  git stash   # or git commit
+Preserve these changes and hand their inventory to root for custody/recovery review. Do not automatically stash, commit or discard them.
 ```
 
 Exit. Do NOT proceed.
 
-## 3. Confirm Removal
+## 3. Manual Root Retirement Hold
 
-Use AskUserQuestion:
-- header: "Confirm Removal"
-- question: "Remove workspace '$WORKSPACE_NAME' at $WORKSPACE_PATH? This will delete all files in the workspace directory. Type the workspace name to confirm:"
-- requireAnswer: true
+The dirty-repo summary and typing the workspace name do not establish custody of all files, ignored data, nested checkouts or writers. Automatic workspace/worktree retirement is held for every strategy. Do not remove a worktree, unlock it, prune registrations, delete refs or recursively delete the workspace directory.
 
-**If answer does not match `$WORKSPACE_NAME`:** Exit with "Removal cancelled."
-
-## 4. Clean Up Worktrees
-
-**If strategy is `worktree`:**
-
-Initialize the failure flag once before iterating repos:
+Read `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement. Hand root the exact workspace/repository paths, registered branches, current HEADs, known owner records and all unresolved inventory/recovery questions. Root must account for every writer and independently retained recovery for each checkout before any manual native Git retirement. Missing/unknown state retains the entire workspace; no force fallback.
 
 ```bash
-REMOVE_FAILED=false
+echo "BLOCKED: workspace retained; manual root retirement required: $WORKSPACE_PATH" >&2
+exit 1
 ```
 
-For each repo in the workspace:
+## 4. Report
 
-```bash
-cd "$SOURCE_REPO_PATH"
-if ! git worktree remove "$WORKSPACE_PATH/$REPO_NAME" 2>&1; then
-  echo "Warning: Could not remove worktree for $REPO_NAME — source repo may have been moved, deleted, locked, or dirty." >&2
-  REMOVE_FAILED=true
-fi
-```
-
-If any `git worktree remove` fails, stop before deleting the workspace directory:
-```text
-Refusing to delete "$WORKSPACE_PATH" because one or more git worktrees could not be removed.
-Resolve the failed worktree removal manually, then rerun remove-workspace.
-```
-
-## 5. Delete Workspace Directory
-
-```bash
-if [ "${REMOVE_FAILED:-false}" = "true" ]; then
-  echo "Refusing to delete \"$WORKSPACE_PATH\" because one or more git worktrees could not be removed." >&2
-  exit 1
-fi
-
-rm -rf "$WORKSPACE_PATH"
-```
-
-## 6. Report
-
-```
-Workspace "$WORKSPACE_NAME" removed.
-
-  Path: $WORKSPACE_PATH (deleted)
-  Repos: $REPO_COUNT worktrees cleaned up
-```
+Report `Workspace retained; retirement pending root custody review`, its path and the known/unknown repository inventory. Do not report the workspace deleted or worktrees cleaned up. Project verification and product acceptance remain separate gates.
 
 </process>
