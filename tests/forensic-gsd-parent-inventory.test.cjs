@@ -6,9 +6,8 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const cp = require('node:child_process');
 const { createTempDir, cleanup, homeSandboxEnv, installSpawnEnv } = require('./helpers.cjs');
-const { GIT_TIMEOUT_MS, PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 const { authorizeFixtureEntry } = require('./helpers/custody-fixture.cjs');
 const safety = require('../gsd-core/bin/lib/worktree-safety.cjs');
@@ -31,14 +30,12 @@ function fixture(t) {
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
   git(['add', 'base.txt']); git(['commit', '-qm', 'base']);
   const base = git(['rev-parse', 'HEAD']);
-  const exited = cp.spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { env, encoding: 'utf8', timeout: PROBE_TIMEOUT_MS });
-  assert.ifError(exited.error); assert.equal(exited.status, 0);
   const entries = ['first', 'next'].map(id => {
     const worker = path.join(root, 'worker-' + id); const branch = 'worktree-agent-' + id;
     git(['worktree', 'add', '-q', '-b', branch, worker]);
     fs.writeFileSync(path.join(worker, id === 'first' ? 'artifact.bin' : 'next.txt'), Buffer.from([1, 2, 3, 4]));
     git(['add', '.'], worker); git(['commit', '-qm', id], worker);
-    return authorizeFixtureEntry(repo, { agent_id: id, worktree_path: worker, branch, expected_base: base }, { pid: Number(exited.stdout.trim()) });
+    return authorizeFixtureEntry(repo, { agent_id: id, worktree_path: worker, branch, expected_base: base });
   });
   fs.writeFileSync(path.join(repo, 'parent.txt'), 'parent\n'); git(['add', '.']); git(['commit', '-qm', 'parent']);
   const head = git(['rev-parse', 'HEAD']);
@@ -60,9 +57,12 @@ function snapshot(root) {
   walk(root); return files;
 }
 
-function execute(f, intercept = (args, opts, real) => real(args, opts)) {
+function execute(f, intercept = (args, opts, real) => real(args, opts), isPidAlive = () => false) {
   const calls = [];
   const result = safety.executeWorktreeWaveCleanupPlan(safety.planWorktreeWaveCleanup(f.repo, f.entries), {
+    // authorizeFixtureEntry supplies synthetic completed owners. Host PID reuse
+    // or an unknown OS query must not preempt this fixture's inventory faults.
+    isPidAlive,
     execGit: (args, opts) => {
       calls.push(args);
       return intercept(args, opts, (a, o) => execGit(a, { ...o, env: f.env }));
@@ -222,5 +222,43 @@ describe('RGS-11 fail-closed parent inventory errors and unknown results', () =>
         ? { exitCode: 0, stdout: output, stderr: '', timedOut: false, signal: null } : real(args, opts));
       assertHeld(f, out, 'integration_parent_inventory_unverified', before, 'malformed-' + output.length);
     });
+  }
+});
+
+describe('RGS-11 owner liveness still gates synthetic inventory fixtures', () => {
+  for (const mode of ['live', 'unknown']) {
+    for (const transition of [false, true]) {
+      test(`${mode} owner ${transition ? 'after the first inventory refusal' : 'before either inventory'} retains all bytes`, t => {
+        const f = fixture(t); const before = snapshot(f.repo); const allBefore = snapshot(f.root);
+        const ownerPids = f.entries.map(e => JSON.parse(fs.readFileSync(e.worktree_path + '.worker.json')).pid);
+        const probes = []; let inventories = 0;
+        const out = execute(f, (args, opts, real) => {
+          if (!args.includes('ls-files')) return real(args, opts);
+          inventories++; throw new Error('fixture inventory exception');
+        }, pid => {
+          probes.push(pid);
+          if (transition && probes.length === 1) return false;
+          if (mode === 'unknown') throw new Error('fixture owner liveness unknown');
+          return true;
+        });
+        assert.deepEqual(probes, ownerPids, 'each entry independently rechecks its owner');
+        assert.equal(inventories, transition ? 1 : 0, 'live or unknown owner refuses before its inventory');
+        assert.equal(out.result.ok, false); assert.deepEqual(out.result.pending, []);
+        assert.deepEqual(out.result.entries.map(e => [e.integrated, e.status, e.reason]), [
+          [false, 'blocked', transition ? 'integration_parent_inventory_unverified' : 'retirement_owner_live_or_unknown'],
+          [false, 'blocked', 'retirement_owner_live_or_unknown'],
+        ]);
+        assert.equal(out.calls.some(a => a[0] === 'merge'), false);
+        assert.deepEqual(snapshot(f.repo), before, 'complete parent and .git bytes are unchanged');
+        for (const entry of f.entries) {
+          assert.equal(f.git(['rev-parse', entry.branch]), entry.retirement_authorization.accepted_head);
+          assert.equal(f.git(['rev-parse', entry.retirement_authorization.recovery_ref]), entry.retirement_authorization.accepted_head);
+          assert.ok(fs.existsSync(entry.worktree_path));
+        }
+        const allAfter = snapshot(f.root);
+        assert.deepEqual(allAfter, allBefore, 'parent, workers, native records and full .git bytes are unchanged');
+        evidence('owner-' + mode + (transition ? '-transition' : '-initial'), f, { ...out, probes, inventories }, allBefore, allAfter);
+      });
+    }
   }
 });
