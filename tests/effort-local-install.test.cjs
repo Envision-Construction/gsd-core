@@ -27,8 +27,21 @@ test('#4988: installed local CLI syncs and reads its own Claude agents', () => {
     const cli = path.join(configDir, 'gsd-core', 'bin', 'gsd-tools.cjs');
     const env = { ...process.env, HOME: root, USERPROFILE: root, GSD_HOME: root, CLAUDE_CONFIG_DIR: globalDir };
     function run(args) {
+      const startedAt = process.hrtime.bigint();
       const result = runNode([cli, ...args], { cwd: root, env, timeoutMs: PROBE_TIMEOUT_MS });
-      assert.equal(result.exitCode, 0, `${args.join(' ')} failed:\n${result.stderr}`);
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      assert.equal(result.exitCode, 0, result.exitCode === 0 ? undefined : `${args.join(' ')} failed: ${JSON.stringify({
+        outcome: result.outcome,
+        exitCode: result.exitCode,
+        code: result.code,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        killed: result.killed,
+        configuredTimeoutMs: PROBE_TIMEOUT_MS,
+        elapsedMs,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      })}`);
       return JSON.parse(result.stdout);
     }
 
