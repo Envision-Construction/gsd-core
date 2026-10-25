@@ -395,7 +395,11 @@ for (const shell of ['bash', 'zsh']) {
       const binary = Buffer.from([255, 0, 42, 10]);
       if (scenario === 'tracked') fs.writeFileSync(path.join(repo, 'base.txt'), binary);
       if (['untracked', 'ignored', 'per-commit'].includes(scenario)) fs.writeFileSync(path.join(repo, 'independent.bin'), binary);
-      if (scenario === 'ignored') fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\nindependent.bin\n');
+      if (scenario === 'ignored') {
+        // Git templates may omit info/: keep this actual ignore fixture self-contained.
+        fs.mkdirSync(path.join(repo, '.git/info'), { recursive: true });
+        fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\nindependent.bin\n');
+      }
       if (scenario === 'config-malformed') fs.writeFileSync(path.join(repo, '.planning/config.json'), '{');
       if (['assume-unchanged', 'skip-worktree'].includes(scenario)) {
         git(['update-index', '--' + scenario, 'base.txt'], repo);
