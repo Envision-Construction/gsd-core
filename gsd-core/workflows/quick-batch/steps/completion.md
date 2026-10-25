@@ -57,8 +57,7 @@ ${failed_count + human_needed_count > 0 ? 'Resume after resolving: /gsd:quick-ba
 ---
 ```
 
-If EVERY item is `complete`, this is a clean finish — no further action
-needed. If any item is `failed`/`human_needed`/`blocked`, the batch stays
+Report manual retirement holds and retained worktree/recovery identities separately from item completion. If EVERY item is `complete`, the task/product completion gates are satisfied; this does not close retained-worktree custody or prove retirement. Do not clear recovery fields merely because an item completed. If any item is `failed`/`human_needed`/`blocked`, the batch stays
 resumable: fix the underlying issue (or accept the failure), then re-run
 `/gsd:quick-batch --resume ${BATCH_ID}` — `resumeBatch`'s own propagation
 (unmodified from Phase 3) re-evaluates eligibility from the current state, no

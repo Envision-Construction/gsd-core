@@ -21,7 +21,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const childProcess = require('node:child_process');
 const fc = require('fast-check');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, waitFor } = require('./helpers.cjs');
 const { createFixture } = require('./fixtures/index.cjs');
 const { makeFaultyGit } = require('./helpers/faulty-deps.cjs');
 const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
@@ -61,24 +61,6 @@ const {
 const isWindows = process.platform === 'win32';
 
 // ─── Shared stubs ─────────────────────────────────────────────────────────────
-
-/**
- * #4758 (windows conformance lanes): the SUMMARY rescue resolves the manifest's
- * worktree_path against repoRoot before handing it to the fs walker and its own
- * `git -C` calls.  A driveless-absolute fixture value ('/repo/...') rewrites to
- * '<cwd-drive>:\repo\...' under win32 path.resolve, so fakes must key on the
- * RESOLVED path — a verbatim string key silently never matches there and the
- * rescue stops being exercised on Windows.  gitKeyFor mirrors git's own
- * `-C <relative>` resolution (against the plan's repoRoot) so one fake answers
- * both the caller's calls (verbatim values, resolved by git's cwd) and the
- * rescue's calls (already-resolved values) through the same branch set.
- */
-function gitKeyFor(repoRoot, args) {
-  if (args[0] === '-C') {
-    return `-C ${path.resolve(repoRoot, args[1])} ${args.slice(2).join(' ')}`;
-  }
-  return args.join(' ');
-}
 
 /**
  * Returns an execGit stub that simulates what spawnSync returns when the
@@ -499,7 +481,7 @@ describe('planWorktreePrune', () => {
 // ─── executeWorktreePrunePlan ─────────────────────────────────────────────────
 
 describe('executeWorktreePrunePlan', () => {
-  test('runs git worktree prune for metadata plan', () => {
+  test('holds repo-wide metadata prune for root owner accounting', () => {
     const calls = [];
     const result = executeWorktreePrunePlan(
       { repoRoot: '/repo/main', action: 'metadata_prune_only', reason: 'worktrees_present' },
@@ -510,8 +492,9 @@ describe('executeWorktreePrunePlan', () => {
         },
       }
     );
-    assert.strictEqual(result.ok, true);
-    assert.deepStrictEqual(calls, [{ cwd: '/repo/main', args: ['worktree', 'prune'] }]);
+    assert.strictEqual(result.ok, false);
+    assert.equal(result.reason, 'manual_root_prune_required');
+    assert.deepStrictEqual(calls, []);
   });
 
   test('returns skip for missing plan', () => {
@@ -565,7 +548,7 @@ describe('executeWorktreePrunePlan', () => {
   });
 
   // AC4 strict: timedOut must be surfaced as a first-class field
-  test('result.timedOut is true when prune git call times out', () => {
+  test('a prune timeout seam is never invoked without root maintenance authority', () => {
     const plan = {
       repoRoot: '/tmp',
       action: 'metadata_prune_only',
@@ -574,11 +557,8 @@ describe('executeWorktreePrunePlan', () => {
     };
     const result = executeWorktreePrunePlan(plan, { execGit: makeTimeoutStub() });
     assert.strictEqual(result.ok, false);
-    assert.strictEqual(
-      result.timedOut,
-      true,
-      'must include timedOut:true in result when the execGit call returns timedOut:true'
-    );
+    assert.equal(result.timedOut, false);
+    assert.equal(result.reason, 'manual_root_prune_required');
   });
 });
 
@@ -1580,9 +1560,7 @@ describe('executeWorktreeCreatePlan', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'git_timeout');
     const rollbackCall = calls.find((c) => c[0] === 'worktree' && c[1] === 'remove');
-    assert.ok(rollbackCall, 'a best-effort `git worktree remove --force` rollback must be attempted');
-    assert.ok(rollbackCall.includes('--force'));
-    assert.equal(rollbackCall[rollbackCall.length - 1], okFields.worktreePath);
+    assert.equal(rollbackCall, undefined, 'a timed-out create retains partial data and registrations');
   });
 
   test('FIX5 [data-loss guard]: worktree_add_failed (clean collision exit) does NOT roll back — leaves a pre-existing peer worktree untouched', () => {
@@ -1610,7 +1588,7 @@ describe('executeWorktreeCreatePlan', () => {
     );
   });
 
-  test('the timeout-path rollback never masks the original failure even if the rollback execGit itself throws', () => {
+  test('the timeout retains partial work and never invokes the armed removal fault', () => {
     // The throwing-rollback contract is only exercised on the SURVIVING
     // rollback call site (the timeout path) after FIX 5 removed the
     // clean-exit rollback.
@@ -1942,7 +1920,7 @@ describe('cmdWorktreeCreate', () => {
     });
   });
 
-  test('FIX1: a writeFile failure AFTER a successful git create rolls back the worktree and reports manifest_write_failed', () => {
+  test('FIX1: a writeFile failure AFTER git create retains the worktree and reports manifest_write_failed', () => {
     withExitCode(() => {
       const gitCalls = [];
       const result = cmdWorktreeCreate('/repo/main', okArgs, {
@@ -1957,9 +1935,8 @@ describe('cmdWorktreeCreate', () => {
       assert.equal(process.exitCode, 1);
       assert.ok(gitCalls.some((c) => c[0] === 'worktree' && c[1] === 'add'), 'the worktree must actually have been created before the write failed');
       const rollbackCall = gitCalls.find((c) => c[0] === 'worktree' && c[1] === 'remove');
-      assert.ok(rollbackCall, 'a git worktree remove --force rollback call must be made after a manifest write failure');
-      assert.ok(rollbackCall.includes('--force'));
-      assert.equal(rollbackCall[rollbackCall.length - 1], '/repo/.claude/worktrees/agent-a1');
+      assert.equal(rollbackCall, undefined, 'a manifest failure is not retirement authority');
+      assert.match(result.hint, /retained/);
     });
   });
 
@@ -2031,1614 +2008,20 @@ describe('cmdWorktreeCreate / cmdWorktreeRecordAgent — on-disk entry parity (#
 
 // ─── executeWorktreeWaveCleanupPlan ───────────────────────────────────────────
 
-describe('executeWorktreeWaveCleanupPlan', () => {
-
-  // ── #4415 regression ───────────────────────────────────────────────────────
-  // Claude Code removes a subagent's worktree the moment the subagent finishes
-  // with a clean tree. A gsd-executor that committed everything (SUMMARY.md
-  // included, under `commit_docs: true`) is exactly that case, so by the time
-  // the orchestrator reaches wave cleanup the directory is routinely gone while
-  // the branch it left behind is intact and mergeable.
-  //
-  // `git -C <gone> rev-parse` fails, and that failure was indistinguishable
-  // from a genuine branch mismatch: the entry blocked as `branch_mismatch`,
-  // NOTHING merged, and the branch was left dangling. If the directory instead
-  // disappeared after the merge landed, `git worktree remove` failed with "is
-  // not a working tree" and the entry blocked as `worktree_remove_failed`,
-  // leaving the branch undeleted.
-  //
-  // Every row below stubs the ABSENT shape the way real git behaves: the
-  // in-worktree calls fail, AND `git worktree list --porcelain` still reports the
-  // path -> branch binding while adding a `prunable` line. That porcelain output
-  // is how each scenario states what git knows — measured against real git, which
-  // keeps the binding after an `rm -rf` and marks the entry prunable. An earlier
-  // cut of these rows injected `existsSync` instead, which could only say
-  // present/absent and so could not distinguish a removed checkout from an
-  // unreadable one, nor a swapped branch from the expected one.
-  describe('#4415 regression: a worktree the harness already removed', () => {
-    const WT = '/repo/.claude/worktrees/agent-a1';
-    const BR = 'worktree-agent-a1';
-    const ABSENT_ERR = `fatal: cannot change to '${WT}': No such file or directory`;
-
-    // Removal is an errno question, not a `prunable` question — measured: a parent
-    // directory at mode 000 makes git print `prunable gitdir file points to
-    // non-existent location` for a checkout that is still there. So every row states
-    // the errno explicitly rather than letting a fake path fall through to the real
-    // filesystem.
-    const ENOENT = Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
-    const EACCES = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
-    const statGone = () => { throw ENOENT; };
-    const statUnreadable = () => { throw EACCES; };
-    const statPresent = () => ({ isDirectory: () => true });
-
-    function plan(entries) {
-      return {
-        ok: true,
-        repoRoot: '/repo/main',
-        action: 'cleanup_wave',
-        discovery: 'manifest',
-        entries,
-      };
-    }
-
-    const entry = { agent_id: 'a1', worktree_path: WT, branch: BR, expected_base: 'abc123' };
-
-    // The porcelain output git actually produces, parameterised over the four
-    // states these rows need to state:
-    //   registered:false -> git has no record of the path at all
-    //   branch:'other'   -> the path is registered to a DIFFERENT branch (the
-    //                       #3677 swap, now visible on the absent path too)
-    //   prunable:false   -> registered and NOT stale, i.e. the checkout is there
-    //                       (an unreadable directory keeps its gitdir file, so
-    //                       git declines to mark it prunable)
-    // The main worktree is always listed first, as real git lists it.
-    function porcelainFor({ registered = true, branch = BR, prunable = true } = {}) {
-      let out = 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n';
-      if (!registered) return out;
-      out += `\nworktree ${WT}\nHEAD deadbeef\n`;
-      if (branch) out += `branch refs/heads/${branch}\n`;
-      if (prunable) out += 'prunable gitdir file points to non-existent location\n';
-      return out;
-    }
-
-    // Stubs the repo-side calls that stay identical whether or not the worktree
-    // is present; every in-worktree (`-C <WT> ...`) call fails, as it does on a
-    // directory that is gone. `state` shapes the porcelain answer.
-    function absentWorktreeGit(overrides = {}, state = {}) {
-      return (args) => {
-        const key = args.join(' ');
-        if (Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key];
-        if (key === 'worktree list --porcelain') {
-          return { exitCode: 0, stdout: porcelainFor(state), stderr: '' };
-        }
-        if (key.startsWith(`-C ${WT} `)) return { exitCode: 128, stdout: '', stderr: ABSENT_ERR };
-        if (key === `rev-parse --verify --quiet refs/heads/${BR}`) {
-          return { exitCode: 0, stdout: 'deadbeef', stderr: '' };
-        }
-        if (key === `merge-base HEAD ${BR}`) return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        if (key === `diff --diff-filter=D --name-only HEAD...${BR}`) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith(`merge ${BR}`)) return { exitCode: 0, stdout: '', stderr: '' };
-        // git's real failure when the path is already gone.
-        if (key === `worktree remove ${WT} --force`) {
-          return { exitCode: 128, stdout: '', stderr: `fatal: '${WT}' is not a working tree` };
-        }
-        if (key === 'worktree prune') return { exitCode: 0, stdout: '', stderr: '' };
-        // Explicit, not swallowed by a catch-all: the #3707 unlock/retry path
-        // runs whenever `worktree remove` fails, and a silent success for it
-        // would hide a call this scenario should be stating. (Codex round 1.)
-        if (key === `worktree unlock ${WT}`) return { exitCode: 1, stdout: '', stderr: 'not locked' };
-        if (key === `branch -D ${BR}`) return { exitCode: 0, stdout: '', stderr: '' };
-        throw new Error(`unexpected git call: ${key}`);
-      };
-    }
-
-    test('merges the branch instead of blocking as branch_mismatch', () => {
-      // Acceptance criterion 1. Pre-fix this returned blocked/branch_mismatch
-      // with the merge never attempted.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => { calls.push(args.join(' ')); return absentWorktreeGit()(args); },
-      });
-
-      assert.equal(result.entries[0].status, 'merged_removed');
-      assert.equal(result.entries[0].reason, 'ok');
-      assert.equal(result.ok, true);
-      assert.ok(
-        calls.some((k) => k.startsWith(`merge ${BR}`)),
-        'the branch must actually be merged, not merely reported clean',
-      );
-      assert.ok(
-        calls.includes(`branch -D ${BR}`),
-        'the branch must be deleted — leaving it dangling is half the reported bug',
-      );
-    });
-
-    test('a path git does not list at all still blocks', () => {
-      // The absence must not become a silent pass. Identity comes from the
-      // porcelain binding, so an entry naming a path git has no record of has NO
-      // identity evidence and must block — it is not "absent", it is unknown.
-      //
-      // The override map returns VALUES, so a thrown-guard function placed in it
-      // is just handed back as a git result and never runs. Record the calls and
-      // assert on them instead. (Codex review round 1.)
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => {
-          calls.push(args.join(' '));
-          return absentWorktreeGit({}, { registered: false })(args);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-      assert.equal(
-        calls.some((k) => k.startsWith(`merge ${BR}`)), false,
-        'a path git does not list must never be merged',
-      );
-      assert.equal(
-        calls.some((k) => k === `branch -D ${BR}`), false,
-        'and must never be deleted',
-      );
-    });
-
-    test('#3677 swap control: an absent path registered to a DIFFERENT branch blocks', () => {
-      // Maintainer review on #4612, Blocker 3. `tests/gsd-quick-batch-merge-integration.test.cjs`
-      // covers the branch_mismatch swap control on the PRESENT path only, so the
-      // absent path could bypass it unnoticed — which is exactly how the earlier
-      // ref-based identity fallback slipped through a green suite.
-      //
-      // Git keeps the path -> branch binding after the checkout is removed, so the
-      // swap is still detectable here: the manifest names BR, git says the path is
-      // registered to a foreign branch. Identity loses, and nothing merges.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => {
-          calls.push(args.join(' '));
-          return absentWorktreeGit({}, { branch: 'worktree-agent-SOMEONE-ELSE' })(args);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-      assert.equal(
-        calls.some((k) => k.startsWith(`merge ${BR}`)), false,
-        'a swapped branch must never be merged through the absent path',
-      );
-      assert.equal(
-        calls.some((k) => k === `branch -D ${BR}`), false,
-        'and must never be deleted',
-      );
-      assert.equal(
-        calls.some((k) => k === 'worktree prune'), false,
-        'and its admin entry must not be tidied away either',
-      );
-    });
-
-    test('teardown prunes stale admin state instead of failing worktree_remove_failed', () => {
-      // Acceptance criterion 2 — the post-merge failure shape. `git worktree
-      // remove` on a vanished path cannot succeed; what is left behind is the
-      // .git/worktrees admin entry, which `prune` clears.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => { calls.push(args.join(' ')); return absentWorktreeGit()(args); },
-      });
-
-      assert.notEqual(result.entries[0].reason, 'worktree_remove_failed');
-      assert.ok(calls.includes('worktree prune'), 'stale admin state must be pruned');
-    });
-
-    test('a PRESENT worktree on the wrong branch still blocks with branch_mismatch', () => {
-      // Acceptance criterion 3 — the safety property this fix must not erode.
-      // The read SUCCEEDS here and simply disagrees, so neither the registration nor
-      // the errno is consulted and the behavior is byte-for-byte what it always was.
-      // (The pre-loop snapshot read still happens; it is wave setup, not this
-      // entry's decision.)
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statPresent,
-        execGit: (args) => {
-          const key = args.join(' ');
-          if (key === 'worktree list --porcelain') {
-            return { exitCode: 0, stdout: porcelainFor({ prunable: false }), stderr: '' };
-          }
-          if (key === `-C ${WT} rev-parse --abbrev-ref HEAD`) {
-            return { exitCode: 0, stdout: 'some-other-branch', stderr: '' };
-          }
-          throw new Error(`no further git call may run after a branch mismatch: ${key}`);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-    });
-
-    test('a PRESENT worktree whose in-worktree read fails still blocks with branch_mismatch', () => {
-      // The other half of criterion 3: a read failure on a directory that IS
-      // there is a real failure, not a harness removal. Without the presence
-      // check this row and the first row are the same input.
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statPresent,
-        execGit: (args) => {
-          const key = args.join(' ');
-          if (key === `-C ${WT} rev-parse --abbrev-ref HEAD`) {
-            return { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' };
-          }
-          // Registered and not prunable; the errno below is what actually proves
-          // the checkout is there.
-          if (key === 'worktree list --porcelain') {
-            return { exitCode: 0, stdout: porcelainFor({ prunable: false }), stderr: '' };
-          }
-          throw new Error(`no further git call may run after a branch mismatch: ${key}`);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-    });
-
-    test('the base and deletion gates still run for an absent worktree', () => {
-      // Criterion 4 — skipping the in-worktree checks must not skip the checks
-      // that protect repoRoot. Both of these run against repoRoot already.
-      const baseBlocked = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: absentWorktreeGit({
-          [`merge-base HEAD ${BR}`]: { exitCode: 0, stdout: 'unrelatedbase', stderr: '' },
-        }),
-      });
-      assert.equal(baseBlocked.entries[0].reason, 'base_mismatch');
-
-      const deletionBlocked = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: absentWorktreeGit({
-          [`diff --diff-filter=D --name-only HEAD...${BR}`]:
-            { exitCode: 0, stdout: 'src/deleted.ts\n', stderr: '' },
-        }),
-      });
-      assert.equal(deletionBlocked.entries[0].reason, 'branch_contains_deletions');
-    });
-
-    test('an absent worktree does not attempt a SUMMARY rescue', () => {
-      // A worktree the harness removed had a clean tree by definition, so there
-      // is nothing to rescue — and calling the rescue would read a path that is
-      // gone. `findSummaryFiles` is the rescue's entry point; it must not run.
-      let rescueAttempted = false;
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        findSummaryFiles: () => { rescueAttempted = true; return []; },
-        execGit: absentWorktreeGit(),
-      });
-
-      assert.equal(rescueAttempted, false, 'the rescue must be skipped, not merely survive');
-      assert.equal(result.entries[0].status, 'merged_removed');
-    });
-
-
-    // ── Transition coverage (Codex review round 1) ──────────────────────────
-    // Every row above holds presence CONSTANT — absent throughout, or present
-    // throughout. The bug this fix addresses is caused by a directory that
-    // disappears WHILE cleanup runs, so a constant-presence stub cannot reach
-    // the windows that matter.
-    //
-    // The transition is driven by the GIT results, not by the presence stub: the
-    // branch read succeeds and the `status` read then fails, which is exactly
-    // "removed in between". The stub only has to answer the probe that follows.
-    // An earlier cut used a probe-COUNTING helper to place the removal at a
-    // chosen probe index; that coupled the tests to how many times the code
-    // probes — brittle, and wrong in spirit, since the SUMMARY rescue shares the
-    // same injected seam. (Codex review round 2 agreed; helper removed.)
-
-    test('a worktree removed AFTER the branch read merges instead of blocking dirty', () => {
-      // branch read succeeds (present) → harness removes it while the repoRoot
-      // base/deletion/scope checks run → `status` fails. Before this round that
-      // failure blocked `worktree_dirty` with nothing merged: the same bug as
-      // the branch read, one window later.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        // The branch read SUCCEEDS without consulting git's worktree list — that
-        // only happens when an in-worktree read fails — so the only porcelain read
-        // reached is the one after the failed `status`, and by then git reports the
-        // entry prunable.
-        execGit: (args) => {
-          const key = args.join(' ');
-          calls.push(key);
-          if (key === `-C ${WT} rev-parse --abbrev-ref HEAD`) {
-            return { exitCode: 0, stdout: BR, stderr: '' };
-          }
-          if (key.startsWith(`-C ${WT} status`)) {
-            return { exitCode: 128, stdout: '', stderr: ABSENT_ERR };
-          }
-          if (key === 'worktree list --porcelain') {
-            return { exitCode: 0, stdout: porcelainFor(), stderr: '' };
-          }
-          if (key === `merge-base HEAD ${BR}`) return { exitCode: 0, stdout: 'abc123', stderr: '' };
-          if (key === `diff --diff-filter=D --name-only HEAD...${BR}`) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          if (key.startsWith(`merge ${BR}`)) return { exitCode: 0, stdout: '', stderr: '' };
-          if (key === `worktree remove ${WT} --force`) {
-            return { exitCode: 128, stdout: '', stderr: `fatal: '${WT}' is not a working tree` };
-          }
-          if (key === `worktree unlock ${WT}`) return { exitCode: 1, stdout: '', stderr: 'not locked' };
-          if (key === 'worktree prune') return { exitCode: 0, stdout: '', stderr: '' };
-          if (key === `branch -D ${BR}`) return { exitCode: 0, stdout: '', stderr: '' };
-          throw new Error(`unexpected git call: ${key}`);
-        },
-      });
-
-      assert.notEqual(result.entries[0].reason, 'worktree_dirty');
-      assert.equal(result.entries[0].status, 'merged_removed');
-      assert.ok(calls.some((k) => k.startsWith(`merge ${BR}`)), 'the branch must be merged');
-    });
-
-    test('a PRESENT worktree whose status query fails still blocks worktree_dirty', () => {
-      // The other half: the read failed and the directory is still there, so
-      // this is a real failure and must keep blocking. Without the presence
-      // probe this row and the one above are the same input.
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statPresent,
-        execGit: (args) => {
-          const key = args.join(' ');
-          if (key === `-C ${WT} rev-parse --abbrev-ref HEAD`) {
-            return { exitCode: 0, stdout: BR, stderr: '' };
-          }
-          if (key.startsWith(`-C ${WT} status`)) {
-            return { exitCode: 128, stdout: '', stderr: 'fatal: something else broke' };
-          }
-          // Registered and NOT prunable — the directory is still there, so the
-          // status failure is a real failure and must keep blocking.
-          if (key === 'worktree list --porcelain') {
-            return { exitCode: 0, stdout: porcelainFor({ prunable: false }), stderr: '' };
-          }
-          if (key === `merge-base HEAD ${BR}`) return { exitCode: 0, stdout: 'abc123', stderr: '' };
-          if (key === `diff --diff-filter=D --name-only HEAD...${BR}`) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          throw new Error(`nothing may run after a dirty block: ${key}`);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'worktree_dirty');
-    });
-
-    test('a worktree removed between the clean status read and teardown still tears down', () => {
-      // The narrowest window: everything succeeds against a present worktree,
-      // the merge lands, and only then does the directory go. Teardown re-reads
-      // presence precisely so this does not report worktree_remove_failed after
-      // a successful merge.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => {
-          const key = args.join(' ');
-          calls.push(key);
-          if (key === `-C ${WT} rev-parse --abbrev-ref HEAD`) {
-            return { exitCode: 0, stdout: BR, stderr: '' };
-          }
-          if (key.startsWith(`-C ${WT} status`)) return { exitCode: 0, stdout: '', stderr: '' };
-          // Removed only after the clean status read: by teardown git calls it prunable.
-          if (key === 'worktree list --porcelain') {
-            return { exitCode: 0, stdout: porcelainFor(), stderr: '' };
-          }
-          if (key === `merge-base HEAD ${BR}`) return { exitCode: 0, stdout: 'abc123', stderr: '' };
-          if (key === `diff --diff-filter=D --name-only HEAD...${BR}`) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          if (key.startsWith(`merge ${BR}`)) return { exitCode: 0, stdout: '', stderr: '' };
-          if (key === `worktree remove ${WT} --force`) {
-            return { exitCode: 128, stdout: '', stderr: `fatal: '${WT}' is not a working tree` };
-          }
-          if (key === `worktree unlock ${WT}`) return { exitCode: 1, stdout: '', stderr: 'not locked' };
-          if (key === 'worktree prune') return { exitCode: 0, stdout: '', stderr: '' };
-          if (key === `branch -D ${BR}`) return { exitCode: 0, stdout: '', stderr: '' };
-          throw new Error(`unexpected git call: ${key}`);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'merged_removed');
-      assert.ok(calls.includes('worktree prune'));
-      assert.ok(calls.includes(`branch -D ${BR}`), 'the branch must still be deleted');
-    });
-
-    test('a blocked absent entry does not abort the entries after it (#2852)', () => {
-      // Per-entry isolation across the new branches: entry 1 blocks because git
-      // does not list its path at all, entry 2 must still merge and nothing may
-      // land in `pending`.
-      const e2 = { agent_id: 'a2', worktree_path: '/repo/.claude/worktrees/agent-a2', branch: 'worktree-agent-a2', expected_base: 'abc123' };
-      const result = executeWorktreeWaveCleanupPlan(plan([entry, e2]), {
-        statSync: statGone,
-        execGit: (args) => {
-          const key = args.join(' ');
-          if (key.startsWith(`-C ${WT} `) || key.startsWith(`-C ${e2.worktree_path} `)) {
-            return { exitCode: 128, stdout: '', stderr: ABSENT_ERR };
-          }
-          if (key === 'worktree list --porcelain') {
-            // entry 1's path is absent from the list entirely (blocks); entry 2 is
-            // registered to its own branch and prunable (the absent case).
-            return {
-              exitCode: 0,
-              stdout: 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-                + `\nworktree ${e2.worktree_path}\nHEAD cafebabe\nbranch refs/heads/${e2.branch}\n`
-                + 'prunable gitdir file points to non-existent location\n',
-              stderr: '',
-            };
-          }
-          if (key === `merge-base HEAD ${e2.branch}`) return { exitCode: 0, stdout: 'abc123', stderr: '' };
-          if (key === `diff --diff-filter=D --name-only HEAD...${e2.branch}`) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          if (key.startsWith(`merge ${e2.branch}`)) return { exitCode: 0, stdout: '', stderr: '' };
-          if (key === `worktree remove ${e2.worktree_path} --force`) {
-            return { exitCode: 128, stdout: '', stderr: 'fatal: not a working tree' };
-          }
-          if (key === `worktree unlock ${e2.worktree_path}`) return { exitCode: 1, stdout: '', stderr: 'not locked' };
-          if (key === 'worktree prune') return { exitCode: 0, stdout: '', stderr: '' };
-          if (key === `branch -D ${e2.branch}`) return { exitCode: 0, stdout: '', stderr: '' };
-          throw new Error(`unexpected git call: ${key}`);
-        },
-      });
-
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-      assert.equal(result.entries[1].status, 'merged_removed');
-      assert.deepEqual(result.pending, [], 'a blocked entry must never strand the ones after it');
-    });
-
-    test('a relative worktree_path is matched against the porcelain by resolving it against repoRoot', () => {
-      // `normalizeCleanupManifestEntry` takes worktree_path from the manifest
-      // verbatim, so it can be relative, while `git worktree list --porcelain`
-      // always reports ABSOLUTE paths. Matching the two therefore has to resolve
-      // the manifest path the same way git does — against `plan.repoRoot`, which
-      // is what every git call already does by passing `-C <path>` with
-      // `cwd: plan.repoRoot`. Resolving against the PROCESS working directory
-      // instead would fail to match, and the entry would block as an unknown path.
-      //
-      // This also carries the win32 point from the earlier cut of this row
-      // (verified on CI, not here — macOS has no current drive): `path.resolve`
-      // prepends the current drive to a drive-less absolute path where `path.join`
-      // does not. Both sides of this comparison go through `path.resolve`, so they
-      // agree on any platform.
-      const relEntry = {
-        agent_id: 'a1',
-        worktree_path: '.claude/worktrees/agent-a1',
-        branch: BR,
-        expected_base: 'abc123',
-      };
-      // The porcelain reports the absolute path; only a repoRoot-resolved match
-      // recognises it as this entry.
-      const absPath = path.resolve('/repo/main', relEntry.worktree_path);
-      const porcelain = 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-        + `\nworktree ${absPath}\nHEAD deadbeef\nbranch refs/heads/${BR}\n`
-        + 'prunable gitdir file points to non-existent location\n';
-      const git = (listOutput) => (args) => {
-        const key = args.join(' ');
-        if (key === 'worktree list --porcelain') {
-          return { exitCode: 0, stdout: listOutput, stderr: '' };
-        }
-        if (key.startsWith(`-C ${relEntry.worktree_path} `)) {
-          return { exitCode: 128, stdout: '', stderr: ABSENT_ERR };
-        }
-        if (key === `merge-base HEAD ${BR}`) return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        if (key === `diff --diff-filter=D --name-only HEAD...${BR}`) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith(`merge ${BR}`)) return { exitCode: 0, stdout: '', stderr: '' };
-        if (key === 'worktree prune') return { exitCode: 0, stdout: '', stderr: '' };
-        if (key === `branch -D ${BR}`) return { exitCode: 0, stdout: '', stderr: '' };
-        throw new Error(`unexpected git call: ${key}`);
-      };
-
-      const matched = executeWorktreeWaveCleanupPlan(plan([relEntry]), { execGit: git(porcelain) });
-      assert.equal(matched.entries[0].status, 'merged_removed',
-        'the relative manifest path must match the absolute porcelain path');
-      assert.equal(matched.entries[0].reason, 'ok');
-
-      // Negative control: the same relative path resolved against a DIFFERENT root
-      // is a different entry, and must not match. Without this the row would pass
-      // on any implementation that matched loosely (by basename, say).
-      const elsewhere = 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-        + `\nworktree ${path.resolve('/somewhere/else', relEntry.worktree_path)}\nHEAD deadbeef\nbranch refs/heads/${BR}\n`
-        + 'prunable gitdir file points to non-existent location\n';
-      const unmatched = executeWorktreeWaveCleanupPlan(plan([relEntry]), { execGit: git(elsewhere) });
-      assert.equal(unmatched.entries[0].status, 'blocked',
-        'a porcelain path under a different root is not this entry');
-      assert.equal(unmatched.entries[0].reason, 'branch_mismatch');
-    });
-
-    test('a genuine prune failure after the merge still reports worktree_remove_failed', () => {
-      // The fallback must not swallow a real teardown failure — the merge has
-      // already landed, and the operator needs to know the admin state is stale.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => {
-          calls.push(args.join(' '));
-          return absentWorktreeGit({
-            'worktree prune': { exitCode: 1, stdout: '', stderr: 'prune exploded' },
-          })(args);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'worktree_remove_failed');
-      assert.equal(result.ok, false);
-      // A blocked teardown must not go on to delete the branch — the same
-      // property the pre-existing `does not delete a branch when worktree
-      // removal fails` row pins for the present-worktree path. (Codex round 2.)
-      assert.equal(
-        calls.some((k) => k === `branch -D ${BR}`), false,
-        'branch deletion must be withheld when teardown blocked',
-      );
-    });
-
-    test('#4612 Major: a worktree that REAPPEARS before teardown blocks instead of losing its branch', () => {
-      // Maintainer review on #4612. Presence is classified once, at identification,
-      // and the base/deletion/scope gates plus the merge all run before teardown —
-      // a window in which a worktree can come back. The previous defence was
-      // "prune only, and a live checkout would make `branch -D` fail visibly",
-      // which holds only while prune's staleness check is not fooled by the same
-      // visibility gap that produced the false absence. If it is, prune succeeds,
-      // `branch -D` succeeds, and a live worktree loses its branch — destroying
-      // state where the original bug merely blocked.
-      //
-      // This is the transition the older row could not model: the stat answers
-      // "gone" at identification and "present" at teardown, which is exactly the
-      // race. Both teardown verbs must be withheld.
-      const calls = [];
-      let statCalls = 0;
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: () => {
-          statCalls += 1;
-          // First call (identification): gone. Later (teardown): back.
-          if (statCalls === 1) throw ENOENT;
-          return { isDirectory: () => true };
-        },
-        execGit: (args) => { calls.push(args.join(' ')); return absentWorktreeGit()(args); },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'worktree_remove_failed');
-      assert.match(result.entries[0].stderr || '', /reappeared/i);
-      assert.equal(
-        calls.includes('worktree prune'), false,
-        'a reappeared worktree must not be pruned — prune may clear the admin entry and unblock branch -D',
-      );
-      assert.equal(
-        calls.includes(`branch -D ${BR}`), false,
-        'and its branch must never be deleted: that is the unrecoverable outcome this guards',
-      );
-      assert.equal(
-        calls.some((k) => k === `worktree remove ${WT} --force`), false,
-        'nor may it be force-removed',
-      );
-    });
-
-    test('an entry accepted as ABSENT tears down by prune, never by force-remove', () => {
-      // Codex review round 2, P2. An absent entry is merged WITHOUT the rescue
-      // and dirty checks, on the evidence that it had no checkout. If one is
-      // recreated at that path before teardown, `worktree remove --force` would
-      // delete contents that never passed either check — strictly worse than the
-      // bug this PR fixes. Teardown for such an entry must prune, never force.
-      //
-      // Scope (Codex review round 3, P3): this row proves the UNCONDITIONAL
-      // contract — no force-remove is ever issued for an absent-accepted entry —
-      // which is what makes a reappearance harmless. It does NOT model the
-      // reappearance transition itself: on this path production probes presence
-      // once, at identification, so a stub that flips on a later call would never
-      // be asked. The row was previously named for a transition it does not
-      // exercise; the assertions below are unchanged and still meaningful.
-      const calls = [];
-      executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: (args) => {
-          const key = args.join(' ');
-          calls.push(key);
-          return absentWorktreeGit()(args);
-        },
-      });
-
-      assert.equal(
-        calls.some((k) => k === `worktree remove ${WT} --force`), false,
-        'a forced removal must never run for an entry accepted as absent',
-      );
-      assert.ok(calls.includes('worktree prune'), 'teardown still clears stale admin state');
-    });
-
-    test('an UNREADABLE worktree is not accepted as absent — it still blocks', () => {
-      // The row that encodes the measurement, and the reason `prunable` alone is not
-      // the removal test (Codex review round 4, P2). With a parent directory at mode
-      // 000, real git prints `prunable gitdir file points to non-existent location`
-      // for a checkout that is STILL THERE — it cannot traverse the parent, so it
-      // reports the gitdir file as missing. Verified directly against git, not
-      // reasoned about.
-      //
-      // So this row hands the implementation the hardest shape: git says prunable,
-      // the branch binding matches, and only the errno reveals that the directory is
-      // unreadable rather than gone. Accepting it as absent would skip the rescue and
-      // the dirty check and merge over uncommitted work — exactly what blocked before
-      // this PR, and what must keep blocking.
-      const calls = [];
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statUnreadable,
-        execGit: (args) => { calls.push(args.join(' ')); return absentWorktreeGit()(args); },
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-      assert.equal(result.ok, false);
-      assert.equal(
-        calls.some((k) => k.startsWith(`merge ${BR}`)), false,
-        'an unreadable worktree must not be merged — the dirty check never ran',
-      );
-      assert.equal(
-        calls.some((k) => k === 'worktree prune' || k === `worktree remove ${WT} --force`), false,
-        'no teardown may run for an entry that was never accepted',
-      );
-    });
-
-    test('#4415 P1: entry 1\'s repository-wide prune must not strand entry 2', () => {
-      // Codex review round 4, P1, and the defect the porcelain rework introduced by
-      // reading the list per entry. `git worktree prune` is repository-wide: measured
-      // on real git, two removed worktrees plus ONE prune leaves neither registration
-      // behind. So entry 1's teardown erases the identity evidence entry 2 needs, and
-      // a per-entry read would merge the first harness-removed worktree of a wave and
-      // block every one after it as branch_mismatch — worse than the bug being fixed,
-      // because a wave of parallel executors is the normal case.
-      //
-      // The porcelain here behaves as git does: both entries registered and prunable
-      // until a `worktree prune` runs, and empty of stale entries afterwards.
-      const e2 = { agent_id: 'a2', worktree_path: '/repo/.claude/worktrees/agent-a2', branch: 'worktree-agent-a2', expected_base: 'abc123' };
-      let pruned = false;
-      const listBoth = 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-        + `\nworktree ${WT}\nHEAD deadbeef\nbranch refs/heads/${BR}\n`
-        + 'prunable gitdir file points to non-existent location\n'
-        + `\nworktree ${e2.worktree_path}\nHEAD cafebabe\nbranch refs/heads/${e2.branch}\n`
-        + 'prunable gitdir file points to non-existent location\n';
-      const listAfterPrune = 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n';
-
-      const result = executeWorktreeWaveCleanupPlan(plan([entry, e2]), {
-        statSync: statGone,
-        execGit: (args) => {
-          const key = args.join(' ');
-          if (key === 'worktree list --porcelain') {
-            return { exitCode: 0, stdout: pruned ? listAfterPrune : listBoth, stderr: '' };
-          }
-          if (key === 'worktree prune') {
-            pruned = true;                      // as real git does: clears BOTH entries
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          if (key.startsWith(`-C ${WT} `) || key.startsWith(`-C ${e2.worktree_path} `)) {
-            return { exitCode: 128, stdout: '', stderr: ABSENT_ERR };
-          }
-          if (key === `merge-base HEAD ${BR}` || key === `merge-base HEAD ${e2.branch}`) {
-            return { exitCode: 0, stdout: 'abc123', stderr: '' };
-          }
-          if (key.startsWith('diff --diff-filter=D --name-only HEAD...')) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          if (key.startsWith(`merge ${BR}`) || key.startsWith(`merge ${e2.branch}`)) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          if (key === `branch -D ${BR}` || key === `branch -D ${e2.branch}`) {
-            return { exitCode: 0, stdout: '', stderr: '' };
-          }
-          throw new Error(`unexpected git call: ${key}`);
-        },
-      });
-
-      assert.equal(result.entries[0].status, 'merged_removed', 'entry 1 merges');
-      assert.equal(
-        result.entries[1].status, 'merged_removed',
-        'entry 2 must ALSO merge — its registration was captured before entry 1 pruned',
-      );
-      assert.equal(result.entries[1].reason, 'ok');
-      assert.equal(result.ok, true);
-      assert.deepEqual(result.pending, []);
-    });
-
-    test('an entry accepted as absent warns, quoting git\'s own prunable reason', () => {
-      // Maintainer review round 3, both Medium findings. "The harness cleanly removed
-      // a finished executor" and "something else removed this path" are the SAME
-      // signature to this code, so accepting the routine case silently would take the
-      // operator's only signal away from the case that is not routine. Pre-fix, every
-      // anomalous absence blocked loudly.
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: absentWorktreeGit(),
-      });
-
-      assert.equal(result.entries[0].status, 'merged_removed', 'the entry still merges — this is advisory, not a gate');
-      assert.equal(result.entries[0].reason, 'ok');
-
-      const warned = result.entries[0].warnings
-        .filter((w) => w.code === WAVE_CLEANUP_WARNING.ACCEPTED_ABSENT_WORKTREE);
-      assert.equal(warned.length, 1, `expected exactly one accepted-absent warning: ${JSON.stringify(result.entries[0].warnings)}`);
-      assert.equal(warned[0].branch, BR);
-      assert.equal(warned[0].path, WT);
-      assert.equal(
-        warned[0].detail, 'gitdir file points to non-existent location',
-        'the warning must quote git\'s own prunable reason, not paraphrase it',
-      );
-      assert.ok(
-        result.warnings.some((w) => w.code === WAVE_CLEANUP_WARNING.ACCEPTED_ABSENT_WORKTREE),
-        'and it must reach the wave-level warnings too, as the scope advisory does',
-      );
-    });
-
-    test('a bare `prunable` marker (no reason text) is accepted, and its detail is null', () => {
-      // git emits `prunable` bare in some versions and `prunable <reason>` in others.
-      // An earlier cut of this row asserted only `merged_removed`, which is driven by
-      // confirmedGone and the branch match — NOT by the bare-marker parsing it claimed
-      // to cover, so a regression in that parsing would not have reddened it
-      // (maintainer review round 3). Asserting the parsed value closes that.
-      const bare = 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-        + `\nworktree ${WT}\nHEAD deadbeef\nbranch refs/heads/${BR}\nprunable\n`;
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: absentWorktreeGit({ 'worktree list --porcelain': { exitCode: 0, stdout: bare, stderr: '' } }),
-      });
-
-      assert.equal(result.entries[0].status, 'merged_removed');
-      assert.equal(result.entries[0].reason, 'ok');
-
-      const warned = result.entries[0].warnings
-        .filter((w) => w.code === WAVE_CLEANUP_WARNING.ACCEPTED_ABSENT_WORKTREE);
-      assert.equal(warned.length, 1, 'a bare marker is still an acceptance, so it still warns');
-      assert.equal(
-        warned[0].detail, null,
-        `a bare marker carries no reason, so detail is null rather than the literal "prunable": ${JSON.stringify(warned[0])}`,
-      );
-    });
-
-    test('a worktree list that cannot be read blocks rather than guessing', () => {
-      // Fail-safe: with no registration evidence there is no identity, so the entry
-      // must block. Noted as untested in Codex review round 4.
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: absentWorktreeGit({ 'worktree list --porcelain': { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } }),
-      });
-
-      assert.equal(result.entries[0].status, 'blocked');
-      assert.equal(result.entries[0].reason, 'branch_mismatch');
-      assert.equal(result.ok, false);
-    });
-
-    test('a genuinely absent path (git marks it prunable) is still accepted as absent', () => {
-      // The other side of the row above: the discrimination must not over-block.
-      // A `prunable` line is git's own statement of confirmed staleness, which is
-      // exactly the case this PR exists to handle, so the entry must still merge
-      // and tear down.
-      const result = executeWorktreeWaveCleanupPlan(plan([entry]), {
-        statSync: statGone,
-        execGit: absentWorktreeGit(),
-      });
-
-      assert.equal(result.entries[0].status, 'merged_removed');
-      assert.equal(result.entries[0].reason, 'ok');
-      assert.equal(result.ok, true);
-    });
-  });
-  test('#1265 accepts a merge-base listed in allowed_bases even when expected_base is the plan commit', () => {
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'plancommit',
-        allowed_bases: ['plancommit', 'parentcommit'],
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'parentcommit', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-    });
-
-    assert.equal(result.ok, true);
-    assert.equal(result.entries[0].status, 'merged_removed');
-  });
-
-  test('#1265 still blocks a merge-base outside expected_base and allowed_bases', () => {
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'plancommit',
-        allowed_bases: ['plancommit', 'parentcommit'],
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'unrelatedbase', stderr: '' };
-        }
-        throw new Error(`unexpected git call after rejected base: ${key}`);
-      },
-    });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'base_mismatch');
-  });
-
-  test('does not delete a branch when worktree removal fails', () => {
-    const calls = [];
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      // #4415: this row's premise is a worktree that IS present and whose removal
-      // genuinely fails (locked). Cleanup now distinguishes that from a worktree the
-      // harness already deleted — which prunes instead of blocking — so the premise
-      // has to be stated rather than inferred from a path that never existed on disk.
-      // Stated on the two axes the implementation actually reads: git still registers
-      // the path (so identity holds) and the directory stats successfully (so it is
-      // present, not removed). An earlier cut left an `existsSync` stub here, which
-      // nothing consults any more — the row then blocked because registration was
-      // unknown, not because of its stated locked-removal premise. (Codex round 4, P3.)
-      statSync: () => ({ isDirectory: () => true }),
-      execGit: (args, opts) => {
-        calls.push({ cwd: opts && opts.cwd, args });
-        const key = args.join(' ');
-        if (key === 'worktree list --porcelain') {
-          return {
-            exitCode: 0,
-            stdout: 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-              + '\nworktree /repo/.claude/worktrees/agent-a1\nHEAD deadbeef\nbranch refs/heads/worktree-agent-a1\n',
-            stderr: '',
-          };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 1, stdout: '', stderr: 'locked' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          throw new Error('branch deletion must not run after remove failure');
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'worktree_remove_failed');
-    assert.equal(calls.some((call) => call.args.join(' ') === 'branch -D worktree-agent-a1'), false);
-  });
-
-  // #2852: this test previously asserted the wave-abort BUG — that a merge conflict on
-  // entry 1 left entry 2 stranded in `pending`, untouched. That is exactly the defect
-  // reported in #2852 (part b): one blocked branch must not abort the rest of the wave.
-  // The corrected contract is exercised as three rows of the #2852 test matrix below:
-  // "an ordinary merge_failed without entering a merge state" (no MERGE_HEAD was ever
-  // created — the common case, e.g. "your local changes would be overwritten" — isolate),
-  // "a recovered merge_failed" (a real conflict, `git merge --abort` clears MERGE_HEAD —
-  // isolate), and "an unrecoverable merge_failed" (MERGE_HEAD is STILL present after the
-  // abort attempt — the one case that genuinely corrupts repoRoot for every remaining
-  // entry — halt).
-  //
-  // CORRECTNESS NOTE (caught in review): `git merge --abort`'s own exit code is NOT the
-  // right signal for "unrecoverable". git legitimately fails abort with "There is no
-  // merge to abort (MERGE_HEAD missing)?" in the SAFE case too — whenever the original
-  // merge never entered a merge state in the first place (no conflict, just a refused
-  // merge). An earlier version of this fix trusted abort's exit code alone, which
-  // misclassified that common safe case as unrecoverable and stranded the rest of the
-  // wave — the exact bug #2852 exists to fix, reintroduced through the recovery path.
-  // The fix checks repoRoot's ACTUAL state via `git rev-parse --verify -q MERGE_HEAD`.
-
-  test('#2852: an ordinary merge_failed without entering a merge state does not abort the wave', () => {
-    // No MERGE_HEAD is ever created here — git refuses the merge outright (e.g. local
-    // changes would be overwritten). `git merge --abort` therefore legitimately fails
-    // with "There is no merge to abort", but repoRoot's tree was never touched, so this
-    // is an ORDINARY per-entry failure — entry 2 must still be evaluated and merge.
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [
-        {
-          agent_id: 'a1',
-          worktree_path: '/repo/.claude/worktrees/agent-a1',
-          branch: 'worktree-agent-a1',
-          expected_base: 'abc123',
-        },
-        {
-          agent_id: 'a2',
-          worktree_path: '/repo/.claude/worktrees/agent-a2',
-          branch: 'worktree-agent-a2',
-          expected_base: 'abc123',
-        },
-      ],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          // No conflict — git refuses the merge outright. No MERGE_HEAD is created.
-          return { exitCode: 1, stdout: '', stderr: 'error: Your local changes to the following files would be overwritten by merge' };
-        }
-        if (key === 'merge --abort') {
-          // Legitimately fails — there was never a merge to abort. NOT a signal of
-          // repo corruption; the wave-isolation decision must not trust this exit code.
-          return { exitCode: 1, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' };
-        }
-        if (key === 'rev-parse --verify -q MERGE_HEAD') {
-          // repoRoot is NOT mid-merge — the ref simply doesn't exist.
-          return { exitCode: 1, stdout: '', stderr: '' };
-        }
-        // Entry 2 must still be evaluated independently.
-        if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a2', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a2') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a2') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a2 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a2')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a2 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a2') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false, 'overall ok is false because entry 1 blocked');
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'merge_failed');
-    assert.equal(result.entries[1].status, 'merged_removed', 'entry 2 must still merge — no merge state was ever entered');
-    assert.deepEqual(result.pending, [], 'pending must be empty — every entry was evaluated');
-  });
-
-  test('#2852: a recovered merge_failed isolates to entry 1, entry 2 still merges', () => {
-    const calls = [];
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [
-        {
-          agent_id: 'a1',
-          worktree_path: '/repo/.claude/worktrees/agent-a1',
-          branch: 'worktree-agent-a1',
-          expected_base: 'abc123',
-        },
-        {
-          agent_id: 'a2',
-          worktree_path: '/repo/.claude/worktrees/agent-a2',
-          branch: 'worktree-agent-a2',
-          expected_base: 'abc123',
-        },
-      ],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        calls.push(key);
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          // A real conflict — MERGE_HEAD IS created.
-          return { exitCode: 1, stdout: '', stderr: 'CONFLICT' };
-        }
-        if (key === 'merge --abort') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'rev-parse --verify -q MERGE_HEAD') {
-          // abort succeeded — repoRoot is no longer mid-merge.
-          return { exitCode: 1, stdout: '', stderr: '' };
-        }
-        // Entry 2 must still be evaluated independently after recovery.
-        if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a2', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a2') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a2') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a2 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a2')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a2 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a2') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false, 'overall ok is false because entry 1 blocked');
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'merge_failed');
-    assert.equal(result.entries[1].status, 'merged_removed', 'entry 2 must still merge — isolation, not wave-abort');
-    assert.deepEqual(result.pending, [], 'pending must be empty — every entry was evaluated');
-    assert.ok(calls.includes('merge --abort'), 'a failed merge must attempt recovery with git merge --abort');
-  });
-
-  test('#2852: an unrecoverable merge_failed (repoRoot STILL mid-merge after abort) legitimately halts the remaining wave', () => {
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [
-        {
-          agent_id: 'a1',
-          worktree_path: '/repo/.claude/worktrees/agent-a1',
-          branch: 'worktree-agent-a1',
-          expected_base: 'abc123',
-        },
-        {
-          agent_id: 'a2',
-          worktree_path: '/repo/.claude/worktrees/agent-a2',
-          branch: 'worktree-agent-a2',
-          expected_base: 'abc123',
-        },
-      ],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 1, stdout: '', stderr: 'CONFLICT' };
-        }
-        if (key === 'merge --abort') {
-          return { exitCode: 1, stdout: '', stderr: 'fatal: unable to abort' };
-        }
-        if (key === 'rev-parse --verify -q MERGE_HEAD') {
-          // repoRoot IS genuinely still mid-merge — the abort attempt did not clear it.
-          // This, not abort's own exit code, is what legitimately halts the wave.
-          return { exitCode: 0, stdout: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', stderr: '' };
-        }
-        throw new Error(`unexpected git call — repoRoot is unrecoverable, entry 2 must not be evaluated: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'merge_failed');
-    assert.equal(result.entries.length, 1, 'entry 2 must not have been evaluated at all');
-    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
-  });
-
-  test('#2852: an unverifiable repo state after merge_failed (rev-parse times out) fails closed and halts the wave', () => {
-    // Boundary coverage for repoRootStillMidMerge's fail-closed branches (caught in
-    // review as an untested mutation-survivor risk): when the post-abort
-    // `git rev-parse --verify -q MERGE_HEAD` check itself cannot be trusted — here, it
-    // times out — the module's existing degrade-not-throw contract applies: treat the
-    // repo state as unknown-therefore-unsafe (still mid-merge) rather than guessing
-    // it's clean. Entry 2 must NOT be evaluated.
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [
-        {
-          agent_id: 'a1',
-          worktree_path: '/repo/.claude/worktrees/agent-a1',
-          branch: 'worktree-agent-a1',
-          expected_base: 'abc123',
-        },
-        {
-          agent_id: 'a2',
-          worktree_path: '/repo/.claude/worktrees/agent-a2',
-          branch: 'worktree-agent-a2',
-          expected_base: 'abc123',
-        },
-      ],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 1, stdout: '', stderr: 'CONFLICT' };
-        }
-        if (key === 'merge --abort') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'rev-parse --verify -q MERGE_HEAD') {
-          // Cannot determine repo state — the check itself timed out.
-          return {
-            exitCode: null,
-            stdout: '',
-            stderr: '',
-            timedOut: true,
-            signal: 'SIGTERM',
-            error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
-          };
-        }
-        throw new Error(`unexpected git call — repo state is unverified, entry 2 must not be evaluated: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'merge_failed');
-    assert.equal(result.entries.length, 1, 'entry 2 must not have been evaluated — state is unverified, fail closed');
-    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
-  });
-
-  test('#2852: an unverifiable repo state after merge_failed (rev-parse errors unexpectedly) fails closed and halts the wave', () => {
-    // Same boundary as the timeout case, but for a non-0/1 exit code (e.g. a fatal git
-    // error, code 128) from the post-abort MERGE_HEAD check — neither "found" (0) nor
-    // the well-known "not found" (1). Must also fail closed.
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [
-        {
-          agent_id: 'a1',
-          worktree_path: '/repo/.claude/worktrees/agent-a1',
-          branch: 'worktree-agent-a1',
-          expected_base: 'abc123',
-        },
-        {
-          agent_id: 'a2',
-          worktree_path: '/repo/.claude/worktrees/agent-a2',
-          branch: 'worktree-agent-a2',
-          expected_base: 'abc123',
-        },
-      ],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 1, stdout: '', stderr: 'CONFLICT' };
-        }
-        if (key === 'merge --abort') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'rev-parse --verify -q MERGE_HEAD') {
-          // A fatal git error (e.g. corrupted repo) — neither the "found" (0) nor the
-          // well-known "not found" (1) exit code.
-          return { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' };
-        }
-        throw new Error(`unexpected git call — repo state is unverified, entry 2 must not be evaluated: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'merge_failed');
-    assert.equal(result.entries.length, 1, 'entry 2 must not have been evaluated — state is unverified, fail closed');
-    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
-  });
-
-  // #4721: the wave's `git merge --no-ff` is the one call in the gauntlet that runs
-  // user hooks, and it used to inherit the module's 10 s plumbing timeout. A repo
-  // whose `pre-merge-commit` hook is a test-suite gate lost every executor merge:
-  // the kill was reported as a plain `merge_failed` carrying the hook's partial
-  // stdout, and — the dangerous half — it landed after git had staged the merged
-  // tree but before it wrote MERGE_HEAD, so the #2852 mid-merge check read the
-  // primary as clean while the executor's whole diff sat staged against the old
-  // HEAD. Committing from that state squashes the executor's history.
-
+// The old synthetic cleanup gauntlet assumed a manifest and a branch name
+// authorized force removal and repository-wide pruning. Its preservation and
+// race controls now use real fixtures in forensic-gsd-custody.test.cjs. Keep
+// the real hook-budget/refusal controls here with explicit native owner proof.
+describe('executeWorktreeWaveCleanupPlan: accepted merge error handling', () => {
   const fs = require('node:fs');
+  const { authorizeFixtureEntry } = require('./helpers/custody-fixture.cjs');
   const WAVE_WARNING = require(WORKTREE_SAFETY_PATH).WAVE_CLEANUP_WARNING;
-  const MERGE_BUDGET_DEFAULT = require(WORKTREE_SAFETY_PATH).DEFAULT_MERGE_TIMEOUT_MS;
-
-  function mergeGauntletStub(overrides = {}) {
-    // A one-entry gauntlet whose every call before the merge succeeds; callers
-    // override the merge and the post-failure calls per row. Unknown calls throw so
-    // a row cannot pass by accident on a call it never modelled.
-    return (args) => {
-      const key = args.join(' ');
-      if (Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key](args);
-      for (const prefix of Object.keys(overrides)) {
-        if (prefix.endsWith('*') && key.startsWith(prefix.slice(0, -1))) return overrides[prefix](args);
-      }
-      if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-      if (key === 'merge-base HEAD worktree-agent-a1') return { exitCode: 0, stdout: 'abc123', stderr: '' };
-      if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') return { exitCode: 0, stdout: '', stderr: '' };
-      if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') return { exitCode: 0, stdout: '', stderr: '' };
-      if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') return { exitCode: 0, stdout: 'worktree-agent-a2', stderr: '' };
-      if (key === 'merge-base HEAD worktree-agent-a2') return { exitCode: 0, stdout: 'abc123', stderr: '' };
-      if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a2') return { exitCode: 0, stdout: '', stderr: '' };
-      if (key === '-C /repo/.claude/worktrees/agent-a2 status --porcelain --untracked-files=all') return { exitCode: 0, stdout: '', stderr: '' };
-      if (key.startsWith('merge worktree-agent-a2')) return { exitCode: 0, stdout: '', stderr: '' };
-      if (key === 'worktree remove /repo/.claude/worktrees/agent-a2 --force') return { exitCode: 0, stdout: '', stderr: '' };
-      if (key === 'branch -D worktree-agent-a2') return { exitCode: 0, stdout: '', stderr: '' };
-      throw new Error(`unexpected git call: ${key}`);
-    };
-  }
-
-  const twoEntryPlan = () => ({
-    ok: true,
-    repoRoot: '/repo/main',
-    action: 'cleanup_wave',
-    discovery: 'manifest',
-    entries: [
-      { agent_id: 'a1', worktree_path: '/repo/.claude/worktrees/agent-a1', branch: 'worktree-agent-a1', expected_base: 'abc123' },
-      { agent_id: 'a2', worktree_path: '/repo/.claude/worktrees/agent-a2', branch: 'worktree-agent-a2', expected_base: 'abc123' },
-    ],
-  });
-
-  // The kill lands after the merged tree is staged and before MERGE_HEAD is written,
-  // so `git merge --abort` finds nothing and the MERGE_HEAD probe says "clean".
-  const killedMidHook = {
-    'merge worktree-agent-a1*': () => ({
-      exitCode: null,
-      stdout: 'pre-merge-commit: slow gate starting (sleep 15)\n',
-      stderr: '',
-      timedOut: true,
-      signal: 'SIGTERM',
-      error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
-    }),
-    'merge --abort': () => ({ exitCode: 128, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' }),
-    'rev-parse --verify -q MERGE_HEAD': () => ({ exitCode: 1, stdout: '', stderr: '' }),
-    'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 1, stdout: '', stderr: '' }),
-  };
-
-  test('#4721: the merge carries its own budget; every other call in the gauntlet keeps the module default', () => {
-    const seen = [];
-    const plan = twoEntryPlan();
-    plan.entries.pop();
-    executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args, opts) => {
-        seen.push({ key: args.join(' '), timeout: opts && opts.timeout });
-        return mergeGauntletStub({
-          'merge worktree-agent-a1*': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'worktree remove /repo/.claude/worktrees/agent-a1 --force': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'branch -D worktree-agent-a1': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-        })(args);
-      },
-    });
-    const merge = seen.filter((c) => c.key.startsWith('merge worktree-agent-a1'));
-    assert.equal(merge.length, 1);
-    assert.equal(merge[0].timeout, MERGE_BUDGET_DEFAULT, 'the merge must pass an explicit budget, not inherit the plumbing default');
-    assert.ok(MERGE_BUDGET_DEFAULT >= 60_000, 'the merge budget is sized for a hook, not for plumbing');
-    for (const other of seen.filter((c) => !c.key.startsWith('merge worktree-agent-a1'))) {
-      assert.equal(other.timeout, undefined, `${other.key} must keep the module default — only the merge runs hooks`);
-    }
-
-    // And the budget is a dep, so a caller can size it to its hooks.
-    const seenOverride = [];
-    executeWorktreeWaveCleanupPlan(plan, {
-      mergeTimeoutMs: 4242,
-      execGit: (args, opts) => {
-        seenOverride.push({ key: args.join(' '), timeout: opts && opts.timeout });
-        return mergeGauntletStub({
-          'merge worktree-agent-a1*': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'worktree remove /repo/.claude/worktrees/agent-a1 --force': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'branch -D worktree-agent-a1': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-        })(args);
-      },
-    });
-    assert.equal(seenOverride.find((c) => c.key.startsWith('merge worktree-agent-a1')).timeout, 4242);
-  });
-
-  test('#4721: a merge killed at its budget is blocked as merge_timed_out, its staged residue is restored, and the wave continues', () => {
-    const calls = [];
-    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        let cachedReads = 0;
-        return mergeGauntletStub({
-          ...killedMidHook,
-          'diff --cached --name-only': () => {
-            // First read: the executor's tree, staged against the old HEAD. Second
-            // read (after `reset --merge`): clean.
-            cachedReads = calls.filter((c) => c === 'diff --cached --name-only').length;
-            return cachedReads === 1
-              ? { exitCode: 0, stdout: 'a.txt\nb.txt\n', stderr: '' }
-              : { exitCode: 0, stdout: '', stderr: '' };
-          },
-          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-        })(args);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'merge_timed_out', 'a timeout is not a merge_failed');
-    assert.notEqual(result.entries[0].reason, 'merge_failed');
-    assert.deepEqual(
-      result.entries[0].warnings,
-      [
-        { code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'a.txt' },
-        { code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'b.txt' },
-      ],
-      'every path the killed merge left staged is named as restored',
-    );
-    assert.equal(result.warnings.length, 2, 'residue warnings are aggregated on the wave result too');
-    assert.ok(calls.includes('reset --merge'), 'the staged residue is undone with git reset --merge');
-    assert.ok(calls.indexOf('reset --merge') > calls.indexOf('rev-parse --verify -q MERGE_HEAD'), 'the residue check runs only once the repo is known not to be mid-merge');
-    assert.equal(result.entries[1].status, 'merged_removed', 'entry 2 still merges — repoRoot was restored to clean');
-    assert.deepEqual(result.pending, []);
-  });
-
-  test('#4721: a merge git REFUSED never reads or resets the index — a pre-existing dirty index is the operator\'s work', () => {
-    // Caught in review: a refusal ("your local changes would be overwritten") is
-    // exactly what a pre-existing dirty index earns, and it leaves that index as it
-    // was. Attributing it to the merge and running `reset --merge` would discard
-    // the operator's staged work. The residue path is gated on the TIMEOUT.
-    const calls = [];
-    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        return mergeGauntletStub({
-          'merge worktree-agent-a1*': () => ({ exitCode: 1, stdout: '', stderr: 'error: Your local changes to the following files would be overwritten by merge:\n  d.txt' }),
-          'merge --abort': () => ({ exitCode: 128, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' }),
-          'rev-parse --verify -q MERGE_HEAD': () => ({ exitCode: 1, stdout: '', stderr: '' }),
-          // The stub throws on any call not modelled here — so a `diff --cached`
-          // or `reset --merge` on this path fails the test loudly.
-        })(args);
-      },
-    });
-    assert.equal(result.entries[0].reason, 'merge_failed');
-    assert.deepEqual(result.entries[0].warnings, []);
-    assert.equal(calls.some((c) => c.startsWith('diff --cached')), false, 'a refused merge does not read the index');
-    assert.equal(calls.includes('reset --merge'), false, 'and never resets it');
-    assert.equal(result.entries[1].status, 'merged_removed');
-  });
-
-  test('#4721: a killed merge that had autostashed pre-existing work re-applies it after the reset', () => {
-    const calls = [];
-    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        return mergeGauntletStub({
-          ...killedMidHook,
-          // merge.autoStash parked the operator's staged edit here and started anyway.
-          'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 0, stdout: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\n', stderr: '' }),
-          'diff --cached --name-only': () => (calls.filter((c) => c === 'diff --cached --name-only').length === 1
-            ? { exitCode: 0, stdout: 'b.txt\n', stderr: '' }
-            : { exitCode: 0, stdout: '', stderr: '' }),
-          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: 'Autostash exists; creating a new stash entry.' }),
-          'stash pop --index': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-        })(args);
-      },
-    });
-    assert.equal(result.entries[0].reason, 'merge_timed_out');
-    assert.deepEqual(result.entries[0].warnings, [{ code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'b.txt' }]);
-    assert.ok(calls.indexOf('stash pop --index') > calls.indexOf('reset --merge'), 'the autostash is re-applied AFTER the reset parks it in the stash list');
-    assert.equal(result.entries[1].status, 'merged_removed');
-
-    // Clean index, autostash present (killed before the index was populated): still reset + pop.
-    // The pop fails but leaves the index clean → reported, wave continues.
-    const calls2 = [];
-    const result2 = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => {
-        calls2.push(args.join(' '));
-        return mergeGauntletStub({
-          ...killedMidHook,
-          'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 0, stdout: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\n', stderr: '' }),
-          'diff --cached --name-only': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'stash pop --index': () => ({ exitCode: 1, stdout: '', stderr: 'error: could not restore untracked files from stash' }),
-        })(args);
-      },
-    });
-    assert.ok(calls2.includes('reset --merge') && calls2.includes('stash pop --index'));
-    assert.equal(calls2.filter((c) => c === 'diff --cached --name-only').length, 3, 'the index is re-read after a failed pop');
-    assert.deepEqual(result2.entries[0].warnings, [{ code: WAVE_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch: 'worktree-agent-a1', path: null }], 'a failed pop is reported, never silent');
-    assert.equal(result2.entries[1].status, 'merged_removed', 'the index is clean, so the wave continues');
-
-    // A failed pop that leaves conflict entries behind is NOT clean — halt (caught in review:
-    // the next merge would fail on "you have unmerged files").
-    const calls3 = [];
-    const result3 = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => {
-        calls3.push(args.join(' '));
-        return mergeGauntletStub({
-          ...killedMidHook,
-          'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 0, stdout: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\n', stderr: '' }),
-          'diff --cached --name-only': () => (calls3.filter((c) => c === 'diff --cached --name-only').length === 3
-            ? { exitCode: 0, stdout: 'a.txt\nb.txt\n', stderr: '' }
-            : { exitCode: 0, stdout: '', stderr: '' }),
-          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-          'stash pop --index': () => ({ exitCode: 1, stdout: '', stderr: 'CONFLICT (content): Merge conflict in a.txt' }),
-        })(args);
-      },
-    });
-    assert.deepEqual(result3.entries[0].warnings, [
-      { code: WAVE_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch: 'worktree-agent-a1', path: null },
-      { code: WAVE_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch: 'worktree-agent-a1', path: 'a.txt' },
-      { code: WAVE_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch: 'worktree-agent-a1', path: 'b.txt' },
-    ]);
-    assert.equal(result3.entries.length, 1, 'entry 2 must not merge over unmerged entries');
-    assert.deepEqual(result3.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
-  });
-
-  test('#4721: a merge killed by an external signal (no timedOut) takes the same restore path as a timeout', () => {
-    // The seam (`_spawnResult`) normalizes a signal death to exitCode 1 and carries
-    // the signal alongside, timedOut false — so the exit code is NOT the tell, the
-    // signal is (a refused merge has none). The index state a SIGTERM leaves is
-    // identical to the timeout's, so the residue path keys on "killed", not on
-    // "timed out" (caught in review, twice: first the gate, then the shape).
-    const calls = [];
-    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        return mergeGauntletStub({
-          ...killedMidHook,
-          'merge worktree-agent-a1*': () => ({ exitCode: 1, stdout: '', stderr: '', timedOut: false, signal: 'SIGTERM', error: null }),
-          'diff --cached --name-only': () => (calls.filter((c) => c === 'diff --cached --name-only').length === 1
-            ? { exitCode: 0, stdout: 'b.txt\n', stderr: '' }
-            : { exitCode: 0, stdout: '', stderr: '' }),
-          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: '' }),
-        })(args);
-      },
-    });
-    assert.equal(result.entries[0].reason, 'merge_failed', 'not a timeout — the reason stays merge_failed');
-    assert.deepEqual(result.entries[0].warnings, [{ code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'b.txt' }]);
-    assert.ok(calls.includes('reset --merge'));
-    assert.equal(result.entries[1].status, 'merged_removed');
-  });
-
-  test('#4721: residue that git reset --merge cannot clear is reported as left staged and halts the wave', () => {
-    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => mergeGauntletStub({
-        ...killedMidHook,
-        // Still `b.txt` on both reads: the reset refused (an unstaged edit overlaps),
-        // or ran but left it.
-        'diff --cached --name-only': () => ({ exitCode: 0, stdout: 'b.txt\n', stderr: '' }),
-        'reset --merge': () => ({ exitCode: 1, stdout: '', stderr: 'error: Entry \'b.txt\' not uptodate. Cannot merge.' }),
-      })(args),
-    });
-    assert.equal(result.entries[0].reason, 'merge_timed_out');
-    assert.deepEqual(
-      result.entries[0].warnings,
-      [{ code: WAVE_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch: 'worktree-agent-a1', path: 'b.txt' }],
-    );
-    assert.equal(result.entries.length, 1, 'entry 2 must not be evaluated against a dirty index');
-    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
-  });
-
-  test('#4721: an unverifiable index after merge_failed fails closed — null path, wave halted', () => {
-    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
-      execGit: (args) => mergeGauntletStub({
-        ...killedMidHook,
-        'diff --cached --name-only': makeTimeoutStub(),
-      })(args),
-    });
-    assert.deepEqual(
-      result.entries[0].warnings,
-      [{ code: WAVE_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch: 'worktree-agent-a1', path: null }],
-      'a null path marks "the check itself could not run", as scope_check_unavailable does',
-    );
-    assert.equal(result.entries.length, 1);
-    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
-  });
-
   describe('#4721: real git — a pre-merge-commit hook slower than the merge budget', { skip: isWindows ? 'POSIX sh hook' : false }, () => {
     const { gitOrThrow: gitFixture } = require('./helpers/git-fixture.cjs');
     const HOOK_SLEEP_S = 4;
     const KILL_BUDGET_MS = 1500;
 
-    function buildRepoWithSlowHook({ hook = true, hookName = 'pre-merge-commit', autoStash = false, prestage = false } = {}) {
+    function buildRepoWithSlowHook({ hook = true, hookName = 'pre-merge-commit', autoStash = false } = {}) {
       const root = createTempDir('gsd-4721-');
       const repo = path.join(root, 'rr');
       const wt = path.join(root, 'rr-wt');
@@ -3651,9 +2034,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
       git(['add', 'a.txt']);
       git(['commit', '-q', '-m', 'base']);
+      const hookPidPath = path.join(root, 'hook.pid');
       if (hook) {
         const hookPath = path.join(repo, '.git', 'hooks', hookName);
-        fs.writeFileSync(hookPath, `#!/bin/sh\necho "${hookName}: slow gate starting"\nsleep ${HOOK_SLEEP_S}\nexit 0\n`, { mode: 0o755 });
+        fs.writeFileSync(hookPath, `#!/bin/sh\necho "${hookName}: slow gate starting"\nprintf '%s\\n' "$$" > ${JSON.stringify(hookPidPath)}\nexec sleep ${HOOK_SLEEP_S}\n`, { mode: 0o755 });
       }
       if (autoStash) git(['config', 'merge.autoStash', 'true']);
       git(['worktree', 'add', '-q', '-b', 'agent-repro1', wt]);
@@ -3662,12 +2046,13 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       git(['add', 'a.txt', 'b.txt'], wt);
       git(['commit', '-q', '-m', 'executor: add b.txt'], wt);
       const base = git(['rev-parse', 'HEAD']).trim();
-      if (prestage) {
-        // The operator's own staged work in the primary, unrelated to the branch.
+      const stageOperatorWork = () => {
+        // Fixture-only writer, called after the final inventory to retain the
+        // real native refusal stimulus. Pre-existing dirt now holds earlier.
         fs.appendFileSync(path.join(repo, 'a.txt'), 'operator staged line\n');
         fs.writeFileSync(path.join(repo, 'ops.txt'), 'precious\n');
         git(['add', 'a.txt', 'ops.txt']);
-      }
+      };
       const plan = {
         ok: true,
         repoRoot: repo,
@@ -3675,1315 +2060,112 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         discovery: 'manifest',
         entries: [{ agent_id: 'repro1', worktree_path: wt, branch: 'agent-repro1', expected_base: base }],
       };
-      return { root, repo, wt, base, plan, git };
+      plan.entries = plan.entries.map((entry) => authorizeFixtureEntry(repo, entry));
+      return { root, repo, wt, base, plan, git, hookPidPath, stageOperatorWork };
     }
 
-    test('is blocked as merge_timed_out, leaves no MERGE_HEAD, and repoRoot ends with a clean index at the old HEAD', (t) => {
+    async function cleanupHookFixture(fx) {
+      try {
+        if (fs.existsSync(fx.hookPidPath)) {
+          const pid = Number(fs.readFileSync(fx.hookPidPath, 'utf8').trim());
+          assert.ok(Number.isInteger(pid) && pid > 0);
+          const alive = () => { try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; throw e; } };
+          if (alive()) process.kill(pid, 'SIGTERM');
+          await waitFor(() => !alive(), { timeoutMs: SUBPROCESS_TIMEOUT_MS, message: 'fixture hook must be reaped' });
+        }
+      } finally { cleanup(fx.root); }
+    }
+
+    test('a pre-merge hook timeout retains the staged merge tree at the old HEAD for manual root recovery', (t) => {
       const fx = buildRepoWithSlowHook();
-      t.after(() => cleanup(fx.root));
-      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
+      t.after(() => cleanupHookFixture(fx));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS, isPidAlive: () => false });
       assert.equal(result.ok, false);
       assert.equal(result.entries[0].reason, 'merge_timed_out');
+      assert.equal(result.entries[0].status, 'blocked');
+      assert.equal(result.entries[0].integrated, false);
       assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base, 'HEAD unmoved');
-      assert.equal(fx.git(['diff', '--cached', '--name-only']).trim(), '', 'the killed merge\'s staged tree was restored');
-      assert.equal(fx.git(['status', '--porcelain']).trim(), '', 'worktree clean too');
-      assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\n');
-      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false, 'the merge-added file is gone from the primary');
-      assert.deepEqual(
-        result.entries[0].warnings.map((w) => w.code),
-        [WAVE_WARNING.MERGE_RESIDUE_RESTORED, WAVE_WARNING.MERGE_RESIDUE_RESTORED],
-      );
-      assert.deepEqual(result.entries[0].warnings.map((w) => w.path).sort(), ['a.txt', 'b.txt']);
-      assert.equal(fs.existsSync(path.join(fx.wt, 'b.txt')), true, 'the executor branch and its worktree are untouched');
+      assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'b.txt']);
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\nexecutor line\n');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
+      assert.equal(fs.existsSync(path.join(fx.repo, '.git', 'MERGE_HEAD')), false);
+      assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [WAVE_WARNING.MERGE_MANUAL_ROOT_RECOVERY_REQUIRED]);
+      assert.equal(fs.existsSync(path.join(fx.wt, 'b.txt')), true);
     });
 
     test('negative control: the same hook under the default budget merges cleanly', (t) => {
       const fx = buildRepoWithSlowHook();
-      t.after(() => cleanup(fx.root));
-      const result = executeWorktreeWaveCleanupPlan(fx.plan);
-      assert.equal(result.ok, true, JSON.stringify(result));
-      assert.equal(result.entries[0].status, 'merged_removed');
+      t.after(() => cleanupHookFixture(fx));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { isPidAlive: () => false });
+      assert.equal(result.ok, false, 'integration does not authorize retirement');
+      assert.equal(result.entries[0].status, 'integrated_retained');
+      assert.equal(result.entries[0].integrated, true);
+      assert.ok(fs.existsSync(fx.wt));
       assert.deepEqual(result.entries[0].warnings, []);
       assert.equal(fx.git(['rev-list', '--count', 'HEAD']).trim(), '3', 'base + executor + merge commit: history preserved, not squashed');
       assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
     });
 
     test('a merge git refuses because the primary index is dirty leaves the operator\'s staged work exactly as it was', (t) => {
-      // The review-caught case, on real git: no hook, pre-existing staged work in the
-      // primary. git refuses instantly; nothing may be reset.
-      const fx = buildRepoWithSlowHook({ hook: false, prestage: true });
-      t.after(() => cleanup(fx.root));
-      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
+      // Real Git refusal with a late writer after the final preflight read.
+      const fx = buildRepoWithSlowHook({ hook: false });
+      t.after(() => cleanupHookFixture(fx));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS, isPidAlive: () => false,
+        execGit: (args, opts) => {
+          if (args[0] === 'merge') fx.stageOperatorWork();
+          return require('../gsd-core/bin/lib/shell-command-projection.cjs').execGit(args, opts);
+        },
+      });
       assert.equal(result.entries[0].reason, 'merge_failed');
-      assert.deepEqual(result.entries[0].warnings, []);
+      assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [WAVE_WARNING.MERGE_MANUAL_ROOT_RECOVERY_REQUIRED]);
       assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'ops.txt'], 'the operator\'s staged set is untouched');
       assert.equal(fs.readFileSync(path.join(fx.repo, 'ops.txt'), 'utf8'), 'precious\n');
       assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false);
     });
 
-    test('a killed merge under merge.autoStash restores the executor residue AND re-applies the operator\'s autostashed work', (t) => {
-      const fx = buildRepoWithSlowHook({ autoStash: true, prestage: true });
-      t.after(() => cleanup(fx.root));
-      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
-      assert.equal(result.entries[0].reason, 'merge_timed_out');
-      assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [WAVE_WARNING.MERGE_RESIDUE_RESTORED, WAVE_WARNING.MERGE_RESIDUE_RESTORED], 'no autostash warning — the pop succeeded');
+    test('explicit no-autostash overrides configured merge.autoStash and preserves the dirty parent on refusal', (t) => {
+      const fx = buildRepoWithSlowHook({ autoStash: true });
+      t.after(() => cleanupHookFixture(fx));
+      let stagedPatch;
+      let failedIndex;
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS, isPidAlive: () => false,
+        execGit: (args, opts) => {
+          if (args[0] === 'merge') { fx.stageOperatorWork(); stagedPatch = fx.git(['diff', '--cached', '--binary']); }
+          const r = require('../gsd-core/bin/lib/shell-command-projection.cjs').execGit(args, opts);
+          if (args[0] === 'merge') failedIndex = fs.readFileSync(path.join(fx.repo, '.git', 'index'));
+          return r;
+        },
+      });
+      assert.equal(result.entries[0].reason, 'merge_failed');
+      assert.equal(result.entries[0].status, 'blocked');
+      assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [WAVE_WARNING.MERGE_MANUAL_ROOT_RECOVERY_REQUIRED]);
+      assert.deepEqual(fs.readFileSync(path.join(fx.repo, '.git', 'index')), failedIndex);
+      assert.equal(fx.git(['diff', '--cached', '--binary']), stagedPatch);
       assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base);
-      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false, 'executor residue gone');
-      assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'ops.txt'], 'the operator\'s staged work is back in the index');
+      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false);
+      assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'ops.txt']);
       assert.equal(fs.readFileSync(path.join(fx.repo, 'ops.txt'), 'utf8'), 'precious\n');
-      assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\noperator staged line\n', 'a.txt carries the operator line, not the executor line');
-      assert.equal(fx.git(['stash', 'list']).trim(), '', 'nothing left parked in the stash');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\noperator staged line\n');
+      assert.equal(fx.git(['config', 'merge.autoStash']).trim(), 'true', 'configuration is not changed');
+      assert.equal(fx.git(['stash', 'list']).trim(), '', 'no operator work is moved into a stash');
       assert.equal(fs.existsSync(path.join(fx.repo, '.git', 'MERGE_AUTOSTASH')), false);
     });
 
-    test('a kill inside commit-msg (MERGE_HEAD already written) is the ordinary abort path — timed out, no residue, clean primary', (t) => {
-      // By commit-msg time git has written MERGE_HEAD, so `git merge --abort` can and
-      // does restore the tree; restoreMergeResidue then finds nothing to do.
+    test('a commit-msg hook timeout retains MERGE_HEAD and the staged tree for manual root recovery', (t) => {
       const fx = buildRepoWithSlowHook({ hookName: 'commit-msg' });
-      t.after(() => cleanup(fx.root));
-      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
+      t.after(() => cleanupHookFixture(fx));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS, isPidAlive: () => false });
       assert.equal(result.entries[0].reason, 'merge_timed_out');
-      assert.deepEqual(result.entries[0].warnings, [], 'abort cleaned it; the residue path reports nothing');
+      assert.equal(result.entries[0].integrated, false);
+      assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [WAVE_WARNING.MERGE_MANUAL_ROOT_RECOVERY_REQUIRED]);
       assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base);
-      assert.equal(fs.existsSync(path.join(fx.repo, '.git', 'MERGE_HEAD')), false, 'abort cleared MERGE_HEAD');
-      assert.equal(fx.git(['status', '--porcelain']).trim(), '');
-      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false);
+      assert.equal(fx.git(['rev-parse', 'MERGE_HEAD']).trim(), fx.plan.entries[0].retirement_authorization.accepted_head);
+      assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'b.txt']);
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
     });
   });
 
-  test('#3804: rescues uncommitted SUMMARY.md from worktree .planning/ before dirty check', () => {
-    // Fixture: the only dirty file is .planning/q1-SUMMARY.md (executor left it uncommitted
-    // per documented contract — orchestrator commits it).  cleanup-wave MUST rescue it
-    // (copy to main tree) and succeed, not return worktree_dirty.
-    const calls = [];
-    const rescued = [];
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is NOT committed on the branch. `git cat-file -e HEAD:<path>` returns
-        // exit 128 (NOT 1) for an absent path (#2556): "fatal: path '...' does not exist
-        // in 'HEAD'". Rescue must fire on this real exit code.
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // Only the SUMMARY is dirty — no other modified files
-          return { exitCode: 0, stdout: '?? .planning/q1-SUMMARY.md', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      // Inject FS deps so tests don't touch the real filesystem.
-      // Key on the RESOLVED path identity and return paths joined off it — the
-      // walker contract the default walker honors, and the only form whose
-      // slice-derived relPath is correct on every platform (#4758).
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: (p) => {
-        if (p === path.join(wtResolved, '.planning', 'q1-SUMMARY.md')) return 'summary content';
-        return '';
-      },
-      existsSync: (_p) => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-
-    // SUMMARY was rescued into the main tree
-    assert.equal(rescued.length, 1, 'SUMMARY.md must be rescued (copied) to main tree');
-    assert.equal(rescued[0].src, path.join(wtResolved, '.planning', 'q1-SUMMARY.md'));
-    // Normalize to forward slashes for cross-platform assertion (path.join uses \ on Windows)
-    assert.equal(rescued[0].dest.replace(/\\/g, '/'), '/repo/main/.planning/q1-SUMMARY.md');
-
-    // Cleanup succeeded — SUMMARY-only dirty state must not block
-    assert.equal(result.ok, true, 'cleanup must succeed when only SUMMARY.md is dirty');
-    assert.equal(result.entries[0].status, 'merged_removed');
-    assert.equal(result.entries[0].reason, 'ok');
-  });
-
-  test('#3804: still blocks when worktree has non-SUMMARY dirty files alongside SUMMARY', () => {
-    // If there are OTHER dirty files (not SUMMARY), cleanup must still block.
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is NOT committed on the branch (uncommitted, per quick.md contract).
-        // cat-file -e returns 128 for an absent path (#2556).
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // SUMMARY plus another dirty file
-          return { exitCode: 0, stdout: '?? .planning/q1-SUMMARY.md\nM  src/foo.js', stderr: '' };
-        }
-        throw new Error(`unexpected git call after dirty check: ${key}`);
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: (p) => {
-        if (p === path.join(wtResolved, '.planning', 'q1-SUMMARY.md')) return 'summary content';
-        return '';
-      },
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: () => {},
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].reason, 'worktree_dirty');
-  });
-
-  test('#4758: rescue resolves a relative worktree_path against repoRoot, not process.cwd()', (t) => {
-    const fs = require('node:fs');
-    // The manifest's worktree_path is RELATIVE and repoRoot (a temp dir) differs from
-    // process.cwd().  Every git consumer of the field resolves `-C <relative>` against
-    // its cwd=repoRoot; the rescue's filesystem walk must resolve the same field the
-    // same way.  Before the fix the walker resolved against process.cwd(), found
-    // nothing, and the entry blocked worktree_dirty instead of rescuing.
-    // The fs deps are deliberately NOT injected: the real default walker and the real
-    // copy are the subjects under test.
-    const repoRoot = createTempDir('gsd-4758-repo-');
-    t.after(() => cleanup(repoRoot));
-    const worktreePath = '.claude/worktrees/agent-rel-4758';
-    const absWorktree = path.join(repoRoot, worktreePath);
-    fs.mkdirSync(path.join(absWorktree, '.planning'), { recursive: true });
-    fs.writeFileSync(path.join(absWorktree, '.planning', 'q1-SUMMARY.md'), 'summary content');
-
-    const plan = {
-      ok: true,
-      repoRoot,
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: worktreePath,
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    // Resolution-agnostic fake: behavior keys on the repoRoot-resolved -C operand —
-    // the same resolution git itself applies to `-C <relative>`.
-    const resolveGitKey = (args) => (args[0] === '-C'
-      ? `-C ${path.resolve(repoRoot, args[1])} ${args.slice(2).join(' ')}`
-      : args.join(' '));
-    const wtKey = `-C ${absWorktree}`;
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = resolveGitKey(args);
-        if (key === `${wtKey} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is NOT committed on the branch (#2556: cat-file -e returns 128).
-        if (key === `${wtKey} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        if (key === `${wtKey} status --porcelain --untracked-files=all`) {
-          return { exitCode: 0, stdout: '?? .planning/q1-SUMMARY.md', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-    });
-
-    const rescuedDest = path.join(repoRoot, '.planning', 'q1-SUMMARY.md');
-    assert.equal(fs.readFileSync(rescuedDest, 'utf8'), 'summary content',
-      'rescue must copy the worktree SUMMARY into repoRoot despite the relative manifest path');
-    assert.equal(result.ok, true, 'cleanup must succeed when only the SUMMARY was dirty');
-    assert.equal(result.entries[0].status, 'merged_removed',
-      'a rescued SUMMARY must not block the entry as worktree_dirty');
-    assert.equal(result.entries[0].reason, 'ok');
-  });
-
-  test('#4758: every rescue reader sees the repoRoot-resolved worktree path', () => {
-    // Seam contract: the rescue resolves entry.worktree_path ONCE against repoRoot and
-    // hands the same absolute path to every reader — the injected fs walker and its own
-    // `git -C` calls — instead of passing the manifest value verbatim to fs reads
-    // (which then resolve against process.cwd()).
-    const seenWalker = [];
-    const seenGit = [];
-    const repoRoot = '/repo/main';
-    // Computed, not literal: on win32 path.resolve rewrites driveless-absolute
-    // and forward-slash inputs to the current drive's backslash form — exactly
-    // the value the rescue must hand its readers there.
-    const resolvedWt = path.resolve(repoRoot, 'wt/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot,
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: 'wt/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        seenGit.push(key);
-        if (key === `-C wt/agent-a1 rev-parse --abbrev-ref HEAD`) {
-          // The CALLER's branch check passes the manifest value verbatim to git;
-          // its cwd=repoRoot resolves `-C <relative>`. Unchanged by the fix.
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === `-C ${resolvedWt} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === `-C ${resolvedWt} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        if (key === `-C wt/agent-a1 status --porcelain --untracked-files=all`) {
-          // The CALLER's post-rescue dirty check passes the manifest value verbatim to
-          // git (cwd=repoRoot resolves it) — unchanged by the fix, so keep it answerable.
-          return { exitCode: 0, stdout: '?? .planning/q1-SUMMARY.md', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      findSummaryFiles: (p) => {
-        seenWalker.push(p);
-        return p === resolvedWt ? [path.join(resolvedWt, '.planning/q1-SUMMARY.md')] : [];
-      },
-      readFileSync: (p) => (String(p).endsWith('q1-SUMMARY.md') ? 'summary content' : ''),
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: () => {},
-    });
-
-    assert.deepEqual(seenWalker, [resolvedWt],
-      'the fs walker must receive the repoRoot-resolved path, not the verbatim relative value');
-    assert.ok(
-      seenGit.includes(`-C ${resolvedWt} cat-file -e HEAD:.planning/q1-SUMMARY.md`),
-      `the rescue's own git calls must use the same resolved path; saw: ${JSON.stringify(seenGit)}`);
-    assert.equal(result.entries[0].status, 'merged_removed');
-  });
-
-  test('#245: blocks with summary_rescue_failed when copyFileSync throws during rescue', () => {
-    // Fixture: the only dirty file is .planning/q1-SUMMARY.md, but copyFileSync throws
-    // (simulating ENOSPC / permission error).  The path must NOT be added to rescuedRelPaths,
-    // so the entry must be blocked with status='blocked', reason='summary_rescue_failed',
-    // and the worktree must NOT be merged or removed.
-    const calls = [];
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is NOT committed — cat-file -e returns exit 128 for an absent path (#2556);
-        // rescue proceeds and copyFileSync throws (ENOSPC).
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // Only the SUMMARY is dirty
-          return { exitCode: 0, stdout: '?? .planning/q1-SUMMARY.md', stderr: '' };
-        }
-        // Any merge or worktree-remove call proves we failed to block — throw to surface it
-        if (key.startsWith('merge worktree-agent-a1') || key.startsWith('worktree remove')) {
-          throw new Error(`worktree was not blocked before merge/remove: ${key}`);
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: (p) => {
-        if (p === path.join(wtResolved, '.planning', 'q1-SUMMARY.md')) return 'summary content';
-        return '';
-      },
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: () => { throw new Error('ENOSPC: no space left on device'); },
-    });
-
-    assert.equal(result.ok, false, 'result.ok must be false when rescue copy fails');
-    assert.equal(result.entries[0].status, 'blocked', 'entry status must be blocked');
-    assert.equal(result.entries[0].reason, 'summary_rescue_failed', 'entry reason must be summary_rescue_failed');
-    // Verify no merge or worktree-remove call was made (the execGit throw above would have surfaced it)
-    const mergeCalls = calls.filter((c) => c.startsWith('merge worktree-agent-a1') || c.startsWith('worktree remove'));
-    assert.equal(mergeCalls.length, 0, 'no merge or worktree-remove git call must have been made');
-  });
-
-  test('#706: does NOT rescue SUMMARY when it is already committed on the branch (execute-phase contract)', () => {
-    // Regression for issue #706: when execute-phase commits SUMMARY.md on the
-    // worktree branch, the cleanup-wave helper must NOT copy it as an untracked
-    // file into the main tree.  Doing so creates a collision that causes
-    // `git merge --no-ff` to abort with "untracked working tree files would be
-    // overwritten by merge".
-    //
-    // Fixture: SUMMARY.md is committed on the branch (git cat-file -e HEAD:<path>
-    // returns exit 0).  The worktree status shows the file as committed (not dirty).
-    // The rescue step must skip this file entirely.  The merge must succeed.
-    const calls = [];
-    const rescued = [];
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is committed on the branch — cat-file -e HEAD:<path> succeeds (exit 0)
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 0, stdout: '.planning/q1-SUMMARY.md', stderr: '' };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // Worktree is clean — SUMMARY is committed, not dirty
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: () => 'summary content',
-      existsSync: (_p) => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-
-    // The committed SUMMARY must NOT have been copied into the main tree as an untracked file
-    assert.equal(rescued.length, 0,
-      'rescueSummaryArtifacts must NOT copy an already-committed SUMMARY into the main tree — ' +
-      'doing so creates an untracked file that collides with the --no-ff merge');
-
-    // Cleanup must succeed
-    assert.equal(result.ok, true, 'cleanup must succeed when SUMMARY is committed on the branch');
-    assert.equal(result.entries[0].status, 'merged_removed');
-    assert.equal(result.entries[0].reason, 'ok');
-  });
-
-  test('#706: SUMMARY committed on branch + untracked non-SUMMARY dirty file still blocks', () => {
-    // Even when SUMMARY is committed (no rescue needed), a non-SUMMARY dirty file must block.
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is committed on the branch
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 0, stdout: '.planning/q1-SUMMARY.md', stderr: '' };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // Another untracked file exists alongside the committed SUMMARY
-          return { exitCode: 0, stdout: '?? scratch.txt', stderr: '' };
-        }
-        throw new Error(`unexpected git call after dirty check: ${key}`);
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: () => {},
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].reason, 'worktree_dirty');
-  });
-
-  test('#706: SUMMARY staged-but-not-committed is rescued (cat-file -e HEAD only matches committed)', () => {
-    // Codex adversarial finding: git ls-files --error-unmatch would match staged
-    // files (added to index but not committed), causing rescue to be skipped for
-    // a file the merge would NOT carry.  cat-file -e HEAD:<path> only matches
-    // committed objects, so staged-but-not-committed SUMMARY is rescued correctly.
-    //
-    // Fixture: cat-file -e HEAD:<path> returns exit 1 (not in committed tree),
-    // but git status shows 'A  .planning/q1-SUMMARY.md' (staged).  Rescue must
-    // copy it into the main tree and the cleanup must proceed.
-    const rescued = [];
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // SUMMARY is staged but NOT committed — absent from HEAD, cat-file returns 128 (#2556)
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // File is staged ('A  .planning/q1-SUMMARY.md')
-          return { exitCode: 0, stdout: 'A  .planning/q1-SUMMARY.md', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-
-    // The staged-but-not-committed SUMMARY must be rescued into the main tree
-    assert.equal(rescued.length, 1,
-      'staged-but-not-committed SUMMARY must be rescued — cat-file -e HEAD only skips truly committed files');
-    // Cleanup succeeded: staged-file shows as 'A  ..' which is in rescuedRelPaths filter
-    assert.equal(result.ok, true, 'cleanup must succeed when only staged SUMMARY is present');
-    assert.equal(result.entries[0].status, 'merged_removed');
-  });
-
-  test('#2556: cat-file exit 128 RESCUES the SUMMARY (fail-open — 128 is the normal absent code)', () => {
-    // #2556 reversal of the prior #706 "fail-closed on 128" policy. That policy
-    // assumed exit 128 = fatal git error. It does not — `git cat-file -e` returns
-    // 128 for an ABSENT path, which is the NORMAL uncommitted-SUMMARY state; a
-    // genuine fatal (corrupt store, unborn HEAD) is rare. Fail-closed on 128
-    // therefore skipped rescue in the common case and the untracked SUMMARY was
-    // silently discarded by `worktree remove --force`. Data safety wins: rescue on
-    // 128. The rare genuinely-fatal-128-with-actually-committed-file case may now
-    // produce a recoverable merge collision (caught by the merge) — far less
-    // severe than the silent, unrecoverable data loss fail-closed caused.
-    //
-    // Fixture: cat-file returns exitCode:128.  Rescue MUST fire (copy into main tree).
-    const rescued = [];
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // cat-file returns 128 — the SUMMARY is absent from HEAD (#2556: the normal
-        // uncommitted state, NOT a fatal error)
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'", timedOut: false };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // Worktree appears clean (SUMMARY is committed on branch)
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-
-    // #2556: on exit 128 rescue MUST fire — 128 is the normal absent-path code and
-    // skipping loses the uncommitted SUMMARY (silent data loss via worktree remove --force).
-    assert.equal(rescued.length, 1,
-      'cat-file exit 128 must RESCUE the SUMMARY — 128 is the normal absent-path code, not a fatal error (#2556)');
-    // The rest of cleanup proceeds normally (merge/remove/delete succeed in this fixture)
-    assert.equal(result.ok, true, 'cleanup can still succeed after rescuing on cat-file exit 128');
-  });
-
-  test('#2556: cat-file timeout RESCUES the SUMMARY (fail-open — data safety over uncertain status)', () => {
-    // #2556 reversal: on cat-file timeout we cannot determine committed status, but
-    // data safety wins — rescue anyway. Skipping rescue on timeout (the prior
-    // fail-closed policy) risks losing an uncommitted SUMMARY to `worktree remove
-    // --force`. If the file turns out to be committed, the rescue copy is a no-op
-    // when the main tree already holds identical content (the destination check),
-    // and any real collision is caught by the merge as a recoverable merge_failed.
-    //
-    // Fixture: cat-file returns timedOut:true.  Rescue MUST fire (copy into main tree).
-    const rescued = [];
-    const wtResolved = path.resolve('/repo/main', '/repo/.claude/worktrees/agent-a1');
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        // cat-file times out — cannot determine if SUMMARY is committed
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return {
-            exitCode: null,
-            stdout: '',
-            stderr: '',
-            timedOut: true,
-            signal: 'SIGTERM',
-            error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
-          };
-        }
-        if (key === `-C ${wtResolved} status --porcelain --untracked-files=all`) {
-          // Worktree appears clean (SUMMARY is committed on branch)
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'branch -D worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        return { exitCode: 0, stdout: '', stderr: '' };
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-
-    // #2556: on timeout rescue MUST fire — skipping risks silent data loss; a copy
-    // of an actually-committed file is a no-op (destination check) or a recoverable
-    // merge collision, neither of which is as bad as losing the uncommitted SUMMARY.
-    assert.equal(rescued.length, 1,
-      'cat-file timeout must RESCUE the SUMMARY — data safety wins over uncertain status (#2556)');
-    // The rest of cleanup proceeds normally (merge/remove/delete succeed in this fixture)
-    assert.equal(result.ok, true, 'cleanup can still succeed after rescuing on cat-file timeout');
-  });
-
-  // ─── B7 (#3050/#3057): rescue-anyway on an uncertain cat-file, via the
-  // Phase 2 fault-injection adapter (makeFaultyGit) rather than a hand-rolled
-  // key-matching stub. The two tests above already prove the verdict with
-  // hand-written mocks; these prove it again through the in-process fault
-  // seam the epic standardized on, for both fault shapes the design calls
-  // "uncertain": a fatal exit (128) and a timeout.
-  //
-  // #3057 finding: `git cat-file -e` returns exit 128 BOTH for the normal
-  // "absent from HEAD" case (#2556's own comment above, line ~2833) and for a
-  // genuine fatal git error — there is no third exit code that means
-  // "confirmed absent, no ambiguity" as opposed to "uncertain". The
-  // production code's own non-zero-exit check (`catFileResult.exitCode === 0
-  // ? skip : rescue`) therefore CANNOT distinguish "uncertain" from
-  // "certain-and-fine" — every non-zero exit, whatever its cause, is uncertain
-  // by construction, and #2556 rescues all of them uniformly. That is not a
-  // gap the tests below can paper over: it is the reason "rescue whenever not
-  // confirmed committed" is the whole rule, rather than a narrower
-  // uncertain-only carve-out.
-  function makeWaveCleanupPassthrough() {
-    return (args) => {
-      const key = args.join(' ');
-      if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-        return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      if (key === 'merge-base HEAD worktree-agent-a1') {
-        return { exitCode: 0, stdout: 'abc123', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-        return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-        return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      if (key.startsWith('merge worktree-agent-a1')) {
-        return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-        return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      if (key === 'branch -D worktree-agent-a1') {
-        return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false };
-      }
-      return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false };
-    };
-  }
-
-  const waveCleanupPlanFixture = {
-    ok: true,
-    repoRoot: '/repo/main',
-    action: 'cleanup_wave',
-    discovery: 'manifest',
-    entries: [{
-      agent_id: 'a1',
-      worktree_path: '/repo/.claude/worktrees/agent-a1',
-      branch: 'worktree-agent-a1',
-      expected_base: 'abc123',
-    }],
-  };
-
-  test('#3057/B7 (makeFaultyGit): cat-file exit 128 still rescues anyway (deliberate, #2556)', () => {
-    const rescued = [];
-    const execGit = makeFaultyGit({
-      faults: [{ kind: 'exit', exitCode: 128, when: (args) => args.includes('cat-file') }],
-      passthrough: makeWaveCleanupPassthrough(),
-    });
-    const result = executeWorktreeWaveCleanupPlan(waveCleanupPlanFixture, {
-      execGit,
-      findSummaryFiles: (worktreePath) => (
-        path.resolve(waveCleanupPlanFixture.repoRoot, worktreePath)
-          === path.resolve(waveCleanupPlanFixture.repoRoot, '/repo/.claude/worktrees/agent-a1')
-          ? [path.join(
-              path.resolve(waveCleanupPlanFixture.repoRoot, '/repo/.claude/worktrees/agent-a1'),
-              '.planning', 'q1-SUMMARY.md')]
-          : []
-      ),
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-    assert.strictEqual(rescued.length, 1,
-      'an uncertain cat-file (exit 128) must still rescue — the deliberate #2556 verdict');
-    assert.strictEqual(result.ok, true);
-  });
-
-  test('#3057/B7 (makeFaultyGit): cat-file timeout still rescues anyway (deliberate, #2556)', () => {
-    const rescued = [];
-    const execGit = makeFaultyGit({
-      faults: [{ kind: 'timeout', when: (args) => args.includes('cat-file') }],
-      passthrough: makeWaveCleanupPassthrough(),
-    });
-    const result = executeWorktreeWaveCleanupPlan(waveCleanupPlanFixture, {
-      execGit,
-      findSummaryFiles: (worktreePath) => (
-        path.resolve(waveCleanupPlanFixture.repoRoot, worktreePath)
-          === path.resolve(waveCleanupPlanFixture.repoRoot, '/repo/.claude/worktrees/agent-a1')
-          ? [path.join(
-              path.resolve(waveCleanupPlanFixture.repoRoot, '/repo/.claude/worktrees/agent-a1'),
-              '.planning', 'q1-SUMMARY.md')]
-          : []
-      ),
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
-    });
-    assert.strictEqual(rescued.length, 1,
-      'an uncertain cat-file (timeout) must still rescue — the deliberate #2556 verdict, same as exit 128');
-    assert.strictEqual(result.ok, true);
-  });
-
-  test('blocks dirty worktrees before merge/remove/delete', () => {
-    const calls = [];
-    const plan = {
-      ok: true,
-      repoRoot: '/repo/main',
-      action: 'cleanup_wave',
-      discovery: 'manifest',
-      entries: [{
-        agent_id: 'a1',
-        worktree_path: '/repo/.claude/worktrees/agent-a1',
-        branch: 'worktree-agent-a1',
-        expected_base: 'abc123',
-      }],
-    };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        calls.push(args.join(' '));
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '?? scratch.txt', stderr: '' };
-        }
-        throw new Error(`unexpected git call after dirty check: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].reason, 'worktree_dirty');
-    assert.equal(calls.some((call) => call.startsWith('merge worktree-agent-a1')), false);
-    assert.equal(calls.some((call) => call === 'worktree remove /repo/.claude/worktrees/agent-a1 --force'), false);
-    assert.equal(calls.some((call) => call === 'branch -D worktree-agent-a1'), false);
-  });
-
-  // ─── #2852: wave-abort isolation ───────────────────────────────────────────
-  //
-  // Every per-entry block reason (branch_mismatch, base_mismatch,
-  // branch_contains_deletions, deletion_check_failed, summary_rescue_failed,
-  // worktree_dirty ×2, merge_failed, worktree_remove_failed) previously aborted
-  // the REST of the wave via `pending.push(...entries.slice(i + 1)); break;`.
-  // Fixed by isolating each block to its own entry (`continue`), except an
-  // unrecoverable `merge_failed` (repoRoot itself left mid-merge), which
-  // legitimately halts the remaining wave.
-  //
-  // Scope note: `branch_contains_deletions` itself STAYS unconditional — any
-  // deletion in an entry's branch blocks that entry, exactly as before this fix.
-  // Issue #2852's own triage explicitly scoped an opt-in for intentional
-  // deletions OUT of this fix as a separate, deferred product decision (see the
-  // tracked follow-up issue cited in the fix commit); only the wave-abort
-  // behavior is in scope here.
-
-  function makeEntry(id, branch, base = 'abc123') {
-    return {
-      agent_id: id,
-      worktree_path: `/repo/.claude/worktrees/agent-${id}`,
-      branch,
-      expected_base: base,
-    };
-  }
-
-  // Default git responses for an entry that should merge cleanly: no branch/base
-  // mismatch, no deletions, no dirty files. Returns undefined for an unmatched key
-  // so callers can layer entry-specific overrides in front of this fallback.
-  function cleanEntryResponse(key, branch, worktreePath) {
-    // #4758: answer both `-C` spellings — the caller passes the manifest value
-    // verbatim (git resolves it against its cwd=repoRoot) while tests that
-    // normalize keys hand the path.resolve(repoRoot, …) form; the two are
-    // identical on POSIX and drive-rewritten on win32.  '/repo/main' is this
-    // describe's shared fixture repoRoot.
-    const wtForms = [worktreePath, path.resolve('/repo/main', worktreePath)];
-    for (const wt of wtForms) {
-      if (key === `-C ${wt} rev-parse --abbrev-ref HEAD`) {
-        return { exitCode: 0, stdout: branch, stderr: '' };
-      }
-      if (key === `-C ${wt} status --porcelain --untracked-files=all`) {
-        return { exitCode: 0, stdout: '', stderr: '' };
-      }
-    }
-    if (key === `merge-base HEAD ${branch}`) {
-      return { exitCode: 0, stdout: 'abc123', stderr: '' };
-    }
-    if (key === `diff --diff-filter=D --name-only HEAD...${branch}`) {
-      return { exitCode: 0, stdout: '', stderr: '' };
-    }
-    if (key === `merge ${branch} --no-ff --no-edit -m chore: merge executor worktree (${branch})`) {
-      return { exitCode: 0, stdout: '', stderr: '' };
-    }
-    if (key === `worktree remove ${worktreePath} --force`) {
-      return { exitCode: 0, stdout: '', stderr: '' };
-    }
-    if (key === `branch -D ${branch}`) {
-      return { exitCode: 0, stdout: '', stderr: '' };
-    }
-    return undefined;
-  }
-
-  test('#2852: a branch_mismatch block on entry 1 does not abort entries 2 and 3', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const e3 = makeEntry('a3', 'worktree-agent-a3');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2, e3] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          // HEAD is on the wrong branch — branch_mismatch
-          return { exitCode: 0, stdout: 'some-other-branch', stderr: '' };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        const clean3 = cleanEntryResponse(key, e3.branch, e3.worktree_path);
-        if (clean3) return clean3;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries.length, 3, 'all three entries must be evaluated');
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'branch_mismatch');
-    assert.equal(result.entries[1].status, 'merged_removed');
-    assert.equal(result.entries[2].status, 'merged_removed');
-    assert.deepEqual(result.pending, [], 'pending must be empty — every entry was evaluated');
-  });
-
-  test('#2852: a base_mismatch block on entry 1 does not abort entry 2', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'unrelatedbase', stderr: '' };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'base_mismatch');
-    assert.equal(result.entries[1].status, 'merged_removed');
-    assert.deepEqual(result.pending, []);
-  });
-
-  test('#2852: a branch_contains_deletions block on entry 1 does not abort entry 2', () => {
-    // Scope note: the deletions guard itself stays UNCONDITIONAL (any deletion in
-    // entry 1's branch blocks entry 1) — issue #2852's own triage scoped an opt-in
-    // for intentional deletions OUT of this fix as a separate product decision
-    // (tracked in #3003). This fix only isolates the block to entry 1 instead of
-    // aborting the rest of the wave, same as every other block reason.
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'src/lib/payments/__tests__/payment-allocation.test.ts', stderr: '' };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'branch_contains_deletions');
-    assert.equal(result.entries[1].status, 'merged_removed', 'entry 2 must still merge — isolation, not wave-abort');
-    assert.deepEqual(result.pending, []);
-  });
-
-  test('#2852: a worktree_remove_failed on entry 1 does not abort entry 2', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      // #4415: this row's premise is a worktree that IS present and whose removal
-      // genuinely fails (locked). Cleanup now distinguishes that from a worktree the
-      // harness already deleted — which prunes instead of blocking — so the premise
-      // has to be stated rather than inferred from a path that never existed on disk.
-      // Stated on both axes the implementation reads: git lists the entry (identity)
-      // and the directory stats successfully (present, not removed).
-      statSync: () => ({ isDirectory: () => true }),
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === 'worktree list --porcelain') {
-          return {
-            exitCode: 0,
-            stdout: 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-              + `\nworktree ${e1.worktree_path}\nHEAD deadbeef\nbranch refs/heads/${e1.branch}\n`,
-            stderr: '',
-          };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key.startsWith('merge worktree-agent-a1')) {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === 'worktree unlock /repo/.claude/worktrees/agent-a1') {
-          return { exitCode: 1, stdout: '', stderr: 'not locked' };
-        }
-        if (key === 'worktree remove /repo/.claude/worktrees/agent-a1 --force') {
-          return { exitCode: 1, stdout: '', stderr: 'still locked' };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'worktree_remove_failed');
-    assert.equal(result.entries[1].status, 'merged_removed');
-    assert.deepEqual(result.pending, []);
-  });
-
-  test('#2852: a deletion_check_failed on entry 1 does not abort entry 2', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          // simulate a timed-out / errored git diff for entry 1
-          return { exitCode: 1, stdout: '', stderr: 'fatal: unable to read tree', timedOut: true };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'deletion_check_failed');
-    assert.equal(result.entries[1].status, 'merged_removed');
-    assert.deepEqual(result.pending, []);
-  });
-
-  test('#2852: worktree_dirty (status query failed) on entry 1 does not abort entry 2', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      // #4415: this row's premise is a worktree that IS present whose `status`
-      // query failed. Cleanup now distinguishes that from a worktree removed
-      // mid-entry — which merges rather than blocking — so the premise has to be
-      // stated rather than inferred from a path that never existed on disk.
-      // Stated on both axes the implementation reads: git lists the entry (identity)
-      // and the directory stats successfully (present, not removed).
-      statSync: () => ({ isDirectory: () => true }),
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === 'worktree list --porcelain') {
-          return {
-            exitCode: 0,
-            stdout: 'worktree /repo/main\nHEAD deadbeef\nbranch refs/heads/main\n'
-              + `\nworktree ${e1.worktree_path}\nHEAD deadbeef\nbranch refs/heads/${e1.branch}\n`,
-            stderr: '',
-          };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 1, stdout: '', stderr: 'fatal: index corrupt' };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'worktree_dirty');
-    assert.equal(result.entries[1].status, 'merged_removed');
-  });
-
-  test('#2852: worktree_dirty (real dirty lines) on entry 1 does not abort entry 2', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
-          return { exitCode: 0, stdout: '?? scratch.txt', stderr: '' };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'worktree_dirty');
-    assert.equal(result.entries[1].status, 'merged_removed');
-  });
-
-  test('#2852: a summary_rescue_failed on entry 1 does not abort entry 2', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2] };
-    const wtResolved = path.resolve(plan.repoRoot, e1.worktree_path);
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = gitKeyFor(plan.repoRoot, args);
-        if (key === `-C ${wtResolved} rev-parse --abbrev-ref HEAD`) {
-          return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
-        }
-        if (key === 'merge-base HEAD worktree-agent-a1') {
-          return { exitCode: 0, stdout: 'abc123', stderr: '' };
-        }
-        if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
-        if (key === `-C ${wtResolved} cat-file -e HEAD:.planning/q1-SUMMARY.md`) {
-          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
-        }
-        const clean2 = cleanEntryResponse(key, e2.branch, e2.worktree_path);
-        if (clean2) return clean2;
-        throw new Error(`unexpected git call: ${key}`);
-      },
-      findSummaryFiles: (worktreePath) => {
-        if (path.resolve(plan.repoRoot, worktreePath) === wtResolved) {
-          return [path.join(wtResolved, '.planning', 'q1-SUMMARY.md')];
-        }
-        return [];
-      },
-      readFileSync: () => 'summary content',
-      existsSync: () => false,
-      mkdirSync: () => {},
-      copyFileSync: () => { throw new Error('ENOSPC: no space left on device'); },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'summary_rescue_failed');
-    assert.equal(result.entries[1].status, 'merged_removed');
-  });
-
-  test('#2852: an all-clean 3-entry wave still merges every entry (unchanged)', () => {
-    const e1 = makeEntry('a1', 'worktree-agent-a1');
-    const e2 = makeEntry('a2', 'worktree-agent-a2');
-    const e3 = makeEntry('a3', 'worktree-agent-a3');
-    const plan = { ok: true, repoRoot: '/repo/main', action: 'cleanup_wave', discovery: 'manifest', entries: [e1, e2, e3] };
-    const result = executeWorktreeWaveCleanupPlan(plan, {
-      execGit: (args) => {
-        const key = args.join(' ');
-        for (const e of [e1, e2, e3]) {
-          const clean = cleanEntryResponse(key, e.branch, e.worktree_path);
-          if (clean) return clean;
-        }
-        throw new Error(`unexpected git call: ${key}`);
-      },
-    });
-    assert.equal(result.ok, true);
-    assert.equal(result.entries.length, 3);
-    assert.ok(result.entries.every((e) => e.status === 'merged_removed'));
-    assert.deepEqual(result.pending, []);
-  });
-
-});
+ });
 
 // ─── MOVE 2: resolveWorktreeRoot and pruneOrphanedWorktrees (#1268 T0) ────────
 
@@ -5216,7 +2398,7 @@ function listedWorktreePaths(repoDir) {
 
 // ─── Suite 1: executeWorktreeWaveCleanupPlan — unlock-and-retry ───────────────
 
-describe('bug-3707: executeWorktreeWaveCleanupPlan unlocks and retries on locked worktree', () => {
+describe('bug-3707: cleanup preserves unaccepted locked and unlocked worktrees', () => {
   let tmpBase;
 
   beforeEach(() => {
@@ -5308,7 +2490,7 @@ describe('bug-3707: executeWorktreeWaveCleanupPlan unlocks and retries on locked
     }
   });
 
-  test('removes a locked worktree after unlock-retry (real-fs)', () => {
+  test('retains a locked worktree and its original lock (real-fs)', () => {
     const repoDir = path.join(tmpBase, 'repo');
     const wtDir = path.join(tmpBase, 'wt-locked');
     const branchName = 'worktree-agent-test1';
@@ -5342,13 +2524,14 @@ describe('bug-3707: executeWorktreeWaveCleanupPlan unlocks and retries on locked
 
     const result = executeWorktreeWaveCleanupPlan(plan);
 
-    assert.equal(result.ok, true, `cleanup should succeed, got: ${JSON.stringify(result)}`);
-    assert.equal(result.entries[0].status, 'merged_removed');
-    assert.ok(!fs.existsSync(wtDir), 'worktree directory should be gone after cleanup');
-    assert.ok(!listedWorktreePaths(repoDir).has(canonicalPath(wtDir)), 'git worktree list should not include removed worktree');
+    assert.equal(result.ok, false);
+    assert.equal(result.entries[0].reason, 'retirement_authorization_required');
+    assert.ok(fs.existsSync(wtDir));
+    assert.equal(fs.readFileSync(lockedFile, 'utf8'), 'Locked by claude-code agent-test1');
+    assert.ok(listedWorktreePaths(repoDir).has(canonicalPath(wtDir)));
   });
 
-  test('cleanup succeeds without a lock file present (no regression)', () => {
+  test('an unlocked worktree also requires accepted owner proof', () => {
     const repoDir = path.join(tmpBase, 'repo2');
     const wtDir = path.join(tmpBase, 'wt-unlocked');
     const branchName = 'worktree-agent-test2';
@@ -5375,9 +2558,10 @@ describe('bug-3707: executeWorktreeWaveCleanupPlan unlocks and retries on locked
 
     const result = executeWorktreeWaveCleanupPlan(plan);
 
-    assert.equal(result.ok, true, `unlocked cleanup should succeed: ${JSON.stringify(result)}`);
-    assert.equal(result.entries[0].status, 'merged_removed');
-    assert.ok(!fs.existsSync(wtDir), 'worktree directory should be gone');
+    assert.equal(result.ok, false);
+    assert.equal(result.entries[0].reason, 'retirement_authorization_required');
+    assert.equal(result.entries[0].integrated, false);
+    assert.ok(fs.existsSync(wtDir));
   });
 });
 
@@ -5395,7 +2579,7 @@ describe('bug-3707: reapOrphanWorktrees', () => {
   });
 
   // ── Dead PID + merged branch → reap ────────────────────────────────────────
-  test('reaps a worktree whose pid is dead and branch is merged into main', () => {
+  test('retains a merged worktree whose dead PID is not retirement authority', () => {
     const repoDir = path.join(tmpBase, 'repo');
     const wtDir = path.join(tmpBase, 'wt-dead-merged');
     const branchName = 'worktree-agent-dead-merged';
@@ -5430,9 +2614,10 @@ describe('bug-3707: reapOrphanWorktrees', () => {
     assert.ok(Array.isArray(result), 'reapOrphanWorktrees should return an array');
     const reaped = result.find((r) => canonicalPath(r.path) === wtDirCanonical);
     assert.ok(reaped, `worktree ${wtDir} should appear in reaped list`);
-    assert.equal(reaped.status, 'reaped');
-    assert.ok(!fs.existsSync(wtDir), 'worktree directory should be removed');
-    assert.ok(!listedWorktreePaths(repoDir).has(wtDirCanonical), 'git worktree list should not show reaped worktree');
+    assert.equal(reaped.status, 'retained');
+    assert.equal(reaped.reason, 'owner_completion_authorization_required');
+    assert.ok(fs.existsSync(wtDir));
+    assert.ok(listedWorktreePaths(repoDir).has(wtDirCanonical));
   });
 
   // ── Live PID → skip ────────────────────────────────────────────────────────
@@ -5526,7 +2711,7 @@ describe('bug-3707: reapOrphanWorktrees', () => {
   });
 
   // ── Double invocation → idempotent ─────────────────────────────────────────
-  test('is idempotent: second invocation is a no-op', () => {
+  test('repeated nominations retain the same worktree and original lock', () => {
     const repoDir = path.join(tmpBase, 'repo5');
     const wtDir = path.join(tmpBase, 'wt-idempotent');
     const branchName = 'worktree-agent-idempotent';
@@ -5545,12 +2730,15 @@ describe('bug-3707: reapOrphanWorktrees', () => {
 
     const result1 = reapOrphanWorktrees(repoDir, staleDeps);
     const reaped1 = result1.filter((r) => r.status === 'reaped');
-    assert.equal(reaped1.length, 1, 'first invocation should reap exactly one entry');
+    assert.equal(reaped1.length, 0, 'startup never reaps');
+    assert.equal(result1.filter((r) => r.status === 'retained').length, 1);
 
     // Second invocation: nothing left to reap
     const result2 = reapOrphanWorktrees(repoDir, staleDeps);
     const reaped2 = result2.filter((r) => r.status === 'reaped');
-    assert.equal(reaped2.length, 0, 'second invocation should reap nothing (idempotent)');
+    assert.equal(reaped2.length, 0, 'second invocation also retains everything');
+    assert.deepEqual(result2, result1);
+    assert.ok(fs.existsSync(lockedFile));
   });
 });
 
@@ -5669,7 +2857,7 @@ describe('bug-3707: reapOrphanWorktrees — nowMs clock-injection BOUNDARY tests
   });
 
   // ── Just-outside boundary: age = guard → reap (age NOT < guard) ─────────────
-  test('reaps when injected nowMs places lock age exactly at guard boundary (age === guard)', () => {
+  test('nominates but retains at the exact stale-lock boundary', () => {
     // age = nowMs - FIXED_LOCK_MTIME_MS = (FIXED_LOCK_MTIME_MS + KNOWN_REAP_MTIME_GUARD_MS) - FIXED_LOCK_MTIME_MS
     //     = KNOWN_REAP_MTIME_GUARD_MS = 300000 ms  →  300000 NOT < 300000 → PROCEED TO REAP
     const nowMs = FIXED_LOCK_MTIME_MS + KNOWN_REAP_MTIME_GUARD_MS;
@@ -5699,8 +2887,9 @@ describe('bug-3707: reapOrphanWorktrees — nowMs clock-injection BOUNDARY tests
     assert.ok(Array.isArray(result), 'must return an array');
     const entry = result.find((r) => canonicalPath(r.path) === wtDirCanonical);
     assert.ok(entry, 'worktree must appear in results');
-    assert.equal(entry.status, 'reaped', `status must be reaped when age=${nowMs - FIXED_LOCK_MTIME_MS}ms >= guard=${KNOWN_REAP_MTIME_GUARD_MS}ms`);
-    assert.ok(!fs.existsSync(wtDir), 'worktree directory must be removed after reaping');
+    assert.equal(entry.status, 'retained');
+    assert.ok(fs.existsSync(wtDir));
+    assert.ok(fs.existsSync(lockedFile), 'the original owner lock is retained at the nomination boundary');
   });
 });
 
@@ -5836,8 +3025,9 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
     const entry = result.find((r) => canonicalPath(r.path) === wtDirCanonical);
     assert.ok(entry, 'worktree must appear in results (reaped or skipped with reason)');
     // The branch IS merged into trunk, and the PID is dead, so it should be reaped.
-    assert.equal(entry.status, 'reaped', 'worktree with dead pid merged into trunk must be reaped');
-    assert.equal(entry.reason, 'pid_dead_and_merged', 'reason must be pid_dead_and_merged (using trunk as the default branch)');
+    assert.equal(entry.status, 'retained');
+    assert.equal(entry.reason, 'owner_completion_authorization_required');
+    assert.ok(fs.existsSync(wtDir));
   });
 });
   });
@@ -6429,20 +3619,15 @@ describe('bug #3384: adjacent worktree data-loss guards', () => {
     assert.ok(fragmentSource.includes('exit 42'), 'canonical fragment must fail closed with exit 42 on base mismatch (#48)');
   });
 
-  test('remove-workspace fails closed when git worktree remove fails', () => {
+  test('remove-workspace holds every strategy for manual root custody instead of deleting data', () => {
     const source = read('gsd-core/workflows/remove-workspace.md');
-    const init = source.indexOf('REMOVE_FAILED=false');
-    const loop = source.indexOf('For each repo in the workspace');
-    const remove = source.indexOf('git worktree remove "$WORKSPACE_PATH/$REPO_NAME"');
-
-    assert.doesNotMatch(
-      source,
-      /git worktree remove "\$WORKSPACE_PATH\/\$REPO_NAME" 2>&1 \|\| true/,
-      'worktree removal failures must not be swallowed',
-    );
-    assert.ok(init > 0 && init < loop, 'REMOVE_FAILED must initialize once before the per-repo loop');
-    assert.ok(remove > loop, 'worktree removal should remain inside the per-repo loop');
-    assert.match(source, /Refusing to delete "\$WORKSPACE_PATH"/);
+    assert.match(source, /Automatic workspace\/worktree retirement is held for every strategy/);
+    assert.match(source, /execute-phase\/steps\/worktree-recovery-policy\.md/);
+    assert.match(source, /Missing\/unknown state retains the entire workspace/);
+    assert.match(source, /echo "BLOCKED: workspace retained; manual root retirement required: \$WORKSPACE_PATH" >&2\r?\nexit 1/);
+    assert.doesNotMatch(source, /\bgit\s+worktree\s+(?:remove|unlock|prune)\b|\bgit\s+branch\s+-[dD]\b|\brm\s+-[rfRF]/,
+      'no destructive command or deletion fallback may bypass the manual hold');
+    assert.match(source, /Do not report the workspace deleted or worktrees cleaned up/);
   });
 
   test('validate health warns when worktree inventory cannot be listed', () => {
@@ -8592,42 +5777,14 @@ describe('#2596 SUMMARY-artifact predicate and its parity with the walker', () =
     nodeFs.mkdirSync(path.join(tmp, 'docs'), { recursive: true });
     nodeFs.writeFileSync(path.join(tmp, 'docs', 'SUMMARY.md'), 'x');
 
+    const parent = createTempDir('wt-2596-parent');
+    t.after(() => cleanup(parent));
     const copiedFrom = [];
-    executeWorktreeWaveCleanupPlan(
-      {
-        ok: true,
-        repoRoot: '/repo/main',
-        action: 'cleanup_wave',
-        discovery: 'manifest',
-        entries: [{
-          agent_id: 'a1',
-          worktree_path: tmp,
-          branch: 'worktree-agent-a1',
-          expected_base: 'abc123',
-        }],
-      },
-      {
-        // No findSummaryFiles override: this exercises the production walker.
-        execGit: (args) => {
-          const key = args.join(' ');
-          if (key === `-C ${tmp} rev-parse --abbrev-ref HEAD`) {
-            return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '', timedOut: false };
-          }
-          if (key === 'merge-base HEAD worktree-agent-a1') {
-            return { exitCode: 0, stdout: 'abc123', stderr: '', timedOut: false };
-          }
-          // cat-file -e → non-zero, so every found SUMMARY is rescued (copied).
-          if (args.includes('cat-file')) {
-            return { exitCode: 128, stdout: '', stderr: '', timedOut: false };
-          }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
-        },
-        existsSync: () => false,
-        readFileSync: () => 'x',
-        mkdirSync: () => {},
-        copyFileSync: (src) => { copiedFrom.push(src); },
-      },
-    );
+    const rescued = require(WORKTREE_SAFETY_PATH).rescueSummaryArtifacts(tmp, parent, {
+      execGit: () => ({ exitCode: 128, stdout: '', stderr: '', timedOut: false }),
+      copyFileSync: (src, dest, flags) => { copiedFrom.push(src); nodeFs.copyFileSync(src, dest, flags); },
+    });
+    assert.deepEqual(rescued.failures, []);
 
     assert.equal(copiedFrom.length, 2,
       'the walker must find exactly the two .planning SUMMARY artifacts, not the docs/ decoy');
@@ -8644,7 +5801,7 @@ describe('#2596 SUMMARY-artifact predicate and its parity with the walker', () =
   });
 });
 
-describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration', () => {
+describe('#2596 scope conformance — unaccepted cleanup diagnostics', () => {
   const WT = '/repo/.claude/worktrees/agent-a1';
   const BR = 'worktree-agent-a1';
   const SCOPE_DIFF = `diff --name-only HEAD...${BR}`;
@@ -8678,7 +5835,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
   test('no declared scope issues no scope git call at all', () => {
     const { git, calls } = makeGit();
     const result = executeWorktreeWaveCleanupPlan(planWith({}), { execGit: git, ...noSummaries });
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
     assert.deepEqual(result.warnings, []);
     assert.deepEqual(result.entries[0].warnings, []);
     assert.equal(
@@ -8695,12 +5852,12 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
       planWith({ files_modified: ['src/a.ts', 'src/b.ts'] }),
       { execGit: git, ...noSummaries },
     );
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
     assert.deepEqual(result.entries[0].warnings, []);
     assert.deepEqual(result.warnings, []);
   });
 
-  test('an out-of-scope path warns without blocking the merge', () => {
+  test('an out-of-scope path warns independently of missing retirement authority', () => {
     const { git, calls } = makeGit({
       [SCOPE_DIFF]: { exitCode: 0, stdout: 'src/a.ts\nsecrets/creds.json\n', stderr: '', timedOut: false },
     });
@@ -8708,17 +5865,18 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
       planWith({ files_modified: ['src/a.ts'] }),
       { execGit: git, ...noSummaries },
     );
-    assert.equal(result.ok, true, 'the advisory must NOT flip ok — it is not a gate');
-    assert.equal(result.reason, 'ok');
-    assert.equal(result.entries[0].status, 'merged_removed');
+    assert.equal(result.ok, false, 'missing authority blocks independently of the advisory');
+    assert.equal(result.reason, 'cleanup_blocked');
+    assert.equal(result.entries[0].status, 'blocked');
+    assert.equal(result.entries[0].reason, 'retirement_authorization_required');
     assert.deepEqual(result.entries[0].warnings, [
       { code: WAVE_CLEANUP_WARNING.SCOPE_OUT_OF_DECLARED, branch: BR, path: 'secrets/creds.json' },
     ]);
     assert.deepEqual(result.warnings, result.entries[0].warnings);
-    // Negative proof: the merge/remove/delete sequence still ran.
-    assert.ok(calls.some((c) => c.startsWith(`merge ${BR}`)), 'merge must still run');
-    assert.ok(calls.includes(`worktree remove ${WT} --force`), 'remove must still run');
-    assert.ok(calls.includes(`branch -D ${BR}`), 'branch delete must still run');
+    // Missing authority preserves the same warning without performing mutations.
+    assert.equal(calls.some((c) => c.startsWith(`merge ${BR}`)), false, 'unaccepted scope never merges');
+    assert.equal(calls.some((c) => c.startsWith('worktree remove')), false);
+    assert.equal(calls.includes(`branch -D ${BR}`), false);
   });
 
   test('every out-of-scope path gets its own warning, in diff order', () => {
@@ -8743,7 +5901,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
     assert.deepEqual(result.entries[0].warnings, []);
   });
 
-  test('a failed scope diff degrades to an advisory, never a block', () => {
+  test('a failed scope diff degrades to an advisory before the independent authority block', () => {
     const { git } = makeGit({
       [SCOPE_DIFF]: { exitCode: 128, stdout: '', stderr: 'fatal: bad revision', timedOut: false },
     });
@@ -8751,8 +5909,9 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
       planWith({ files_modified: ['src/a.ts'] }),
       { execGit: git, ...noSummaries },
     );
-    assert.equal(result.ok, true, 'a broken advisory check must never become a gate');
-    assert.equal(result.entries[0].status, 'merged_removed');
+    assert.equal(result.ok, false, 'the independent authority gate still blocks');
+    assert.equal(result.entries[0].status, 'blocked');
+    assert.equal(result.entries[0].reason, 'retirement_authorization_required');
     assert.deepEqual(result.entries[0].warnings, [
       { code: WAVE_CLEANUP_WARNING.SCOPE_CHECK_UNAVAILABLE, branch: BR, path: null },
     ]);
@@ -8770,7 +5929,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
       planWith({ files_modified: ['src/a.ts'] }),
       { execGit, ...noSummaries },
     );
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
     assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [
       WAVE_CLEANUP_WARNING.SCOPE_CHECK_UNAVAILABLE,
     ]);
@@ -8787,7 +5946,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
     assert.deepEqual(result.entries[0].warnings.map((w) => w.path), ['secrets/x.json']);
   });
 
-  test('scope warnings survive a later block', () => {
+  test('scope warnings survive the independent authority block', () => {
     const { git } = makeGit({
       [SCOPE_DIFF]: { exitCode: 0, stdout: 'secrets/x.json\n', stderr: '', timedOut: false },
       [`-C ${WT} status --porcelain --untracked-files=all`]: { exitCode: 0, stdout: '?? scratch.txt', stderr: '', timedOut: false },
@@ -8796,9 +5955,9 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
       planWith({ files_modified: ['src/a.ts'] }),
       { execGit: git, ...noSummaries },
     );
-    assert.equal(result.ok, false, 'the dirty-worktree block still blocks');
+    assert.equal(result.ok, false, 'authority is required before checking mutable worktree state');
     assert.equal(result.entries[0].status, 'blocked');
-    assert.equal(result.entries[0].reason, 'worktree_dirty');
+    assert.equal(result.entries[0].reason, 'retirement_authorization_required');
     assert.deepEqual(
       result.entries[0].warnings.map((w) => w.path), ['secrets/x.json'],
       'an advisory recorded before the block is still true and must survive it',
@@ -8828,7 +5987,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
       ],
     }, { execGit, ...noSummaries });
 
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
     assert.deepEqual(result.entries[0].warnings, []);
     assert.deepEqual(result.entries[1].warnings, [
       { code: WAVE_CLEANUP_WARNING.SCOPE_OUT_OF_DECLARED, branch: BR2, path: 'src/rogue.ts' },
@@ -8847,11 +6006,14 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
     // reported `merged_removed`/`ok` indistinguishably from an ordinary merge, which
     // removed the operator's only signal for the case where something OTHER than the
     // harness removed the path.
+    // ORCH-01's reviewed failed/unknown-merge contract adds the explicit
+    // manual-root recovery advisory; retain the exact frozen vocabulary lock.
     assert.deepEqual(
       Object.keys(WAVE_CLEANUP_WARNING).sort(),
       [
         'ACCEPTED_ABSENT_WORKTREE',
         'MERGE_AUTOSTASH_UNRESTORED',
+        'MERGE_MANUAL_ROOT_RECOVERY_REQUIRED',
         'MERGE_RESIDUE_LEFT_STAGED',
         'MERGE_RESIDUE_RESTORED',
         'SCOPE_CHECK_UNAVAILABLE',
@@ -9121,9 +6283,9 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
 
   // ── backward compatibility: these must pass BEFORE the change too ──────────────────────
 
-  test('no deletions proceeds', () => {
+  test('no deletions passes the deletion gate but still requires owner authority', () => {
     const result = runWave({}, { deletions: '' });
-    assert.notEqual(firstEntry(result).reason, 'branch_contains_deletions');
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('absent declaration keeps the unconditional block', () => {
@@ -9133,12 +6295,12 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
 
   // ── the feature ────────────────────────────────────────────────────────────────────────
 
-  test('a fully declared deletion merges', () => {
+  test('a fully declared deletion passes only the deletion gate', () => {
     const result = runWave(
       { declared_deletions: ['tests/a.test.ts'] },
       { deletions: 'tests/a.test.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('an undeclared deletion still blocks, and names only the residue', () => {
@@ -9158,7 +6320,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: ['tests/a.test.ts', 'never/deleted.ts'] },
       { deletions: 'tests/a.test.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result));
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('an empty declaration is not an authorization', () => {
@@ -9199,12 +6361,12 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
 
   test('a backslash declaration normalizes on any OS', () => {
     const result = runWave({ declared_deletions: ['tests\\a.test.ts'] }, { deletions: 'tests/a.test.ts\n' });
-    assert.ok(!blockedOnDeletions(result));
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('leading ./ and trailing slash normalize', () => {
     const result = runWave({ declared_deletions: ['./tests/a.test.ts'] }, { deletions: 'tests/a.test.ts\n' });
-    assert.ok(!blockedOnDeletions(result));
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('a duplicated declaration is inert', () => {
@@ -9212,7 +6374,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: ['tests/a.test.ts', 'tests/a.test.ts'] },
       { deletions: 'tests/a.test.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result));
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('non-string and blank declarations are dropped', () => {
@@ -9220,7 +6382,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: [null, 0, '', '   ', [], 'tests/a.test.ts'] },
       { deletions: 'tests/a.test.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), 'junk elements drop; the one real path still authorizes');
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('a non-array declaration is treated as absent', () => {
@@ -9242,7 +6404,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
     );
     // The merge assertion is load-bearing: without it a revert blocks the entry, warnings
     // come back empty, and the path-absence assertion below passes for the wrong reason.
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
     const paths = firstEntry(result).warnings.map((w) => w.path);
     assert.ok(!paths.includes('tests/a.test.ts'),
       'a declared deletion must not be reported out-of-scope');
@@ -9258,7 +6420,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: ['src/gone.ts'] },
       { deletions: 'src/gone.ts\n', changed: 'src/gone.ts\nsrc/other.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
     assert.deepEqual(firstEntry(result).warnings, [], 'no files_modified means no advisory scope at all');
   });
 
@@ -9271,7 +6433,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { files_modified: ['src/kept.ts'], declared_deletions: ['*.md'] },
       { deletions: '', changed: 'src/kept.ts\nsrc/stray.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
     const paths = firstEntry(result).warnings.map((w) => w.path);
     assert.ok(paths.includes('src/stray.ts'), 'a glob declaration must not disarm the advisory');
   });
@@ -9284,7 +6446,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { files_modified: ['src/kept.ts'], declared_deletions: ['src'] },
       { deletions: '', changed: 'src/kept.ts\nsrc/stray.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
     const paths = firstEntry(result).warnings.map((w) => w.path);
     assert.ok(paths.includes('src/stray.ts'), 'a bare directory declaration must not mute the advisory for its children');
   });
@@ -9300,7 +6462,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
 
   // ── git C-quoting decode: both sides meet in the same shape ────────────────────────────
 
-  test('a declared non-ASCII deletion merges even though git C-quotes the path', () => {
+  test('a declared non-ASCII deletion passes its gate when Git C-quotes the path', () => {
     // With core.quotepath at its git default, a non-ASCII deleted path comes back from
     // `git diff --diff-filter=D --name-only` wrapped in double quotes and C-escaped:
     // `tests/é.ts` is reported as the literal string built here with String.raw so the
@@ -9313,7 +6475,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: ['tests/é.ts'] },
       { deletions: `${quoted}\n` },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('a declaration written in git-quoted form also matches a plainly reported path', () => {
@@ -9325,7 +6487,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: [quoted] },
       { deletions: 'tests/é.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   test('an undeclared non-ASCII deletion still blocks, and the residue names the decoded path', () => {
@@ -9351,7 +6513,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
       { declared_deletions: ['tests/a"b.ts'] },
       { deletions: 'tests/a"b.ts\n' },
     );
-    assert.ok(!blockedOnDeletions(result), `expected merge, got ${firstEntry(result).reason}`);
+    assert.equal(firstEntry(result).reason, 'retirement_authorization_required');
   });
 
   // NOTE: "a fully declared deletion merges" (above) already covers a plain ASCII declared
@@ -9382,7 +6544,7 @@ describe('#3003 — declared deletions: authorization is exact set membership', 
 
   // ── property: authorization is exactly set membership ──────────────────────────────────
 
-  test('property: a deletion merges iff its normalized path is in the declared set', () => {
+  test('property: a deletion passes its gate iff its normalized path is in the declared set', () => {
     const PATHS = ['a.ts', 'src/b.ts', 'tests/c.test.ts', 'deep/nested/d.ts', 'e.md'];
     fc.assert(
       fc.property(

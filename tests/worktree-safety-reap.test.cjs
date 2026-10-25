@@ -177,6 +177,21 @@ function onlyRow(result) {
   return result[0];
 }
 
+/**
+ * #ORCH-01 (2026-10-23 custody): the sweep no longer removes anything.
+ *
+ * A candidate that satisfies every heuristic (stale lock, dead owner, merged
+ * branch) is RETAINED and reported, because those heuristics nominate but do
+ * not authorize retirement — owner completion and an accepted head do. So
+ * `reaped` is now unreachable from this sweep, and a destroyed checkout is no
+ * longer an acceptable assertion anywhere in this file. Every migrated row
+ * pins the retained verdict together with the worktree still on disk.
+ */
+function assertRetained(row) {
+  assert.strictEqual(row.status, 'retained');
+  assert.strictEqual(row.reason, 'owner_completion_authorization_required');
+}
+
 // ─── Suite: default-branch discovery — fail-closed verdicts ──────────────────
 
 describe('#3057 reapOrphanWorktrees: default-branch discovery verdicts', () => {
@@ -236,7 +251,7 @@ describe('#3057 reapOrphanWorktrees: default-branch discovery verdicts', () => {
     assert.deepStrictEqual(reapOrphanWorktrees(repoDir), []);
   });
 
-  test('reaps from origin/HEAD alone and never consults local branch candidates', () => {
+  test('nominates from origin/HEAD alone as a retained candidate and never consults local branch candidates', () => {
     const f = makeFixture(tmpBase, 'remotehead');
     const mainTip = git(['rev-parse', 'main'], f.repoDir).trim();
     const faultyGit = makeFaultyGit({
@@ -253,8 +268,8 @@ describe('#3057 reapOrphanWorktrees: default-branch discovery verdicts', () => {
 
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
 
-    assert.strictEqual(row.status, 'reaped');
-    assert.strictEqual(row.reason, 'pid_dead_and_merged');
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a nomination is not authorization — the checkout is retained');
     // The remote-exclusive arm is what makes this distinguishable from the
     // local-candidate arm that every other fixture in the tree takes.
     assert.strictEqual(calledWith(faultyGit, ['remote']), false, 'must not fall back to remote enumeration');
@@ -343,7 +358,7 @@ describe('#3057 reapOrphanWorktrees: canonical-index degradation verdicts', () =
     cleanup(tmpBase);
   });
 
-  test('still reaps when git worktree list fails and the canonical index stays empty', () => {
+  test('still nominates when git worktree list fails and the canonical index stays empty', () => {
     const f = makeFixture(tmpBase, 'listfails');
     const wtCanonical = canonicalPath(f.wtDir);
     const faultyGit = makeFaultyGit({
@@ -354,15 +369,14 @@ describe('#3057 reapOrphanWorktrees: canonical-index degradation verdicts', () =
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
 
     // A failed listing must degrade to the gitdir-derived path, NOT abort the
-    // sweep — an empty index is not "there is nothing to reap".
-    assert.strictEqual(row.status, 'reaped');
-    assert.strictEqual(row.reason, 'pid_dead_and_merged');
+    // sweep — an empty index is not "there is nothing to nominate".
+    assertRetained(row);
     assert.strictEqual(canonicalPath(row.path), wtCanonical);
     assert.strictEqual(calledWith(faultyGit, ['worktree', 'list']), true);
-    assert.strictEqual(fs.existsSync(f.wtDir), false);
+    assert.ok(fs.existsSync(f.wtDir), 'a degraded listing must not become a removal');
   });
 
-  test('still reaps when a porcelain block carries no worktree line', () => {
+  test('still nominates when a porcelain block carries no worktree line', () => {
     const f = makeFixture(tmpBase, 'headlessblock');
     const realPorcelain = git(['worktree', 'list', '--porcelain'], f.repoDir);
     const faultyGit = makeFaultyGit({
@@ -377,11 +391,11 @@ describe('#3057 reapOrphanWorktrees: canonical-index degradation verdicts', () =
     // block and the whole sweep would die.
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
 
-    assert.strictEqual(row.status, 'reaped');
-    assert.strictEqual(row.reason, 'pid_dead_and_merged');
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a retained candidate keeps its checkout');
   });
 
-  test('still reaps when the porcelain lists a path that no longer exists on disk', () => {
+  test('still nominates when the porcelain lists a path that no longer exists on disk', () => {
     const f = makeFixture(tmpBase, 'ghostpath');
     const realPorcelain = git(['worktree', 'list', '--porcelain'], f.repoDir);
     const ghost = path.join(tmpBase, 'ghost-worktree');
@@ -397,8 +411,8 @@ describe('#3057 reapOrphanWorktrees: canonical-index degradation verdicts', () =
     // one entry and keep indexing the rest.
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
 
-    assert.strictEqual(row.status, 'reaped');
-    assert.strictEqual(row.reason, 'pid_dead_and_merged');
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a retained candidate keeps its checkout');
   });
 });
 
@@ -424,7 +438,8 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
 
     const row = onlyRow(result);
     assert.strictEqual(canonicalPath(row.path), canonicalPath(f.wtDir));
-    assert.strictEqual(row.status, 'reaped');
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'an eligible candidate is still retained');
     assert.ok(fs.existsSync(unlockedDir), 'an unlocked worktree is not the reaper concern');
   });
 
@@ -476,24 +491,20 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir));
   });
 
-  test('reports remove_failed against the raw gitdir pointer when its basename is not .git', () => {
+  test('retains an eligible candidate whose gitdir pointer basename is not .git, keyed by the raw pointer', () => {
     const f = makeFixture(tmpBase, 'oddpointer');
     const pointerTarget = path.join(f.wtDir, 'notgit');
     fs.writeFileSync(path.join(f.adminDir, 'gitdir'), `${pointerTarget}\n`);
-    const faultyGit = makeFaultyGit({
-      faults: [{ kind: 'exit', exitCode: 1, when: ['worktree', 'remove'] }],
-      passthrough: realExecGit,
-    });
 
-    const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps()));
 
     // `path` is the load-bearing assertion: a pointer that does not end in
     // `/.git` is used verbatim (no dirname()), and because it does not exist,
-    // the canonical lookup throws and the raw path is what reaches git.
+    // the canonical lookup throws and the raw path is what reaches the result
+    // row. Nothing is removed regardless of the pointer shape.
     assert.strictEqual(row.path, pointerTarget);
-    assert.strictEqual(row.status, 'skipped');
-    assert.strictEqual(row.reason, 'remove_failed');
-    assert.ok(fs.existsSync(f.wtDir));
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a raw-pointer candidate is retained, not removed');
   });
 
   test('reports lock_age_unknown, not lock_too_fresh, when mtimeSafe returns null', () => {
@@ -533,7 +544,7 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir));
   });
 
-  test('reaps the same zero-age lock when an injected reapMtimeGuardMs of 0 retires the guard', () => {
+  test('nominates the same zero-age lock when an injected reapMtimeGuardMs of 0 retires the guard', () => {
     const f = makeFixture(tmpBase, 'zeroguard');
     const now = 1000000;
 
@@ -544,8 +555,8 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
       reapMtimeGuardMs: 0,
     }));
 
-    assert.strictEqual(row.status, 'reaped');
-    assert.strictEqual(row.reason, 'pid_dead_and_merged');
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'retiring the freshness guard nominates, it does not authorize removal');
   });
 });
 
@@ -607,10 +618,10 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir));
   });
 
-  test('reports pid_dead_and_merged from the default isPidAlive helper when process.kill throws ESRCH', (t) => {
+  test('nominates from the default isPidAlive helper when process.kill throws ESRCH', (t) => {
     // Same default helper as above, but its dead-owner arm: ESRCH means "no
     // such process", so `defaultIsPidAlive` returns false and the sweep falls
-    // through to the (merged, by fixture default) ancestry check and reaps.
+    // through to the (merged, by fixture default) ancestry check and retains.
     const f = makeFixture(tmpBase, 'defaultkill-esrch');
     const originalKill = process.kill;
     t.after(() => { process.kill = originalKill; });
@@ -618,11 +629,8 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
 
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, { mtimeSafe: () => STALE_MTIME }));
 
-    assert.deepStrictEqual(
-      { status: row.status, reason: row.reason },
-      { status: 'reaped', reason: 'pid_dead_and_merged' }
-    );
-    assert.strictEqual(fs.existsSync(f.wtDir), false);
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a dead owner PID is not authority to destroy the checkout');
   });
 
   test('reports pid_alive from the default isPidAlive helper when process.kill returns without throwing', (t) => {
@@ -689,7 +697,7 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     );
   });
 
-  test('reaps a detached admin HEAD without resolving any branch ref', () => {
+  test('nominates a detached admin HEAD without resolving any branch ref', () => {
     const f = makeFixture(tmpBase, 'detached');
     const branchTip = git(['rev-parse', f.branch], f.repoDir).trim();
     fs.writeFileSync(path.join(f.adminDir, 'HEAD'), `${branchTip}\n`);
@@ -697,14 +705,13 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
 
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
 
-    assert.strictEqual(row.status, 'reaped');
-    assert.strictEqual(row.reason, 'pid_dead_and_merged');
+    assertRetained(row);
     assert.strictEqual(
       faultyGit.calls.some((c) => c.args[0] === 'rev-parse' && String(c.args[1]).startsWith('refs/heads/')),
       false,
       'a bare 40-hex HEAD is the tip; no ref resolution is needed'
     );
-    assert.strictEqual(fs.existsSync(f.wtDir), false);
+    assert.ok(fs.existsSync(f.wtDir), 'a retained candidate keeps its checkout');
   });
 
   test('reports branch_not_merged for an unmerged branch whose lock owner is dead', () => {
@@ -734,7 +741,7 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir), 'a lock PID that overflows to Infinity must never be reaped');
   });
 
-  test('passes a 308-digit lock PID through the Number.isFinite gate (last representable length)', () => {
+  test('passes a 308-digit lock PID through the Number.isFinite gate and retains the candidate', () => {
     const f = makeFixture(tmpBase, 'cliffminus1', { lock: false });
     fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(308));
     let seenPid;
@@ -744,8 +751,8 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     })));
 
     assert.strictEqual(seenPid, Number('9'.repeat(308)), 'a finite 308-digit PID must reach isPidAlive unchanged');
-    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'reaped', reason: 'pid_dead_and_merged' });
-    assert.strictEqual(fs.existsSync(f.wtDir), false);
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a retained candidate keeps its checkout');
   });
 
   test('stops a 309-digit lock PID at the Number.isFinite gate (first unrepresentable length)', () => {
@@ -783,11 +790,8 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
 
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, { mtimeSafe: () => STALE_MTIME }));
 
-    assert.deepStrictEqual(
-      { status: row.status, reason: row.reason },
-      { status: 'reaped', reason: 'pid_dead_and_merged' }
-    );
-    assert.strictEqual(fs.existsSync(f.wtDir), false);
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'the largest accepted PID is still only a nomination');
   });
 
   test('treats the first PID process.kill rejects as ALIVE and leaves the worktree on disk', () => {
@@ -849,11 +853,11 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     })));
 
     assert.strictEqual(seenPid, 4242, 'an ordinary PID must reach isPidAlive unchanged');
-    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'reaped', reason: 'pid_dead_and_merged' });
-    assert.strictEqual(fs.existsSync(f.wtDir), false);
+    assertRetained(row);
+    assert.ok(fs.existsSync(f.wtDir), 'a retained candidate keeps its checkout');
   });
 
-  test('reports remove_failed and leaves the worktree on disk when git worktree remove fails', () => {
+  test('never attempts a remove or unlock: an eligible candidate is retained even with a remove fault armed', () => {
     const f = makeFixture(tmpBase, 'removefails');
     const faultyGit = makeFaultyGit({
       faults: [{ kind: 'exit', exitCode: 1, when: ['worktree', 'remove'] }],
@@ -863,10 +867,13 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({ execGit: faultyGit })));
 
     assert.strictEqual(canonicalPath(row.path), canonicalPath(f.wtDir));
-    assert.strictEqual(row.status, 'skipped');
-    assert.strictEqual(row.reason, 'remove_failed');
+    assertRetained(row);
     assert.ok(fs.existsSync(f.wtDir));
-    assert.strictEqual(calledWith(faultyGit, ['worktree', 'unlock']), true, 'unlock precedes remove');
+    // #ORCH-01: the pre-fix sweep's unlock-then-force-remove is gone entirely, so
+    // neither call is ever issued — an armed remove fault proves nothing runs.
+    assert.strictEqual(calledWith(faultyGit, ['worktree', 'unlock']), false, 'the sweep must never unlock another owner');
+    assert.strictEqual(calledWith(faultyGit, ['worktree', 'prune']), false, 'startup never prunes unrelated registrations');
+    assert.strictEqual(calledWith(faultyGit, ['worktree', 'remove']), false, 'the sweep must never remove a worktree');
   });
 });
 
@@ -894,7 +901,7 @@ describe('#3057 cmdWorktreeReapOrphans / pruneOrphanedWorktrees output verdicts'
     });
 
     assert.deepStrictEqual(err, ['[gsd] worktree.reap-orphans failed: boom\n']);
-    assert.deepStrictEqual(JSON.parse(out.join('')), { ok: true, reaped: 0, entries: [] });
+    assert.deepStrictEqual(JSON.parse(out.join('')), { ok: true, reaped: 0, retained: 0, entries: [] });
   });
 
   test('cmdWorktreeReapOrphans warns with the skipped count and emits the skipped row as JSON', () => {
@@ -919,7 +926,7 @@ describe('#3057 cmdWorktreeReapOrphans / pruneOrphanedWorktrees output verdicts'
     assert.strictEqual(payload.entries[0].reason, 'branch_not_merged');
   });
 
-  test('cmdWorktreeReapOrphans stays silent on stderr when nothing is skipped', () => {
+  test('cmdWorktreeReapOrphans reports the retained candidate on stderr and removes nothing', () => {
     const f = makeFixture(tmpBase, 'cliclean');
     const out = [];
     const err = [];
@@ -930,13 +937,22 @@ describe('#3057 cmdWorktreeReapOrphans / pruneOrphanedWorktrees output verdicts'
       ...deadOwnerDeps(),
     });
 
-    assert.deepStrictEqual(err, []);
+    // #ORCH-01: a retained candidate is the sweep's actionable output now, and
+    // it is surfaced on stderr precisely because no removal happened. The row is
+    // NOT a `skipped` entry, so the pre-fix "silent when nothing is skipped"
+    // expectation no longer describes this case.
+    assert.deepStrictEqual(err, [
+      '[gsd] worktree.reap-orphans: 1 orphan candidate(s) retained'
+      + ' — retirement requires owner completion/recovery authorization (nothing was removed)\n',
+    ]);
     const payload = JSON.parse(out.join(''));
-    assert.strictEqual(payload.reaped, 1);
-    assert.strictEqual(payload.entries[0].reason, 'pid_dead_and_merged');
+    assert.strictEqual(payload.reaped, 0, 'the sweep removes nothing, so `reaped` is always 0');
+    assert.strictEqual(payload.retained, 1);
+    assertRetained(payload.entries[0]);
+    assert.ok(fs.existsSync(f.wtDir), 'the candidate survives the CLI wrapper too');
   });
 
-  test('pruneOrphanedWorktrees warns that the health check degraded when git worktree prune times out', () => {
+  test('pruneOrphanedWorktrees reports manual authority and never executes the armed prune', () => {
     const f = makeFixture(tmpBase, 'prunetimeout');
     const err = [];
     const faultyGit = makeFaultyGit({
@@ -950,11 +966,8 @@ describe('#3057 cmdWorktreeReapOrphans / pruneOrphanedWorktrees output verdicts'
     });
 
     assert.deepStrictEqual(removed, []);
-    assert.deepStrictEqual(err, [
-      '[gsd-tools] WARNING: worktree health check degraded' +
-      ' — git worktree prune timed out after 10s.' +
-      ' Orphaned worktree metadata may remain until the next successful run.\n',
-    ]);
+    assert.deepStrictEqual(err, ['[gsd-tools] worktree metadata retained: repository-wide prune requires root owner/recovery accounting.\n']);
+    assert.equal(calledWith(faultyGit, ['worktree', 'prune']), false);
   });
 
   test('pruneOrphanedWorktrees hands the porcelain to a caller-supplied parseWorktreePorcelain', () => {
@@ -972,13 +985,13 @@ describe('#3057 cmdWorktreeReapOrphans / pruneOrphanedWorktrees output verdicts'
     const removed = pruneOrphanedWorktrees(f.repoDir, {
       execGit: faultyGit,
       parseWorktreePorcelain: (porcelain) => { seen.push(porcelain); return []; },
-      writeErr: () => { throw new Error('no degradation warning expected'); },
+      writeErr: (s) => assert.match(s, /metadata retained/),
     });
 
     assert.deepStrictEqual(removed, []);
     assert.strictEqual(seen.length, 1, 'the injected parser must be the one that ran, exactly once');
     assert.strictEqual(seen[0], realPorcelain, 'it must receive the porcelain readWorktreeList obtained');
-    assert.strictEqual(calledWith(faultyGit, ['worktree', 'prune']), true, 'the metadata prune still runs');
+    assert.strictEqual(calledWith(faultyGit, ['worktree', 'prune']), false, 'parser override grants no repo-wide prune authority');
   });
 
   test('pruneOrphanedWorktrees returns an empty list and warns nothing when git throws', () => {

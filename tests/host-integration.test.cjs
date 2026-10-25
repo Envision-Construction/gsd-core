@@ -2908,10 +2908,12 @@ describe('#2627 dispatch-isolation CLI route', () => {
   const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
   const GSD_TOOLS = path.join(REPO_ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
 
-  function query(runtimeId, extraArgs = []) {
+  function query(runtimeId, extraArgs = [], envOverrides = {}) {
     const r = runNode(
       [GSD_TOOLS, 'query', 'dispatch-isolation', ...extraArgs],
-      { cwd: REPO_ROOT, env: { ...process.env, GSD_RUNTIME: runtimeId }, timeoutMs: PROBE_TIMEOUT_MS },
+      // Pin the descriptor-generation fixture; never probe a developer's
+      // installed opencode binary to decide this argv-shape assertion.
+      { cwd: REPO_ROOT, env: { ...process.env, GSD_OPENCODE_GENERATION: 'v1', GSD_RUNTIME: runtimeId, ...envOverrides }, timeoutMs: PROBE_TIMEOUT_MS },
     );
     throwIfFailed(r, `gsd-tools query dispatch-isolation ${extraArgs.join(' ')}`);
     return r.stdout;
@@ -2962,6 +2964,15 @@ describe('#2627 dispatch-isolation CLI route', () => {
     // kimi-code binds by process cwd — no flag in argv, but cwd still returned.
     assert.deepEqual(args('kimi-code'), ['--prompt', 'P']);
     assert.equal(queryJson('kimi-code', ['--cwd-target', '/tmp/wt', '--prompt', 'P']).exec.cwd, '/tmp/wt');
+  });
+
+  test('opencode v2 binds the worktree through process cwd and omits the unsupported directory flag', () => {
+    const result = JSON.parse(query('opencode', ['--json', '--cwd-target', '/tmp/wt', '--prompt', 'P'], {
+      GSD_OPENCODE_GENERATION: 'v2',
+    }));
+    assert.equal(result.isolation, 'orchestrator-worktree');
+    assert.equal(result.exec.cwd, '/tmp/wt');
+    assert.deepEqual(result.exec.args, ['run', 'P']);
   });
 
   test('a cwd target with no prompt still resolves (prompt is optional at this seam)', () => {
@@ -3411,8 +3422,8 @@ describe('#2652 dispatch-site parity — isolation gates on capability, not runt
     );
     assert.match(
       quick,
-      /\*\*Worktree cleanup:\*\* If the executor ran isolated \(`ISOLATION = "harness-worktree"` at dispatch\)/,
-      'the worktree merge-back/cleanup must be gated on ISOLATION',
+      /\*\*Accepted integration with retirement held:\*\* If the executor ran isolated \(`ISOLATION = "harness-worktree"` at dispatch\)/,
+      'accepted integration and retained custody must be gated on ISOLATION',
     );
     assert.match(
       quick,

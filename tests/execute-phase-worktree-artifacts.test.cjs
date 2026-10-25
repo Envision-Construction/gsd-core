@@ -214,16 +214,19 @@ describe('isolated-run recovery fail-safe (#1292)', () => {
     );
   });
 
-  test('execute-phase.md step 5.5 decline/over-reach sentence references fragment and forbids main-default', () => {
+  test('execute-phase.md retains uncertain integration and delegates isolated recovery to the canonical policy', () => {
     const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
-    assert.ok(
-      content.includes('declines to merge a worktree'),
-      'execute-phase.md step 5.5 pointer must mention "declines to merge a worktree" as the trigger for fail-safe policy'
-    );
-    assert.ok(
-      content.includes('never default to editing'),
-      'execute-phase.md step 5.5 pointer must state "never default to editing" main'
-    );
+    const start = content.indexOf('\n5.5.');
+    const end = content.indexOf('\n5.6.', start);
+    assert.ok(start >= 0 && end > start, 'the cleanup step must remain bounded before post-merge verification');
+    const cleanup = content.slice(start, end);
+    assert.match(cleanup, /execute-phase\/steps\/worktree-recovery-policy\.md/);
+    assert.match(cleanup, /Missing native owner evidence retains the work and holds integration/);
+    assert.match(cleanup, /`integrated:false`[\s\S]*?`integrated:null`[\s\S]*?holds progression for root review/);
+    assert.match(cleanup, /do not retry unchanged failures or run a legacy deletion fallback/);
+    const policy = fs.readFileSync(RECOVERY_POLICY_PATH, 'utf-8');
+    assert.match(policy, /user declines to merge it[\s\S]*?over-reached the requested scope/);
+    assert.match(policy, /editing `main` directly is never the proposed or default option/);
   });
 
   test('quick.md contains ISOLATED-RUN RECOVERY guardrail referencing #1292', () => {

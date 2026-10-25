@@ -879,7 +879,7 @@ describe('#3912 A3-A5: output({error}) records DEGRADED — shape-exhaustive plu
   // state 25, verify 8, workstream 7, commands 5, template 3, gsd2-import 2 = 64,
   // the corrected count over ADR-2980's stale 60). The live per-file table is
   // the one asserted below; verify.cts has since left it (see that entry).
-  test('A3 census: exactly 61 output({error}) call sites exist in src/, across the 8 modules that still carry one', () => {
+  test('A3 census: exactly 56 output({error}) call sites exist in src/, across the 8 modules that still carry one', () => {
     const SRC_ROOT = path.resolve(__dirname, '../src');
 
     function listCtsFiles(dir) {
@@ -929,7 +929,9 @@ describe('#3912 A3-A5: output({error}) records DEGRADED — shape-exhaustive plu
     assert.deepStrictEqual(
       perFile,
       {
-        'commands.cts': 5, 'frontmatter.cts': 10, 'gsd2-import.cts': 2, 'phase.cts': 4,
+        'commands.cts': 6, 'frontmatter.cts': 10, 'gsd2-import.cts': 2, 'phase.cts': 4,
+        // commands.cts +1 ORCH-02: the scoped-sequencer refusal is an explicit
+        // error payload; both the per-module census and exact total stay locked.
         // frontmatter.cts +2 #5105: spliceOrReportRefusal's write-refusal report (shared by
         // set/merge) and cmdFrontmatterMerge's #1660 lossy-object-list-field refusal (parity
         // with cmdFrontmatterSet's existing site) — 8 -> 10.
@@ -946,7 +948,7 @@ describe('#3912 A3-A5: output({error}) records DEGRADED — shape-exhaustive plu
       },
       `per-file output({error}) census drifted: ${JSON.stringify(perFile)}`,
     );
-    assert.strictEqual(total, 55, `enumerated output({error}) population drifted from the measured 55 (69 - verify.cts's 8 sites that #5170 converted to typed verdicts - #4926's 6 refusals moved to error()): got ${total}`);
+    assert.strictEqual(total, 56, `enumerated output({error}) population drifted from the measured 56 (69 - verify.cts's 8 sites that #5170 converted to typed verdicts - #4926's 6 refusals moved to error() + ORCH-02's scoped-sequencer refusal): got ${total}`);
   });
 });
 

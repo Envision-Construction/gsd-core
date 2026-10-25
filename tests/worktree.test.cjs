@@ -471,7 +471,7 @@ describe('bug-2075: worktree deletion safeguards', () => {
     test('execute-phase.md worktree merge section has pre-merge deletion check', () => {
       const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
 
-      const worktreeCleanupStart = content.indexOf('Worktree cleanup');
+      const worktreeCleanupStart = content.indexOf('5.5. **Accepted integration and retained worktree handoff');
       assert.ok(
         worktreeCleanupStart > -1,
         'execute-phase.md must have a worktree cleanup section'
@@ -496,7 +496,7 @@ describe('bug-2075: worktree deletion safeguards', () => {
       const content = fs.readFileSync(QUICK_PATH, 'utf-8');
 
       // Find the worktree cleanup block (starts after "Worktree cleanup")
-      const worktreeCleanupStart = content.indexOf('Worktree cleanup');
+      const worktreeCleanupStart = content.indexOf('**Accepted integration with retirement held:**');
       assert.ok(
         worktreeCleanupStart > -1,
         'quick.md must have a worktree cleanup section'
@@ -545,63 +545,47 @@ describe('bug-2431: worktree teardown must surface locked-worktree errors', () =
     assert.ok(!silentRemovePattern.test(content), 'execute-phase.md: must not contain silent git worktree remove pattern');
   });
 
-  test('quick.md: has lock-aware detection block', () => {
+  test('quick.md: delegates lock observation to the manifest-only retained helper', () => {
     const content = fs.readFileSync(QUICK_PATH, 'utf-8');
-    // After #3797 architectural fix: quick.md delegates entirely to SDK worktree.cleanup-wave,
-    // which handles lock detection internally. Accept either inline .git/worktrees/.../locked
-    // check OR SDK delegation (the SDK documents locked-worktree handling).
-    const hasInlineLockCheck = content.includes('.git/worktrees/') && content.includes('locked');
-    const hasSdkDelegation = content.includes('worktree.cleanup-wave');
-    assert.ok(
-      hasInlineLockCheck || hasSdkDelegation,
-      'quick.md: must include lock-aware detection (.git/worktrees/.../locked check) or delegate to SDK worktree.cleanup-wave (#2431/#3797)'
-    );
+    assert.match(content, /worktree\.cleanup-wave --manifest "\$RETENTION_MANIFEST" --exit-contract=v1/);
+    assert.match(content, /retirement_manual_root_handoff_required/);
+    assert.doesNotMatch(content, /git worktree unlock/);
   });
 
-  test('execute-phase.md: has lock-aware detection block', () => {
+  test('execute-phase.md: delegates lock observation to the manifest-only retained helper', () => {
     const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
-    assert.ok(
-      content.includes('.git/worktrees/') && content.includes('locked'),
-      'execute-phase.md: must include lock-aware detection'
-    );
+    assert.match(content, /worktree\.cleanup-wave --manifest "\$RETENTION_MANIFEST" --exit-contract=v1/);
+    assert.match(content, /retirement_manual_root_handoff_required/);
+    assert.doesNotMatch(content, /git worktree unlock/);
   });
 
-  test('quick.md: has git worktree unlock retry', () => {
+  test('quick.md: retains locked worktrees without an unlock retry', () => {
     const content = fs.readFileSync(QUICK_PATH, 'utf-8');
-    // After #3797 architectural fix: quick.md delegates entirely to SDK worktree.cleanup-wave.
-    // Accept either inline "git worktree unlock" OR SDK delegation.
-    const hasInlineUnlock = content.includes('git worktree unlock');
-    const hasSdkDelegation = content.includes('worktree.cleanup-wave');
-    assert.ok(
-      hasInlineUnlock || hasSdkDelegation,
-      'quick.md: must include "git worktree unlock" retry attempt or delegate to SDK worktree.cleanup-wave (#2431/#3797)'
-    );
+    assert.match(content, /never authorize unlocking, removal, branch deletion or pruning/);
+    assert.doesNotMatch(content, /git worktree (?:unlock|remove|prune)/);
+    assert.match(content, /Keep the manifest, worktree, branch and recovery metadata/);
   });
 
-  test('execute-phase.md: has git worktree unlock retry', () => {
+  test('execute-phase.md: forbids a separate unlock/remove/prune cleanup tail', () => {
     const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
-    assert.ok(content.includes('git worktree unlock'), 'execute-phase.md: must include "git worktree unlock" retry attempt');
+    assert.match(content, /There is no separate cleanup-tail that unlocks, removes or prunes/);
+    assert.doesNotMatch(content, /git worktree (?:unlock|remove|prune)/);
   });
 
-  test('quick.md: has user-visible warning on residual worktree', () => {
+  test('quick.md: reports retained identity and preserves the cleanup command failure', () => {
     const content = fs.readFileSync(QUICK_PATH, 'utf-8');
-    // After #3797 architectural fix: quick.md delegates entirely to SDK worktree.cleanup-wave,
-    // which surfaces residual worktree warnings internally. Accept either inline warning
-    // OR SDK delegation.
-    const hasInlineWarning = content.includes('Residual worktree') || content.includes('manual cleanup');
-    const hasSdkDelegation = content.includes('worktree.cleanup-wave');
-    assert.ok(
-      hasInlineWarning || hasSdkDelegation,
-      'quick.md: must include user-visible warning when worktree removal fails, or delegate to SDK worktree.cleanup-wave (#2431/#3797)'
-    );
+    assert.match(content, /console\.error\(`\$\{entry\.status\}: integrated=/);
+    assert.match(content, /retained \$\{entry\.worktree_path\}/);
+    assert.match(content, /\[ "\$RETENTION_RC" -eq 0 \] \|\| exit "\$RETENTION_RC"/);
+    assert.match(content, /cleanup and phase acceptance are not complete/);
   });
 
-  test('execute-phase.md: has user-visible warning on residual worktree', () => {
+  test('execute-phase.md: reports every retained result and propagates the real cleanup exit', () => {
     const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
-    assert.ok(
-      content.includes('Residual worktree') || content.includes('manual cleanup'),
-      'execute-phase.md: must include user-visible warning when worktree removal fails'
-    );
+    assert.match(content, /console\.error\(`\$\{entry\.status\}: integrated=/);
+    assert.match(content, /retained \$\{entry\.worktree_path\}/);
+    assert.match(content, /\[ "\$RETENTION_RC" -eq 0 \] \|\| exit "\$RETENTION_RC"/);
+    assert.match(content, /cleanup and phase acceptance are not complete/);
   });
 });
 

@@ -77,6 +77,15 @@ interface WorktreeEntry {
    * operator but must not stand in for the errno.
    */
   prunable: string | null;
+  /**
+   * #ORCH-03: git's lock marker for this administrative entry — `null` when the
+   * entry is unlocked, otherwise the lock reason when git records one (possibly
+   * the bare self-declared marker). `git worktree remove` refuses a locked
+   * worktree, so this is the cheap read that lets the cleanup wave refuse a
+   * live-owner checkout with a named reason BEFORE it ever reaches a removal
+   * call, instead of discovering the lock and clearing it.
+   */
+  locked: string | null;
 }
 
 function parseWorktreePorcelain(porcelain: string): WorktreeBranchEntry[] {
@@ -104,7 +113,14 @@ function parseWorktreeEntries(porcelain: string): WorktreeEntry[] {
     const prunable = prunableLine
       ? (prunableLine.slice('prunable'.length).trim() || 'prunable')
       : null;
-    entries.push({ path: worktreePath, branch, prunable });
+    // #ORCH-01/#ORCH-03: `locked` appears either bare or with a reason, same
+    // convention as `prunable` above. Kept as a truthful "git says locked"
+    // marker so the retention reason survives even when git gave no reason.
+    const lockedLine = lines.find((l) => l === 'locked' || l.startsWith('locked '));
+    const locked = lockedLine
+      ? (lockedLine.slice('locked'.length).trim() || 'locked')
+      : null;
+    entries.push({ path: worktreePath, branch, prunable, locked });
   }
   return entries;
 }
@@ -127,7 +143,21 @@ interface WorktreeDeps {
   findSummaryFiles?: (worktreePath: string) => string[];
   readFileSync?: (p: string) => string;
   mkdirSync?: (d: string, o?: { recursive?: boolean }) => void;
-  copyFileSync?: (src: string, dest: string) => void;
+  copyFileSync?: (src: string, dest: string, flags: number) => void;
+  /** Raw bytes for evidence identity; the text reader remains separate. */
+  readFileBytes?: (p: string) => Buffer;
+  /**
+   * Real-path / symlink resolution for SUMMARY containment and registration
+   * identity. Injectable for fixture evidence; SUMMARY defaults to node's
+   * `fs.realpathSync`, registration to `fs.realpathSync.native`.
+   */
+  realpathSync?: (p: string) => string;
+  /**
+   * #ORCH-02: `lstat` (never `stat`) so a *dangling* destination symlink is
+   * still seen. `existsSync` follows links and returns false for a dangling
+   * one, which would let a copy write THROUGH the link to an outside target.
+   */
+  lstatSync?: (p: string) => fs.Stats;
   isPidAlive?: (pid: number) => boolean;
   readDirSafe?: (dir: string) => string[] | null;
   readFileSafe?: (file: string) => string | null;
@@ -158,7 +188,7 @@ function readWorktreeList(repoRoot: string, deps: WorktreeDeps = {}): WorktreeLi
       entries: [],
     };
   }
-  if (listResult.exitCode !== 0) {
+  if (!gitResultOk(listResult)) {
     const stderr = String(listResult.stderr || '');
     return {
       ok: false,
@@ -283,7 +313,8 @@ function planWorktreePrune(repoRoot: string, options: { allowDestructive?: boole
   try {
     worktrees = parsePorcelain(listed.porcelain);
   } catch {
-    // Keep historical behavior: still run metadata prune when parsing fails.
+    // Preserve the diagnostic distinction; execution still requires root
+    // maintenance authority and never prunes from an incomplete inventory.
     // #3050/#3057 (B6): but the reason must NOT collide with the
     // genuinely-empty-list case below — a parser that could not read the
     // porcelain output is not the same fact as "there are no worktrees", and
@@ -312,7 +343,7 @@ interface PruneExecuteResult {
 }
 
 function executeWorktreePrunePlan(plan: WorktreePrunePlan | null, deps: WorktreeDeps = {}): PruneExecuteResult {
-  const execGit = deps.execGit || execGitDefault;
+  void deps;
   if (!plan || plan.action === 'skip') {
     return {
       ok: false,
@@ -331,25 +362,10 @@ function executeWorktreePrunePlan(plan: WorktreePrunePlan | null, deps: Worktree
     };
   }
 
-  const result = execGit(['worktree', 'prune'], { cwd: plan.repoRoot });
-  if (result.timedOut) {
-    // AC4: surface timedOut as a first-class field so callers can log a structured WARNING rather
-    // than silently ignoring it (PRED.k302 — error-swallowing-empty-sentinel).
-    return {
-      ok: false,
-      action: plan.action,
-      reason: 'git_timed_out',
-      timedOut: true,
-      pruned: [],
-    };
-  }
-  return {
-    ok: result.exitCode === 0,
-    action: plan.action,
-    reason: plan.reason,
-    timedOut: false,
-    pruned: [],
-  };
+  // A repository-wide prune can retire registrations belonging to owners
+  // outside this plan. The helper has no complete owner/recovery accounting.
+  // Leave that explicit native Git maintenance to root after reconciliation.
+  return { ok: false, action: plan.action, reason: 'manual_root_prune_required', timedOut: false, pruned: [] };
 }
 
 interface LinkedWorktreePathsResult {
@@ -538,6 +554,44 @@ interface CleanupManifestEntry {
    * this guard exists to catch.
    */
   declared_deletions?: string[];
+
+  /** Root acceptance of a pinned integration input. Missing or incomplete
+   * authority blocks before rescue writes. A matching completed native worker
+   * record and fresh liveness/recovery checks are also required. Automatic
+   * retirement remains held because the native record accounts for one PID,
+   * not all writers; successful integration returns integrated_retained.
+   */
+  retirement_authorization?: RetirementAuthorization;
+}
+
+/**
+ * #ORCH-03: root-provided retirement authorization. See
+ * `CleanupManifestEntry.retirement_authorization`.
+ */
+interface RetirementAuthorization {
+  owner_id: string;
+  accepted_head: string;
+  recovery_ref: string;
+}
+
+/**
+ * #ORCH-03: accept a well-formed authorization, drop anything else.
+ *
+ * Deliberately all-or-nothing. A partial object (`owner_id` but no
+ * `accepted_head`, say) is NOT an authorization: normalizing it into a
+ * half-populated record would let downstream code read a missing field as
+ * "not checked", which is precisely the synthesized approval this field
+ * exists to refuse. Returning `undefined` routes it back to the entry's
+ * retained/pending path.
+ */
+function normalizeRetirementAuthorization(raw: unknown): RetirementAuthorization | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const ownerId = typeof r.owner_id === 'string' ? r.owner_id.trim() : '';
+  const acceptedHead = typeof r.accepted_head === 'string' ? r.accepted_head.trim() : '';
+  const recoveryRef = typeof r.recovery_ref === 'string' ? r.recovery_ref.trim() : '';
+  if (!ownerId || !acceptedHead || !recoveryRef) return undefined;
+  return { owner_id: ownerId, accepted_head: acceptedHead, recovery_ref: recoveryRef };
 }
 
 function normalizeCleanupManifestEntry(entry: unknown): CleanupManifestEntry | null {
@@ -577,6 +631,11 @@ function normalizeCleanupManifestEntry(entry: unknown): CleanupManifestEntry | n
   };
   if (filesModified.length > 0) normalized.files_modified = filesModified;
   if (declaredDeletions.length > 0) normalized.declared_deletions = declaredDeletions;
+  // #ORCH-03: all-or-nothing, same rule as every other optional field above.
+  // A partial or malformed authorization is dropped, so the entry falls back
+  // to the retained/pending path instead of being read as a half-grant.
+  const retirementAuthorization = normalizeRetirementAuthorization(e.retirement_authorization);
+  if (retirementAuthorization) normalized.retirement_authorization = retirementAuthorization;
   return normalized;
 }
 
@@ -651,133 +710,267 @@ function planWorktreeWaveCleanup(repoRoot: string, manifest: unknown): WaveClean
 }
 
 function gitResultOk(result: GitResult | null | undefined): boolean {
-  return !!(result && result.exitCode === 0 && !result.timedOut);
+  return !!(result && result.exitCode === 0 && !result.timedOut && !result.signal && !result.error);
 }
 
 /**
- * #2852: after a failed `git merge` + a `git merge --abort` attempt, determine
- * whether `repoRoot` is STILL mid-merge — the only condition that genuinely
- * invalidates the rest of a cleanup wave.
- *
- * `git merge --abort`'s own exit code is NOT a reliable signal here: git refuses
- * many merges (e.g. "your local changes to the following files would be
- * overwritten by merge") WITHOUT ever creating a `MERGE_HEAD`, in which case
- * `repoRoot`'s tree was never touched and `git merge --abort` correctly fails
- * with "fatal: There is no merge to abort (MERGE_HEAD missing)?" — a SAFE
- * outcome, not a broken one. Trusting that exit code alone would misclassify an
- * ordinary per-entry merge failure as a repo-level one and strand the rest of
- * the wave (caught in review).
- *
- * Checked directly via `git rev-parse --verify -q MERGE_HEAD` against the git
- * ref itself rather than the filesystem: exit 0 means a merge is genuinely still
- * in progress (unrecoverable — halt); exit 1 (the ref simply doesn't exist) means
- * repoRoot is clean, whether because no merge state was ever entered or because
- * abort successfully cleared it (safe — isolate and continue). Anything else
- * (a timeout, or an unexpected git error) is treated conservatively as "still
- * mid-merge" — degrade to the safe/halting answer rather than throw or guess.
+ * #ORCH-03: a pinned commit SHA — exactly what `rev-parse` will hand back for
+ * `--verify --quiet <sha>^{commit}`. Only the full 40- or 64-hex form is
+ * accepted, so an abbreviated or symbolic accepted_head cannot be silently
+ * widened into whatever the ref happens to point at when the wave runs. That
+ * widening is exactly the ORCH-03 defect (`--force` removal of a moved branch),
+ * one level up: a mutable name is not an accepted head.
  */
-function repoRootStillMidMerge(execGit: ExecGitFn, repoRoot: string): boolean {
-  const check = execGit(['rev-parse', '--verify', '-q', 'MERGE_HEAD'], { cwd: repoRoot });
-  if (check.timedOut) return true; // fail closed — cannot confirm safety
-  if (check.exitCode === 0) return true; // MERGE_HEAD exists — genuinely still mid-merge
-  if (check.exitCode === 1) return false; // ref not found — repoRoot is not mid-merge
-  return true; // any other exit code (e.g. a fatal git error) — fail closed
-}
+const RETIREMENT_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
- * #4721: after a merge that was KILLED — at its budget or by a signal — and
- * did not leave MERGE_HEAD behind, undo whatever it staged in repoRoot's index
- * and re-apply any work it had autostashed. (A kill that lands once MERGE_HEAD
- * exists — inside `commit-msg`, say — is the ordinary #2852 path: `git merge
- * --abort` restores the tree and re-applies an autostash itself, unstaged, as
- * it does for any aborted autostashed merge.)
+ * #ORCH-03: the outcome of evaluating a `retirement_authorization`.
  *
- * Why the staged set is attributable to the merge — on this path only: `git
- * merge` refuses to start when the index already differs from HEAD ("your
- * local changes … would be overwritten", even for paths the branch never
- * touches), and a refusal is an immediate exit with a code, never a kill. The
- * one way for a KILLED merge to leave a dirty index with no MERGE_HEAD is a
- * kill between populating the index and writing MERGE_HEAD — i.e. during a
- * merge hook. The exception is `merge.autoStash`: git then parks the pre-existing
- * work in MERGE_AUTOSTASH and starts anyway, and a killed merge never
- * re-applies it. Handled below; it is why the reset runs even on a clean
- * index.
- *
- * `git reset --merge` (no commit → HEAD) is the restore: it resets the index
- * to HEAD and updates the worktree only for the paths the index changed,
- * keeping unrelated unstaged edits intact, and it refuses rather than clobbers
- * when an unstaged edit overlaps a staged path. It also moves a pending
- * MERGE_AUTOSTASH into the stash list ("Autostash exists; creating a new stash
- * entry"), which `git stash pop --index` then re-applies — the same outcome
- * `git merge --abort` gives an autostashed merge that could be aborted.
- *
- * Returns `halt: true` only when repoRoot is still (or unverifiably) dirty —
- * the same repo-level carve-out `repoRootStillMidMerge` uses, and for the same
- * reason: every remaining entry's merge would run against a dirty index.
+ * `ok: true` carries the normalized authorization so the caller never has to
+ * re-read (and cannot accidentally narrow) the same field. Every failure
+ * carries a distinct reason code so the wave's output tells an operator which
+ * of the several possible proofs was missing, rather than a single opaque
+ * "blocked".
  */
-function restoreMergeResidue(
-  execGit: ExecGitFn,
+type RetirementGateResult =
+  | { ok: true; auth: RetirementAuthorization }
+  | { ok: false; reason: string; detail: string };
+
+/** Verify pinned integration acceptance, named recovery and completed native
+ * owner evidence. This gate does not grant automatic retirement authority.
+ */
+function evaluateRetirementAuthorization(
+  entry: CleanupManifestEntry,
   repoRoot: string,
-  branch: string,
-): { halt: boolean; warnings: WaveCleanupWarning[] } {
-  const stagedPaths = (raw: string): string[] => raw
-    .split('\n')
-    .map((line) => decodeGitQuotedPath(line.trim()))
-    .filter((p) => p.length > 0);
-  const leftStaged = (paths: Array<string | null>): { halt: boolean; warnings: WaveCleanupWarning[] } => ({
-    halt: true,
-    warnings: paths.map((p) => ({ code: WAVE_CLEANUP_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch, path: p })),
-  });
-
-  const staged = execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot });
-  if (!gitResultOk(staged)) {
-    // Cannot tell whether the index is dirty — fail closed, same as an
-    // unverifiable MERGE_HEAD check. A null path marks "the check itself could
-    // not run", the convention SCOPE_CHECK_UNAVAILABLE already uses.
-    return leftStaged([null]);
+  execGit: ExecGitFn,
+  deps: WorktreeDeps = {},
+): RetirementGateResult {
+  const auth = entry.retirement_authorization;
+  if (!auth) {
+    return {
+      ok: false,
+      reason: 'retirement_authorization_required',
+      detail:
+        'no retirement_authorization on the manifest entry — the worktree, its lock and its branch are preserved'
+        + ' until root supplies owner_id, accepted_head and recovery_ref',
+    };
   }
-  const before = stagedPaths(staged.stdout || '');
 
-  // Exit 0 = git parked pre-existing work here before starting the merge;
-  // exit 1 = no autostash. Anything else is unknown: do not pop blind, but do
-  // say so — the reset below will have moved any stash into the list unread.
-  const autostash = execGit(['rev-parse', '--verify', '-q', 'MERGE_AUTOSTASH'], { cwd: repoRoot });
-  const hadAutostash = !autostash.timedOut && autostash.exitCode === 0;
-  const autostashUnknown = !!autostash.timedOut || (autostash.exitCode !== 0 && autostash.exitCode !== 1);
-  if (before.length === 0 && !hadAutostash && !autostashUnknown) return { halt: false, warnings: [] };
-
-  const reset = execGit(['reset', '--merge'], { cwd: repoRoot });
-  const recheck = gitResultOk(reset) ? execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot }) : null;
-  if (!recheck || !gitResultOk(recheck)) {
-    // The reset failed, or its result could not be re-read: report the set we
-    // know was staged, and halt.
-    return leftStaged(before.length > 0 ? before : [null]);
+  const owner = typeof entry.agent_id === 'string' ? entry.agent_id.trim() : '';
+  if (!owner) {
+    return {
+      ok: false,
+      reason: 'retirement_owner_unaccounted',
+      detail: `manifest entry for ${entry.worktree_path} records no agent_id, so the authorization names an owner the entry cannot confirm`,
+    };
   }
-  const after = stagedPaths(recheck.stdout || '');
-  if (after.length > 0) return leftStaged(after);
+  if (owner !== auth.owner_id) {
+    return {
+      ok: false,
+      reason: 'retirement_owner_mismatch',
+      detail: `authorization owner_id ${auth.owner_id} does not match the registered agent_id ${owner}`,
+    };
+  }
+  if (!RETIREMENT_SHA_RE.test(auth.accepted_head)) {
+    return {
+      ok: false,
+      reason: 'retirement_accepted_head_malformed',
+      detail: `accepted_head ${JSON.stringify(auth.accepted_head)} is not a full commit SHA`,
+    };
+  }
 
-  const warnings: WaveCleanupWarning[] = before.map((p) => ({ code: WAVE_CLEANUP_WARNING.MERGE_RESIDUE_RESTORED, branch, path: p }));
-  if (hadAutostash) {
-    const pop = execGit(['stash', 'pop', '--index'], { cwd: repoRoot });
-    if (!gitResultOk(pop)) {
-      warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
-      // A failed pop keeps the stash entry, but it can leave conflict entries
-      // (`UU`) and partially applied paths behind it — and the next merge then
-      // fails with "you have unmerged files" (caught in review). Re-read rather
-      // than assume: a dirty index here halts exactly as an unrestorable
-      // residue does.
-      const afterPop = execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot });
-      if (!gitResultOk(afterPop)) return { halt: true, warnings: [...warnings, ...leftStaged([null]).warnings] };
-      const dirty = stagedPaths(afterPop.stdout || '');
-      if (dirty.length > 0) return { halt: true, warnings: [...warnings, ...leftStaged(dirty).warnings] };
+  const branchRef = `refs/heads/${entry.branch}`;
+  if (!auth.recovery_ref.startsWith('refs/') || auth.recovery_ref === branchRef
+    || !gitResultOk(execGit(['check-ref-format', auth.recovery_ref], { cwd: repoRoot }))
+    || !gitResultOk(execGit(['check-ref-format', branchRef], { cwd: repoRoot }))) {
+    return { ok: false, reason: 'retirement_recovery_ref_invalid', detail: 'recovery must be a valid named ref independent of the branch being retained' };
+  }
+  // A symbolic recovery ref could be an alias for the ref being retired.
+  const symbolic = execGit(['symbolic-ref', '--quiet', auth.recovery_ref], { cwd: repoRoot });
+  if (symbolic.exitCode !== 1 || symbolic.timedOut || symbolic.signal || symbolic.error
+    || symbolic.stdout !== '' || symbolic.stderr !== '') {
+    return { ok: false, reason: 'retirement_recovery_ref_invalid', detail: 'recovery must be a verified direct named ref, not a symbolic alias or an unknown probe' };
+  }
+  // rev-parse --verify accepts ONE object. Resolve each separately and validate
+  // its answer before using it as recovery/acceptance evidence (RGS-06/07).
+  const accepted = execGit(['rev-parse', '--verify', '--quiet', `${auth.accepted_head}^{commit}`], { cwd: repoRoot });
+  if (!gitResultOk(accepted) || accepted.stdout.trim() !== auth.accepted_head) {
+    return { ok: false, reason: 'retirement_accepted_head_unverified', detail: 'accepted head did not resolve to the exact accepted commit' };
+  }
+  const recovery = execGit(['rev-parse', '--verify', '--quiet', `${auth.recovery_ref}^{commit}`], { cwd: repoRoot });
+  if (!gitResultOk(recovery) || !RETIREMENT_SHA_RE.test(recovery.stdout.trim())) {
+    return { ok: false, reason: 'retirement_recovery_ref_unverified', detail: 'named recovery ref did not resolve to a commit' };
+  }
+  if (!gitResultOk(execGit(['merge-base', '--is-ancestor', auth.accepted_head, recovery.stdout.trim()], { cwd: repoRoot }))) {
+    return { ok: false, reason: 'retirement_recovery_does_not_cover_head', detail: 'named recovery ref does not verifiably retain the accepted head' };
+  }
+
+  // The branch must still be AT the accepted head. This is the pre-merge half of
+  // ORCH-03's "recheck fresh head": a branch that advanced after review is no
+  // longer the reviewed work, so nothing is merged or retired.
+  const branchHead = execGit(['rev-parse', '--verify', '--quiet', `refs/heads/${entry.branch}`], { cwd: repoRoot });
+  if (!gitResultOk(branchHead)) {
+    return {
+      ok: false,
+      reason: 'retirement_branch_unresolvable',
+      detail: `branch ${entry.branch} could not be resolved (${branchHead?.stderr?.trim() || 'no detail'})`,
+    };
+  }
+  const branchSha = String(branchHead.stdout || '').trim();
+  if (branchSha !== auth.accepted_head) {
+    return {
+      ok: false,
+      reason: 'retirement_head_mismatch',
+      detail: `branch ${entry.branch} is at ${branchSha}, but the authorization accepts ${auth.accepted_head}`,
+    };
+  }
+
+  // The manifest is acceptance input, not lifecycle evidence. Read the native
+  // sibling worker record independently, including for a completed worker.
+  const worktreePath = path.resolve(repoRoot, entry.worktree_path);
+  const recordPath = workerRecordPath(worktreePath);
+  let record: WorkerRecord;
+  try {
+    const stat = (deps.lstatSync || fs.lstatSync)(recordPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('worker record is not a regular file');
+    record = JSON.parse((deps.readFileSync || ((p: string) => fs.readFileSync(p, 'utf8')))(recordPath)) as WorkerRecord;
+    if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('invalid native worker record');
+  } catch {
+    return { ok: false, reason: 'retirement_owner_evidence_unverified', detail: 'native worker lifecycle record is missing, unreadable or malformed; root must reconcile the owner' };
+  }
+  if (record.agentId !== owner || typeof record.worktreePath !== 'string'
+    || !path.isAbsolute(record.worktreePath) || path.resolve(record.worktreePath) !== worktreePath) {
+    return { ok: false, reason: 'retirement_owner_evidence_mismatch', detail: 'native worker record does not account for this exact owner and path' };
+  }
+  const started = Date.parse(record.startedAt);
+  const completed = record.completedAt ? Date.parse(record.completedAt) : NaN;
+  if (record.state !== 'complete' || record.exitCode !== 0 || typeof record.startedAt !== 'string'
+    || typeof record.completedAt !== 'string' || !Number.isFinite(started)
+    || !Number.isFinite(completed) || completed < started || completed > (deps.nowMs ?? Date.now())
+    || !Number.isInteger(record.pid) || record.pid <= 0 || record.pid > 2147483647) {
+    return { ok: false, reason: 'retirement_owner_incomplete', detail: 'native worker record does not prove successful completion with a valid process identity' };
+  }
+  try {
+    if ((deps.isPidAlive || defaultIsPidAlive)(record.pid) !== false) {
+      return { ok: false, reason: 'retirement_owner_live_or_unknown', detail: 'fresh owner liveness is live or unknown; worktree and branch retained' };
     }
-  } else if (autostashUnknown) {
-    warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
+  } catch {
+    return { ok: false, reason: 'retirement_owner_live_or_unknown', detail: 'fresh owner liveness could not be established; worktree and branch retained' };
   }
-  // Not a halt: the index is verified clean, or holds only the operator's own
-  // re-applied work (a successful `--index` pop), which the next merge
-  // autostashes again under the same config.
-  return { halt: false, warnings };
+
+  return { ok: true, auth };
+}
+
+/** A bounded/incomplete inventory is unknown, never evidence of absence. */
+function findNestedCheckout(
+  worktreePath: string,
+  deps: WorktreeDeps,
+): { state: 'present' | 'absent' | 'unknown'; detail: string } {
+  const lstat = deps.lstatSync || fs.lstatSync;
+  const readDir = deps.readDirSafe || defaultReadDirSafe;
+  const unknown = (detail: string) => ({ state: 'unknown' as const, detail });
+  try {
+    const root = lstat(worktreePath);
+    if (!root.isDirectory() || root.isSymbolicLink()) return unknown('worktree path is not a regular directory');
+    const dotGit = lstat(path.join(worktreePath, '.git'));
+    if (dotGit.isDirectory()) return { state: 'present', detail: 'root holds a primary checkout .git directory' };
+    if (!dotGit.isFile() || dotGit.isSymbolicLink()) return unknown('worktree .git pointer is not a regular file');
+  } catch {
+    return unknown('worktree identity could not be read');
+  }
+  const walk = (dir: string, depth: number): { state: 'present' | 'absent' | 'unknown'; detail: string } => {
+    let names: string[] | null;
+    try { names = readDir(dir); } catch { return unknown(`unreadable directory: ${dir}`); }
+    if (!names) return unknown(`unreadable directory: ${dir}`);
+    for (const name of names) {
+      if (name === '.git' && depth === 0) continue;
+      const full = path.join(dir, name);
+      if (name === '.git') return { state: 'present', detail: `nested checkout: ${full}` };
+      let stat: fs.Stats;
+      try { stat = lstat(full); } catch { return unknown(`unreadable entry: ${full}`); }
+      if (stat.isSymbolicLink()) return unknown(`symlinked entry: ${full}`);
+      if (!stat.isDirectory()) continue;
+      if (depth >= 3 || name === 'node_modules') return unknown(`scan bound excludes directory: ${full}`);
+      const result = walk(full, depth + 1);
+      if (result.state !== 'absent') return result;
+    }
+    return { state: 'absent', detail: '' };
+  };
+  return walk(worktreePath, 0);
+}
+
+/** Observe current reachability instead of inferring integration from a wrapper exit. */
+function observeIntegration(execGit: ExecGitFn, repoRoot: string, acceptedHead: string): boolean | null {
+  try {
+    const probe = execGit(['merge-base', '--is-ancestor', acceptedHead, 'HEAD'], { cwd: repoRoot });
+    if (!probe || probe.timedOut || probe.signal || probe.error || probe.stdout !== '' || probe.stderr !== '') return null;
+    return probe.exitCode === 0 ? true : probe.exitCode === 1 ? false : null;
+  } catch { return null; }
+}
+
+/** Refuse integration into a pre-existing or unverified parent sequencer. */
+function integrationSequencerBlock(execGit: ExecGitFn, repoRoot: string): string | null {
+  for (const ref of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'MERGE_AUTOSTASH']) {
+    const probe = execGit(['rev-parse', '--verify', '-q', ref], { cwd: repoRoot });
+    if (probe.exitCode === 1 && !probe.timedOut && !probe.signal && !probe.error
+      && probe.stdout === '' && probe.stderr === '') continue;
+    return `parent ${ref} is present or unverified; preserve the existing sequencer and index for root`;
+  }
+  return null;
+}
+
+type ParentIntegrationInventory =
+  | { ok: true; head: string }
+  | { ok: false; reason: string; detail: string };
+
+/**
+ * RGS-11: only a clean, fully observed parent has a tracked recovery boundary
+ * in HEAD. No uncommitted parent data has ownership/recovery evidence here, so
+ * even non-conflicting untracked/ignored data holds integration for root.
+ *
+ * These reads are NOT an exclusive writer lease. The caller must account for
+ * parent writers/hooks before invocation; a writer after the final observation
+ * can still race Git itself. The native worker record proves neither parent
+ * quiescence nor an exhaustive nested-submodule inventory.
+ */
+function inspectParentIntegrationInventory(execGit: ExecGitFn, repoRoot: string): ParentIntegrationInventory {
+  const unknown = (): ParentIntegrationInventory => ({
+    ok: false,
+    reason: 'integration_parent_inventory_unverified',
+    detail: 'parent tracked/untracked/ignored inventory or HEAD recovery boundary is unknown; retain all work for manual root accounting',
+  });
+  try {
+    const head = execGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: repoRoot });
+    if (!gitResultOk(head) || head.stderr !== '' || !RETIREMENT_SHA_RE.test(head.stdout)) return unknown();
+    // Disable optional index writes and cached filesystem observations. status
+    // alone hides assume-unchanged/skip-worktree entries: reject those flags,
+    // unmerged entries and gitlinks whose nested ignored inventory is unknown.
+    const tracked = execGit(['--no-optional-locks', 'ls-files', '--stage', '-v', '-z'], { cwd: repoRoot });
+    if (!gitResultOk(tracked) || tracked.stderr !== '' || typeof tracked.stdout !== 'string') return unknown();
+    if (tracked.stdout !== '') {
+      if (!tracked.stdout.endsWith('\0')) return unknown();
+      const records = tracked.stdout.slice(0, -1).split('\0');
+      if (records.some(record => !/^H (?:100644|100755|120000) (?:[0-9a-f]{40}|[0-9a-f]{64}) 0\t[^\0]+$/.test(record))) return unknown();
+    }
+    const inventory = execGit([
+      '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
+      'status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none',
+    ], { cwd: repoRoot });
+    if (!gitResultOk(inventory) || inventory.stderr !== '' || typeof inventory.stdout !== 'string') return unknown();
+    if (inventory.stdout !== '') {
+      const lines = inventory.stdout.split('\n');
+      const kind = lines.some(line => line.startsWith('!! ')) ? 'ignored_data_present'
+        : lines.some(line => line.startsWith('?? ')) ? 'untracked_data_present' : 'tracked_changes';
+      return {
+        ok: false,
+        reason: `integration_parent_${kind}`,
+        detail: 'parent contains unaccounted tracked, untracked or ignored data; no merge or automatic backup/restore is authorized; retain it for manual root accounting',
+      };
+    }
+    const freshHead = execGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: repoRoot });
+    if (!gitResultOk(freshHead) || freshHead.stderr !== '' || freshHead.stdout !== head.stdout) return unknown();
+    return { ok: true, head: head.stdout };
+  } catch { return unknown(); }
 }
 
 // #2596: the single definition of "this file is an executor-written SUMMARY
@@ -921,10 +1114,13 @@ function defaultFindSummaryFiles(worktreePath: string): string[] {
  *     (`git cat-file -e HEAD:<relPath>` returns exit 0), skip the copy entirely:
  *     the merge will carry it naturally and copying it as an untracked file would
  *     cause a "untracked working tree files would be overwritten by merge" collision.
- *     On timeout or fatal exit (128) the rescue is also skipped (fail-closed).
+ *     If commitment is not confirmed, attempt only a confined no-overwrite
+ *     rescue and retain both copies on any uncertainty or divergence.
  *     (#706 — execute-phase committed-SUMMARY contract)
  *   - destination = <repoRoot>/<relPath>
- *   - copy when dest is absent or content differs
+ *   - copy ONLY when dest is absent, or when it already holds identical bytes
+ *     (a no-op). A divergent, incomparable or uncontained destination is
+ *     preserved on both sides and reported as a failure; see #ORCH-02 below.
  *
  * Returns `{ rescuedRelPaths, failures }`:
  *   - `rescuedRelPaths`: Set of worktree-relative paths that were successfully rescued
@@ -932,8 +1128,10 @@ function defaultFindSummaryFiles(worktreePath: string): string[] {
  *     where the rescue genuinely succeeded are included so the dirty-block filter does
  *     not suppress paths that were silently lost.
  *   - `failures`: array of `{ relPath, error }` for any path where mkdirSync or
- *     copyFileSync threw.  A read failure during content comparison is NOT a rescue
- *     failure — it sets needsCopy=true and the copy is attempted normally.
+ *     copyFileSync threw, where the destination failed the symlink/containment
+ *     guard, or where the destination could not be PROVEN identical to the
+ *     source. Every failure blocks the caller; none of them overwrites the
+ *     destination. (#ORCH-02)
  */
 function rescueSummaryArtifacts(
   worktreePath: string,
@@ -941,86 +1139,88 @@ function rescueSummaryArtifacts(
   deps: WorktreeDeps,
 ): { rescuedRelPaths: Set<string>; failures: Array<{ relPath: string; error: string }> } {
   const execGit = deps.execGit || execGitDefault;
-  const findSummaryFiles = deps.findSummaryFiles || defaultFindSummaryFiles;
-  const existsSync = deps.existsSync || fs.existsSync;
-  const readFileSync = deps.readFileSync || ((p: string) => fs.readFileSync(p, 'utf8'));
-  const mkdirSync = deps.mkdirSync || ((d: string, o?: { recursive?: boolean }) => fs.mkdirSync(d, o));
-  const copyFileSync = deps.copyFileSync || fs.copyFileSync;
-
-  // #4758: resolve the manifest's worktree_path against repoRoot once, at this
-  // boundary, so every reader of the field here — the fs walker below and the
-  // `git -C` calls — resolves it the way the caller's git consumers already do
-  // (`-C <path>` with `{ cwd: repoRoot }`).  A relative value passed to the
-  // walker verbatim made `path.join` emit a relative directory whose reads
-  // resolved against process.cwd(), silently walking the wrong tree.
-  // With this resolution, the remaining deps-injectable readers (existsSync,
-  // readFileSync, mkdirSync, copyFileSync) only ever see absolute paths:
-  // `dest` is built from repoRoot, `absPath` from the walker's join off this
-  // resolved base.
-  const resolvedWorktreePath = path.resolve(repoRoot, worktreePath);
-
-  const summaryPaths = findSummaryFiles(resolvedWorktreePath);
+  const realpath = deps.realpathSync || fs.realpathSync;
+  const lstat = deps.lstatSync || fs.lstatSync;
+  const readBytes = deps.readFileBytes || ((p: string) => fs.readFileSync(p));
+  const copy = deps.copyFileSync || fs.copyFileSync;
+  const mkdir = deps.mkdirSync || fs.mkdirSync;
+  const worker = path.resolve(repoRoot, worktreePath);
+  const parent = path.resolve(repoRoot);
   const rescuedRelPaths = new Set<string>();
   const failures: Array<{ relPath: string; error: string }> = [];
 
-  for (const absPath of summaryPaths) {
-    // relPath is the path relative to the worktree root (e.g. ".planning/q1-SUMMARY.md")
-    // Normalize to forward slashes so the Set comparison against `git status --porcelain`
-    // output works on Windows too (git always emits forward slashes in porcelain output).
-    const relPath = posixNormalize(absPath.slice(resolvedWorktreePath.length).replace(/^[/\\]/, ''));
-
-    // #706: skip rescue when the SUMMARY is already committed on the branch.
-    // Use `git cat-file -e HEAD:<relPath>` (not `ls-files --error-unmatch`) so
-    // the check is against the committed tree, not the index.  ls-files also
-    // matches staged-but-uncommitted files, which would skip rescue when the
-    // file is staged but not yet committed — the merge wouldn't carry it, and
-    // the executor's content could be lost.  cat-file -e HEAD:<path> returns
-    // exit 0 only when the object exists in the committed HEAD tree.
-    //
-    // #2556: rescue whenever the object is NOT confirmed committed (any non-zero
-    // exit). `git cat-file -e` returns 128 — NOT 1 — for an absent path (the
-    // normal uncommitted-SUMMARY state), so the previous `!== 1` check never
-    // rescued and the untracked file was silently discarded by `worktree remove
-    // --force`. Data safety wins: an un-rescued untracked SUMMARY is lost, while
-    // a spurious rescue is usually a no-op — the destination check below skips the
-    // copy when the main tree already holds identical content (which is also what
-    // guards the #706 merge collision). A divergent dest is overwritten, but only
-    // uncommitted main-tree content could be lost (committed content is git-recoverable).
-    const catFileResult = execGit(['-C', resolvedWorktreePath, 'cat-file', '-e', `HEAD:${relPath}`], { cwd: repoRoot });
-    if (catFileResult.exitCode === 0) {
-      // exit 0 → the SUMMARY is committed on HEAD; the merge will carry it, so skip rescue.
-      continue;
+  // Append ONLY components proven absent by lstat. EIO/EACCES, dangling
+  // symlinks and failures resolving an existing ancestor must stop the rescue.
+  const resolveMissing = (target: string): string => {
+    try { lstat(target); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const up = path.dirname(target);
+      if (up === target) throw err;
+      return path.join(resolveMissing(up), path.basename(target));
     }
-
-    const dest = path.join(repoRoot, relPath);
-    let needsCopy = !existsSync(dest);
-    if (!needsCopy) {
-      try {
-        const srcContent = readFileSync(absPath);
-        const destContent = readFileSync(dest);
-        needsCopy = srcContent !== destContent;
-      } catch {
-        // Read failure during comparison is not a rescue failure — force a copy attempt.
-        needsCopy = true;
+    return realpath(target);
+  };
+  let summaryPaths: string[];
+  try { summaryPaths = (deps.findSummaryFiles || defaultFindSummaryFiles)(worker); } catch (err) {
+    return { rescuedRelPaths, failures: [{ relPath: '.planning', error: `summary_rescue_scan_failed: ${(err as Error).message}` }] };
+  }
+  for (const source of summaryPaths) {
+    const relPath = posixNormalize(path.relative(worker, source));
+    try {
+      if (!isSummaryArtifactRelPath(relPath) || !isContainedIn(path.resolve(source), worker)) {
+        throw new Error('summary_rescue_source_outside_worktree');
       }
-    }
-    if (needsCopy) {
-      try {
-        mkdirSync(path.dirname(dest), { recursive: true });
-        copyFileSync(absPath, dest);
-        // Copy succeeded — the SUMMARY is now safe in the main tree.
-        rescuedRelPaths.add(relPath);
-      } catch (err) {
-        // Write failure: the SUMMARY was NOT rescued.  Record it so the caller can
-        // block cleanup instead of silently losing data.
-        failures.push({ relPath, error: (err as Error).message });
+      const rootReal = realpath(parent);
+      const workerReal = realpath(worker);
+      const sourceStat = lstat(source);
+      if (!sourceStat.isFile() || sourceStat.isSymbolicLink()
+        || !isContainedIn(realpath(source), workerReal)) throw new Error('summary_rescue_source_uncontained_or_symlink');
+      const committed = execGit(['-C', worker, 'cat-file', '-e', `HEAD:${relPath}`], { cwd: parent });
+      if (gitResultOk(committed)) continue;
+      const dest = path.resolve(parent, relPath);
+      const validateDestination = (): void => {
+        if (!isContainedIn(dest, parent) || !isContainedIn(resolveMissing(path.dirname(dest)), rootReal)) {
+          throw new Error('summary_rescue_destination_outside_repo');
+        }
+        try {
+          const stat = lstat(dest);
+          if (!stat.isFile() || stat.isSymbolicLink() || !isContainedIn(realpath(dest), rootReal)) {
+            throw new Error('summary_rescue_destination_symlink_or_nonfile');
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+      };
+      validateDestination();
+      const identical = (): boolean => {
+        validateDestination();
+        const a = readBytes(source);
+        const b = readBytes(dest);
+        if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) throw new Error('summary_rescue_compare_requires_bytes');
+        return a.equals(b);
+      };
+      let absent = false;
+      try { lstat(dest); } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        absent = true;
       }
-    } else {
-      // dest already exists with identical content — SUMMARY is already safe.
+      if (absent) {
+        mkdir(path.dirname(dest), { recursive: true });
+        validateDestination();
+        // COPYFILE_EXCL is the publication guard, not the earlier absence read.
+        // A late destination (including a symlink) can never be overwritten.
+        try { copy(source, dest, fs.constants.COPYFILE_EXCL); } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        }
+      }
+      // Re-read raw bytes after publication or a late EEXIST. A failed/partial
+      // copy or divergence keeps the source and the parent's evidence in place.
+      if (!identical()) throw new Error('summary_rescue_diverged: both copies preserved');
       rescuedRelPaths.add(relPath);
+    } catch (err) {
+      failures.push({ relPath, error: (err as Error).message });
     }
   }
-
   return { rescuedRelPaths, failures };
 }
 
@@ -1034,29 +1234,12 @@ const WAVE_CLEANUP_WARNING = Object.freeze({
   SCOPE_OUT_OF_DECLARED: 'scope_out_of_declared',
   /** The scope diff could not be computed, so conformance is unknown. */
   SCOPE_CHECK_UNAVAILABLE: 'scope_check_unavailable',
-  /**
-   * #4721: a killed merge (at its budget, or by a signal) left this path
-   * staged in repoRoot's index with no MERGE_HEAD, and `git reset --merge`
-   * restored it to HEAD. Informational — repoRoot is clean again.
-   */
+  /** Legacy warning codes retained for consumers; automatic restoration is disabled. */
   MERGE_RESIDUE_RESTORED: 'merge_residue_restored',
-  /**
-   * #4721: a killed merge left this path staged in repoRoot's index with no
-   * MERGE_HEAD and it could NOT be restored (null path: the index could not
-   * be read at all) — or a failed autostash pop left it unmerged. repoRoot is
-   * dirty; committing from it would squash the executor's history into one
-   * parent. The wave halts.
-   */
   MERGE_RESIDUE_LEFT_STAGED: 'merge_residue_left_staged',
-  /**
-   * #4721: the killed merge had parked pre-existing work in MERGE_AUTOSTASH
-   * (`merge.autoStash`), and re-applying it failed or could not be verified.
-   * The work is in the stash list, not lost. Path is always null. On its own
-   * the index is clean and the wave continues; when a failed pop left
-   * unmerged entries it is accompanied by MERGE_RESIDUE_LEFT_STAGED rows and
-   * the wave halts.
-   */
   MERGE_AUTOSTASH_UNRESTORED: 'merge_autostash_unrestored',
+  /** A failed or unverified merge is preserved intact and the wave is halted. */
+  MERGE_MANUAL_ROOT_RECOVERY_REQUIRED: 'merge_manual_root_recovery_required',
   /**
    * #4415: an entry was merged on the evidence that its checkout was already
    * gone, rather than on a clean read of a present worktree.
@@ -1183,6 +1366,10 @@ function partitionDeclaredDeletions(deletedPaths: unknown, declared: unknown): s
 }
 
 interface WaveCleanupEntryResult extends CleanupManifestEntry {
+  /** true only when integration was observed; null means a failed probe. */
+  integrated: boolean | null;
+  /** Observed tracked recovery boundary, not a parent writer lease. */
+  parent_head_before_merge?: string;
   status: string;
   reason: string | null;
   stderr: string;
@@ -1242,42 +1429,29 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
   //    dirty check exists to refuse. `statSync` separates them: ENOENT is gone,
   //    EACCES/EIO is unreadable.
   //
-  // The identity read is a SNAPSHOT taken before the loop, and that is load-bearing:
-  // `git worktree prune` is repository-wide, so the first absent entry's teardown
-  // clears EVERY stale registration, including those of entries not yet evaluated.
-  // Measured: two removed worktrees, one `prune`, and both registrations are gone.
-  // Reading the list per entry would therefore merge the first harness-removed
-  // worktree of a wave and block the rest as `branch_mismatch` — worse than the bug
-  // this PR fixes, since a wave of parallel executors is the normal case.
-  //
-  // Captured LAZILY, on the first entry that actually needs identity, and reused for
-  // the rest of the wave. Laziness is what keeps the read off the happy path — a wave
-  // whose worktrees are all present never spends the subprocess — and it is still
-  // early enough to be a true pre-prune snapshot, because every teardown that prunes
-  // consults this predicate first.
-  let worktreeListSnapshot: WorktreeListResult | null = null;
-  const snapshotWorktreeList = (): WorktreeListResult => {
-    if (!worktreeListSnapshot) worktreeListSnapshot = readWorktreeList(plan.repoRoot, { execGit });
-    return worktreeListSnapshot;
-  };
   const resolveAgainstRepoRoot = (worktreePath: string): string => path.resolve(plan.repoRoot, worktreePath);
-  const findRegistered = (listed: WorktreeListResult, target: string): WorktreeEntry | undefined => (
-    listed.ok
-      ? listed.entries.find((listedEntry) => resolveAgainstRepoRoot(listedEntry.path) === target)
-      : undefined
-  );
-
-  // `worktree_path` comes from the manifest verbatim and may be relative, while the
-  // porcelain always reports absolute paths; git resolves the manifest form against
-  // repoRoot (every call passes `-C <path>` with `cwd: plan.repoRoot`), so match it
-  // the same way.
+  const canonicalIdentity = (target: string): string | null => {
+    try {
+      try { (deps.lstatSync || fs.lstatSync)(target); } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+        const parent = path.dirname(target);
+        if (parent === target) return null;
+        const ancestor = canonicalIdentity(parent);
+        return ancestor === null ? null : path.join(ancestor, path.basename(target));
+      }
+      // Git for Windows records native long-form paths. The JavaScript
+      // realpath walker can retain 8.3 names or input casing for non-symlinks,
+      // so compare names obtained from the filesystem, never lexical folds.
+      // Missing suffixes above still require a verified existing ancestor.
+      return (deps.realpathSync || fs.realpathSync.native)(target);
+    } catch { return null; }
+  };
   const registeredFor = (worktreePath: string): WorktreeEntry | undefined => {
-    const target = resolveAgainstRepoRoot(worktreePath);
-    const fromSnapshot = findRegistered(snapshotWorktreeList(), target);
-    if (fromSnapshot) return fromSnapshot;
-    // Absent from the snapshot: it may have been registered after the wave began.
-    // A list that cannot be read yields no entry, which blocks — the fail-safe way.
-    return findRegistered(readWorktreeList(plan.repoRoot, { execGit }), target);
+    const listed = readWorktreeList(plan.repoRoot, { execGit });
+    const target = canonicalIdentity(resolveAgainstRepoRoot(worktreePath));
+    return listed.ok && target !== null
+      ? listed.entries.find((entry) => canonicalIdentity(resolveAgainstRepoRoot(entry.path)) === target)
+      : undefined;
   };
 
   const statSyncRaw = deps.statSync || fs.statSync;
@@ -1340,23 +1514,34 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
     allWarnings.push(warning);
   };
 
-  // #2852: every per-entry failure site marks the SAME shape — status='blocked',
-  // a reason code, the captured stderr, push to results, flip the overall `ok`
-  // flag — and then either `continue` (isolate, the default) or, for the one
-  // repo-level-failure carve-out, `break`. Factored out so the 8 call sites below
-  // don't repeat the assembly; each site still owns its own control-flow decision.
+  // Per-entry refusals remain independent until a merge is attempted. A failed
+  // or unverified merge halts the wave because parent state has no known owner.
   function blockEntry(result: WaveCleanupEntryResult, reason: string, stderr: string): void {
-    result.status = 'blocked';
+    result.status = result.integrated === true ? 'integrated_retained' : result.integrated === null ? 'integration_unknown_retained' : 'blocked';
     result.reason = reason;
     result.stderr = stderr;
     results.push(result);
     ok = false;
   }
 
+  function noteManualMergeRecovery(result: WaveCleanupEntryResult): string {
+    const detail = 'Manual root recovery required: parent index, worktree, merge/autostash state, worker checkouts and all recovery refs are retained. Account for any still-running hooks or concurrent writers before recovery or another merge.';
+    const warning: WaveCleanupWarning = {
+      code: WAVE_CLEANUP_WARNING.MERGE_MANUAL_ROOT_RECOVERY_REQUIRED,
+      branch: result.branch,
+      path: null,
+      detail,
+    };
+    result.warnings.push(warning);
+    allWarnings.push(warning);
+    return detail;
+  }
+
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     const result: WaveCleanupEntryResult = {
       ...entry,
+      integrated: false,
       status: 'pending',
       reason: null,
       stderr: '',
@@ -1476,6 +1661,32 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       allWarnings.push(...scopeWarnings);
     }
 
+    // Acceptance/lifecycle/recovery authority must be established BEFORE rescue
+    // creates any parent artifact. Missing/active/unknown owners never write.
+    const retirementGate = evaluateRetirementAuthorization(entry, plan.repoRoot, execGit, deps);
+    if (!retirementGate.ok) {
+      blockEntry(result, retirementGate.reason, retirementGate.detail);
+      continue;
+    }
+    const acceptedHead = retirementGate.auth.accepted_head;
+    const registeredBefore = registeredFor(entry.worktree_path);
+    if (!registeredBefore || registeredBefore.branch !== entry.branch || registeredBefore.locked) {
+      blockEntry(result, 'retirement_registration_unverified', 'fresh registration is missing, changed or locked; owner reconciliation required');
+      continue;
+    }
+
+    const parentSequence = integrationSequencerBlock(execGit, plan.repoRoot);
+    if (parentSequence) {
+      blockEntry(result, 'integration_parent_sequencer_unverified', parentSequence);
+      continue;
+    }
+
+    const parentInventory = inspectParentIntegrationInventory(execGit, plan.repoRoot);
+    if (!parentInventory.ok) {
+      blockEntry(result, parentInventory.reason, parentInventory.detail);
+      continue;
+    }
+
     // #4415: both steps below read the worktree directory. The rescue exists to
     // save work the executor left UNCOMMITTED; the dirty check exists to refuse
     // to merge over it. Against an absent path they fail differently, and only
@@ -1493,6 +1704,10 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
     // What is claimed is only the narrow thing true either way — a missing
     // source cannot be read, so skipping the read loses nothing that still
     // exists. (Codex review round 1.)
+    // #ORCH-03: hoisted so the post-merge fresh dirty probe below filters the
+    // SAME rescued set. A rescue that landed the SUMMARY in the parent tree
+    // leaves the worktree file in place, so it must not read as late work.
+    let rescuedRelPaths: Set<string> = new Set();
     if (!worktreeAbsent) {
       // Safety net: rescue uncommitted SUMMARY.md artifacts before the dirty check.
       // The executor leaves <quick_id>-SUMMARY.md uncommitted by contract — the
@@ -1503,7 +1718,8 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       // reasoning that the nested block created another route in; Codex review
       // round 2 showed that is not so — flipping `worktreeAbsent` SKIPS the
       // consumer rather than reaching it unassigned.)
-      const { rescuedRelPaths, failures: rescueFailures } = rescueSummaryArtifacts(entry.worktree_path, plan.repoRoot, deps);
+      const { rescuedRelPaths: rescued, failures: rescueFailures } = rescueSummaryArtifacts(entry.worktree_path, plan.repoRoot, deps);
+      rescuedRelPaths = rescued;
       if (rescueFailures.length > 0) {
         blockEntry(result, 'summary_rescue_failed', rescueFailures.map((f) => `${f.relPath}: ${f.error}`).join('; '));
         continue; // #2852: isolate
@@ -1554,167 +1770,122 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       }
     }
 
+    const integrationGate = evaluateRetirementAuthorization(entry, plan.repoRoot, execGit, deps);
+    const integrationRegistration = registeredFor(entry.worktree_path);
+    if (!integrationGate.ok) {
+      blockEntry(result, integrationGate.reason, integrationGate.detail);
+      continue;
+    }
+    if (!integrationRegistration || integrationRegistration.branch !== entry.branch || integrationRegistration.locked) {
+      blockEntry(result, 'retirement_registration_changed', 'registration changed before integration; all work retained');
+      continue;
+    }
+
+    const freshParentSequence = integrationSequencerBlock(execGit, plan.repoRoot);
+    if (freshParentSequence) {
+      blockEntry(result, 'integration_parent_sequencer_unverified', freshParentSequence);
+      continue;
+    }
+
+    // Rescue may itself have published an uncommitted parent SUMMARY, or a
+    // writer may have arrived since the first inventory. Neither grants merge
+    // authority: retain all copies and require root to account for the data.
+    const freshParentInventory = inspectParentIntegrationInventory(execGit, plan.repoRoot);
+    if (!freshParentInventory.ok) {
+      blockEntry(result, freshParentInventory.reason, freshParentInventory.detail);
+      continue;
+    }
+    if (freshParentInventory.head !== parentInventory.head) {
+      blockEntry(result, 'integration_parent_head_changed', 'parent HEAD changed during preflight; recovery/ownership must be reconciled by root before integration');
+      continue;
+    }
+    result.parent_head_before_merge = freshParentInventory.head;
+
     // #4721: the merge runs user hooks, so it carries its own budget — see
     // DEFAULT_MERGE_TIMEOUT_MS. Every other call in this gauntlet keeps the
     // module default.
     const mergeTimeoutMs = deps.mergeTimeoutMs ?? DEFAULT_MERGE_TIMEOUT_MS;
-    const merge = execGit(
-      ['merge', entry.branch, '--no-ff', '--no-edit', '-m', `chore: merge executor worktree (${entry.branch})`],
-      { cwd: plan.repoRoot, timeout: mergeTimeoutMs },
-    );
+    // #ORCH-03: merge the PINNED, authorized commit — not the mutable branch
+    // name. The gate above proves the branch is at `acceptedHead` right now;
+    // merging the name would still follow it if it moved between that read and
+    // this call, which is precisely how the audit's `stale-merge` fixture
+    // pulled an unreviewed late commit into the parent. The branch ref is
+    // retained for a manual root-operated native Git retirement handoff.
+    let merge: GitResult;
+    try {
+      merge = execGit(
+        ['merge', acceptedHead, '--no-ff', '--no-edit', '--no-autostash', '-m', `chore: merge executor worktree (${entry.branch})`],
+        { cwd: plan.repoRoot, timeout: mergeTimeoutMs },
+      );
+    } catch (error) {
+      // A throwing transport cannot establish whether Git ran or committed.
+      merge = { exitCode: 1, stdout: '', stderr: '', timedOut: false, signal: null, error: error instanceof Error ? error : new Error(String(error)) };
+    }
     if (!gitResultOk(merge)) {
+      result.integrated = observeIntegration(execGit, plan.repoRoot, acceptedHead);
+      const recoveryDetail = noteManualMergeRecovery(result);
       if (merge?.timedOut) {
-        // #4721: say "timeout" when it was one. The captured output is whatever
-        // the hook printed before git was killed, which read as a git error under
-        // the old `merge_failed` label and made a healthy executor branch look
-        // broken. The hook itself is a child of the killed git process and may
-        // still be running.
         const partial = (merge.stderr || merge.stdout || '').trim();
         blockEntry(
           result,
           'merge_timed_out',
-          `git merge did not finish within ${mergeTimeoutMs} ms and was killed (a merge hook such as pre-merge-commit may still be running; raise deps.mergeTimeoutMs or shorten the hook)${partial ? `; output before the kill: ${partial}` : ''}`,
+          `git merge did not finish within ${mergeTimeoutMs} ms and was killed${partial ? `; output before the kill: ${partial}` : ''}. ${recoveryDetail}`,
         );
       } else {
-        blockEntry(result, 'merge_failed', merge?.stderr || merge?.stdout || '');
+        const diagnostic = (merge?.stderr || merge?.stdout || merge?.error?.message || '').trim();
+        blockEntry(result, 'merge_failed', `${diagnostic ? `${diagnostic}. ` : ''}${recoveryDetail}`);
       }
-      // #2852: a failed --no-ff merge MIGHT leave repoRoot itself mid-merge
-      // (MERGE_HEAD set, conflict markers in the tree) — unlike every other block
-      // reason above, that specific state is NOT scoped to this one entry: a second
-      // `git merge` cannot even start while one is in progress, so every remaining
-      // entry would be corrupted by it. But git also refuses many merges WITHOUT ever
-      // entering a merge state (e.g. "your local changes would be overwritten by
-      // merge") — in that case repoRoot's tree was never touched and this failure is
-      // scoped to this entry, same as everything else. Attempt the abort as a
-      // best-effort cleanup, then check repoRoot's ACTUAL state directly — not
-      // `git merge --abort`'s own exit code, which fails "There is no merge to abort"
-      // in the safe case too and would misclassify it as unrecoverable (caught in
-      // review). Only a repo genuinely still mid-merge afterward legitimately halts
-      // the rest of the wave (the brief's "infrastructure-level failure" carve-out).
-      execGit(['merge', '--abort'], { cwd: plan.repoRoot });
-      if (repoRootStillMidMerge(execGit, plan.repoRoot)) {
-        pending.push(...entries.slice(i + 1));
-        break;
-      }
-      // #4721: "no MERGE_HEAD" is not "tree never touched". A merge killed while
-      // its pre-merge-commit hook ran has already written the merged tree into
-      // repoRoot's index (and set ORIG_HEAD) but never got to write MERGE_HEAD,
-      // so the #2852 check above reads it as clean while the executor's whole
-      // diff sits staged against the old HEAD. `git merge --abort` cannot see
-      // that state either. Left alone, the next `git merge` in this wave would
-      // refuse ("your local changes would be overwritten") or, worse, an
-      // orchestrator that trusts the block reason and commits from repoRoot
-      // squashes the executor's history into one parent. Restore it; if that
-      // cannot be verified, halt the wave exactly as the mid-merge case does.
-      //
-      // ONLY when git was KILLED — at its budget, or by a signal from outside.
-      // A merge git REFUSED (no MERGE_HEAD either) leaves the index exactly as
-      // it found it — and "your local changes would be overwritten" is precisely
-      // the refusal a pre-existing dirty index earns, so on that path anything
-      // staged is the operator's own work and must not be touched (caught in
-      // review). A kill is the one shape that stages a tree git never finished
-      // with, and an external SIGTERM produces the same state as the timeout
-      // without `timedOut` (caught in review too). The seam normalizes a
-      // signal death to exitCode 1 and carries the signal alongside, so the
-      // signal — never the exit code — is the tell; a refused merge has none.
-      const mergeKilled = !!merge?.timedOut || !!merge?.signal;
-      if (mergeKilled) {
-        const residue = restoreMergeResidue(execGit, plan.repoRoot, entry.branch);
-        result.warnings.push(...residue.warnings);
-        allWarnings.push(...residue.warnings);
-        if (residue.halt) {
-          pending.push(...entries.slice(i + 1));
-          break;
-        }
-      }
-      continue; // #2852: isolate — repoRoot is not (or no longer) mid-merge
+      // RGS-10: even a clean initial index cannot establish ownership of later
+      // staging. No abort/reset/stash/pop/restore is safe here. Do not infer a
+      // pristine parent from missing MERGE_HEAD or continue after any failure.
+      pending.push(...entries.slice(i + 1));
+      break;
     }
 
-    if (worktreeAbsent) {
-      // #4415 (Codex review round 2): this entry was accepted WITHOUT the rescue
-      // and dirty checks, on the evidence that it had no checkout. Never issue
-      // `worktree remove --force` for it. If a registered checkout has since
-      // reappeared at that path — recreated between the checks and here — a
-      // forced removal would delete contents that never passed either check,
-      // which is strictly worse than the bug this PR fixes.
-      //
-      // Re-confirm absence immediately before tearing down (maintainer review,
-      // Major). Presence was classified once, at identification, and everything
-      // between then and here — the base, deletion and scope gates, and the merge
-      // itself — is a window in which a worktree can reappear. "Prune only" was
-      // offered as sufficient on its own, on the argument that prune leaves a live
-      // checkout alone and the `branch -D` below would then fail visibly. That
-      // argument holds only while prune's own staleness check is not fooled by the
-      // same filesystem-visibility gap that produced the false absence one call
-      // earlier. If it is, prune clears the admin entry, `branch -D` then SUCCEEDS,
-      // and a live, unreviewed, un-rescued worktree loses its branch — destroying
-      // state, where the pre-fix bug only ever blocked. That asymmetry is why this
-      // check is worth a `statSync`: the failure it prevents is unrecoverable, and
-      // the check costs no subprocess.
-      if (!confirmedGone(entry.worktree_path)) {
-        blockEntry(result, 'worktree_remove_failed',
-          `worktree ${entry.worktree_path} reappeared after being accepted as absent; refusing to prune or delete its branch`);
-        continue; // #2852: isolate — the merge already landed on repoRoot
-      }
-      // Prune only: it clears the admin entry when the directory really is gone.
-      const prune = execGit(['worktree', 'prune'], { cwd: plan.repoRoot });
-      if (!gitResultOk(prune)) {
-        blockEntry(result, 'worktree_remove_failed', prune?.stderr || '');
-        continue; // #2852: isolate — the merge already landed on repoRoot
-      }
-    } else {
-      let remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
-      if (!gitResultOk(remove)) {
-        // Locked worktrees require unlock before remove (or --force --force).
-        // Attempt: git worktree unlock <path> (ignore failure — already unlocked is ok)
-        // then retry git worktree remove --force.  (#3707)
-        execGit(['worktree', 'unlock', entry.worktree_path], { cwd: plan.repoRoot });
-        remove = execGit(['worktree', 'remove', entry.worktree_path, '--force'], { cwd: plan.repoRoot });
-      }
-      if (!gitResultOk(remove)) {
-        // #4415: a remove that fails only because the path is already gone ("is
-        // not a working tree") used to surface as `worktree_remove_failed` AFTER
-        // the merge had already landed, leaving the branch undeleted and the
-        // operator to run `git worktree prune` + `git branch -D` + `rm -rf` by
-        // hand every wave. What is actually left behind is the admin entry under
-        // .git/worktrees, which is exactly what `prune` clears. Staleness is
-        // re-read here rather than reusing the branch-step answer: the harness
-        // removes worktrees on subagent completion, which can land in between.
-        // Asked of git, so a `remove` that failed for any reason OTHER than the
-        // path being gone — a lock this did not clear, a permissions error — still
-        // blocks instead of being tidied away by a prune.
-        if (!absentAndIdentified(entry.worktree_path, entry.branch)) {
-          blockEntry(result, 'worktree_remove_failed', remove?.stderr || '');
-          // #2852: isolate — the merge already landed on repoRoot; only this entry's
-          // worktree/branch teardown is affected.
-          continue;
-        }
-        // NB: `git worktree prune` is repository-wide maintenance, not an
-        // entry-scoped operation — it clears every stale admin entry, not only this
-        // one. NOT harmless, and an earlier version of this comment was wrong to
-        // say so (Codex review round 4): because identity now comes from the
-        // registration, a prune here destroys the evidence later entries in the same
-        // wave need. That is why the identity read is a snapshot taken before the
-        // loop; see `worktreeListSnapshot`.
-        const prune = execGit(['worktree', 'prune'], { cwd: plan.repoRoot });
-        if (!gitResultOk(prune)) {
-          blockEntry(result, 'worktree_remove_failed', prune?.stderr || '');
-          continue; // #2852: isolate
-        }
+    result.integrated = observeIntegration(execGit, plan.repoRoot, acceptedHead);
+    if (result.integrated !== true) {
+      const recoveryDetail = noteManualMergeRecovery(result);
+      blockEntry(result, 'integration_not_observed', `merge returned success but current accepted-head reachability is absent or unverified. ${recoveryDetail}`);
+      pending.push(...entries.slice(i + 1));
+      break;
     }
+    const registeredNow = registeredFor(entry.worktree_path);
+    if (!registeredNow || registeredNow.branch !== entry.branch || registeredNow.locked) {
+      blockEntry(result, 'retirement_registration_changed', 'fresh registration is missing, changed or locked after integration; worktree and branch retained');
+      continue;
     }
-
-    const branchDelete = execGit(['branch', '-D', entry.branch], { cwd: plan.repoRoot });
-    if (!gitResultOk(branchDelete)) {
-      result.status = 'warning';
-      result.reason = 'branch_delete_failed';
-      result.stderr = branchDelete?.stderr || '';
-      ok = false;
-    } else {
-      result.status = 'merged_removed';
-      result.reason = 'ok';
+    const freshGate = evaluateRetirementAuthorization(entry, plan.repoRoot, execGit, deps);
+    if (!freshGate.ok) {
+      blockEntry(result, freshGate.reason, freshGate.detail);
+      continue;
     }
-    results.push(result);
+    if (!worktreeAbsent) {
+      const postHead = execGit(['-C', entry.worktree_path, 'rev-parse', 'HEAD'], { cwd: plan.repoRoot });
+      if (!gitResultOk(postHead) || postHead.stdout.trim() !== acceptedHead) {
+        blockEntry(result, 'retirement_head_advanced', 'fresh worktree HEAD differs or is unknown; worktree and branch retained');
+        continue;
+      }
+      const status = execGit(['-C', entry.worktree_path, 'status', '--porcelain', '--untracked-files=all', '--ignored=matching'], { cwd: plan.repoRoot });
+      if (!gitResultOk(status)) {
+        blockEntry(result, 'retirement_probe_failed', 'fresh status is unknown; worktree and branch retained');
+        continue;
+      }
+      if (status.stdout.trim()) {
+        blockEntry(result, status.stdout.split('\n').some((line) => line.startsWith('!!')) ? 'retirement_ignored_data_present' : 'worktree_dirty', 'worktree contains tracked, untracked or ignored data; all copies retained');
+        continue;
+      }
+      const nested = findNestedCheckout(resolveAgainstRepoRoot(entry.worktree_path), deps);
+      if (nested.state !== 'absent') {
+        blockEntry(result, nested.state === 'present' ? 'retirement_nested_checkout_present' : 'retirement_nested_scan_unknown', nested.detail);
+        continue;
+      }
+    }
+    // The native lifecycle record tracks one PID, not all descendants or an
+    // exclusive owner lease. It cannot authorize automatic retirement even when
+    // that PID is dead and the record is complete. Root must account for every
+    // writer and perform the final native Git handoff. No remove/unlock/prune/
+    // ref deletion is attempted here, including for missing worktree paths.
+    blockEntry(result, 'retirement_manual_root_handoff_required', 'accepted commit integrated; worktree, registration and branch retained. Root must verify quiescence and recovery before entry-scoped native Git retirement.');
   }
 
   return {
@@ -2152,37 +2323,6 @@ interface WorktreeCreateResult {
 }
 
 /**
- * Best-effort bounded rollback of a partial/orphaned worktree (#2584 FIX 3,
- * scope narrowed by FIX 5). Invoked ONLY when a `git worktree add` TIMED OUT
- * mid-operation — a SIGTERM'd `add` can leave a `.git/worktrees/<name>` admin
- * entry / directory on disk that got past validation into the file checkout,
- * so the partial is genuinely THIS call's own creation and is safe to
- * best-effort remove immediately. It is deliberately NOT invoked on a clean
- * non-zero `add` exit (see FIX 5) — the most common such failure is a
- * COLLISION (the path/branch is already a registered worktree), git fails
- * FAST there having created nothing, and the branch namespace this verb
- * writes into (`worktree-agent-*`/`agent-*`) is exactly the concurrent-
- * executor namespace, so a colliding path is very plausibly a LIVE PEER
- * executor whose uncommitted work `--force` would destroy. Also invoked from
- * `cmdWorktreeCreate` when a successful `add` is followed by a manifest-write
- * failure (#2584 FIX 1) — that path proves THIS call created the worktree, so
- * removing it is safe. This is immediate best-effort hygiene, not the only
- * safety net: `reapOrphanWorktrees` scans the `.git/worktrees/` admin
- * directory directly (a genuine directory-scan backstop, not manifest-only),
- * so any partial this call cannot reach is still eventually discovered and
- * reaped there. The result is intentionally ignored and a throw is
- * swallowed: this is best-effort cleanup, never a new source of truth, and
- * must never mask or block the caller's own degraded-but-honest return.
- */
-function rollbackPartialWorktree(execGit: ExecGitFn, worktreePath: string, repoRoot: string): void {
-  try {
-    execGit(['worktree', 'remove', '--force', worktreePath], { cwd: repoRoot });
-  } catch {
-    // best-effort only — a throwing rollback must never mask the original failure.
-  }
-}
-
-/**
  * Execute a `planWorktreeCreate` plan via bounded git. Fail-closed at every
  * step — a timeout or a non-zero exit degrades to a structured result rather
  * than throwing, and the base must resolve BEFORE any worktree is created (no
@@ -2215,7 +2355,7 @@ function executeWorktreeCreatePlan(plan: WorktreeCreatePlan, repoRoot: string, d
   const addResult = execGit(['worktree', 'add', '-b', branch, worktreePath, base], { cwd: repoRoot });
   if (addResult.timedOut) {
     // #2584 FIX 3: a SIGTERM'd `add` can leave a partial worktree on disk.
-    rollbackPartialWorktree(execGit, worktreePath, repoRoot);
+    // Retain partial checkout/admin evidence for root; timeout is not owner authority.
     return { ok: false, reason: 'git_timeout', worktree_path: normalizedPath, branch, base };
   }
   if (addResult.exitCode !== 0) {
@@ -2259,11 +2399,9 @@ interface WorktreeCreateCmdResult {
  * #2584 FIX 1 — ORDERING CONTRACT: every manifest read/parse/shape-validate/
  * plan step runs BEFORE the git side effect (step 5). The ONLY manifest
  * operation that can run AFTER `git worktree add` has succeeded is the final
- * guarded write (step 6), and a failure there triggers a best-effort rollback
- * of the just-created worktree — so a malformed/mis-shaped manifest, or a
- * `writeFile` IO error, can never leave a REAL worktree on disk with no
- * manifest entry (cleanup-wave/reap-orphans only discover worktrees via the
- * manifest, never a directory scan) or an uncaught throw.
+ * guarded write (step 6). A failure retains the created checkout and branch
+ * for root reconciliation; neither a timeout nor a failed manifest write is
+ * authority to discard data or registrations.
  */
 function cmdWorktreeCreate(cwd: string, args: string[] = [], deps: RecordAgentCmdDeps & WorktreeDeps = {}): WorktreeCreateCmdResult {
   const flag = (name: string): string => {
@@ -2436,10 +2574,8 @@ function cmdWorktreeCreate(cwd: string, args: string[] = [], deps: RecordAgentCm
   const manifestToWrite = `${JSON.stringify(writeBack, null, 2)}\n`;
 
   // 5. NOW run the git side effect. Every manifest problem above is caught
-  //    before this point, so a malformed/mis-shaped manifest can never leave
-  //    an unmanifested worktree on disk. `executeWorktreeCreatePlan` itself
-  //    best-effort rolls back a partial worktree on its own add-timeout /
-  //    add-failed paths (#2584 FIX 3).
+  //    before this point. A timeout retains partial creation evidence for root;
+  //    it never force-removes a checkout or prunes registrations.
   const result = executeWorktreeCreatePlan(plan, cwd, deps);
   if (!result.ok) {
     writeErr(`[gsd] worktree.create: ${result.reason} — ${result.stderr || ''}\n`);
@@ -2449,16 +2585,13 @@ function cmdWorktreeCreate(cwd: string, args: string[] = [], deps: RecordAgentCm
   }
 
   // 6. Write the pre-computed manifest string, guarded. A write failure here
-  //    means a REAL worktree now exists with NO manifest entry — roll it back
-  //    (best-effort) rather than leaving an orphan cleanup-wave/reap-orphans
-  //    can never reach (#2584 FIX 1). Never throws past this function.
+  //    means a real checkout may exist without a manifest entry. Report and
+  //    retain it for root reconciliation. Never remove it on a write error.
   const writeFile = deps.writeFile || ((p: string, content: string) => fs.writeFileSync(p, content, 'utf8'));
   try {
     writeFile(resolved, manifestToWrite);
   } catch (err) {
-    const execGit = deps.execGit || execGitDefault;
-    rollbackPartialWorktree(execGit, plan.entry.worktree_path, cwd);
-    const hint = `The worktree was created but the manifest write failed (${(err as Error).message}); rolled back the worktree via a best-effort 'git worktree remove --force'.`;
+    const hint = `The worktree was created but the manifest write failed (${(err as Error).message}); worktree, registration and branch retained for manual root reconciliation.`;
     writeErr(`[gsd] worktree.create: manifest_write_failed — ${hint}\n`);
     write(`${JSON.stringify({ ok: false, reason: 'manifest_write_failed', hint, error: (err as Error).message }, null, 2)}\n`);
     process.exitCode = 1;
@@ -2470,15 +2603,35 @@ function cmdWorktreeCreate(cwd: string, args: string[] = [], deps: RecordAgentCm
 }
 
 /**
- * Reap orphaned linked worktrees whose lock owner process is dead, whose
- * branch tip is fully merged into the default branch, and whose lock file
- * mtime is older than REAP_MTIME_GUARD_MS (race guard).
+ * Inspect linked worktrees whose lock owner process is dead, whose branch tip
+ * is fully merged into the default branch, and whose lock file mtime is older
+ * than REAP_MTIME_GUARD_MS (race guard).
+ *
+ * NON-DESTRUCTIVE since the 2026-10-23 custody audit (#ORCH-01). Those three
+ * conditions are a nomination, not an authorization: see section 4d below.
+ * The sweep reports each candidate as `retained` and removes nothing. The
+ * `reap-orphans` name is retained for CLI/registry compatibility; the
+ * function no longer reaps.
  */
 const REAP_MTIME_GUARD_MS = 5 * 60 * 1000; // 5 minutes
 
 interface ReapResult {
   path: string;
-  status: 'reaped' | 'skipped';
+  /**
+   * #ORCH-01: `retained` is the non-destructive third outcome.
+   *
+   * The PID-age/ancestry heuristics below can only ever NOMINATE a candidate.
+   * They cannot establish that the work is unowned, complete or recoverable —
+   * which is what retirement actually requires. A candidate that passes every
+   * heuristic is therefore retained and reported here, with the worktree, its
+   * lock and its branch left exactly as found.
+   *
+   * `retained` is deliberately distinct from `skipped`: `skipped` means the
+   * sweep declined to act on its own heuristics, while `retained` means it
+   * found a candidate it is NOT authorized to retire. Collapsing the two would
+   * hide the actionable candidates among the ordinary negatives.
+   */
+  status: 'reaped' | 'skipped' | 'retained';
   reason: string;
 }
 
@@ -2683,19 +2836,41 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
       continue;
     }
 
-    // 4d. Reap: unlock → remove --force.
-    execGit(['worktree', 'unlock', gitKnownPath], { cwd: repoRoot }); // ignore failure (already unlocked)
-    const removeResult = execGit(['worktree', 'remove', gitKnownPath, '--force'], { cwd: repoRoot });
-    if (!gitResultOk(removeResult)) {
-      results.push({ path: worktreePath, status: 'skipped', reason: 'remove_failed' });
-      continue;
-    }
-
-    results.push({ path: gitKnownPath, status: 'reaped', reason: 'pid_dead_and_merged' });
+    // 4d. RETAIN — never destroy (#ORCH-01).
+    //
+    // Everything above is a HEURISTIC that only NOMINATES a candidate: the lock
+    // is stale, its owner PID is gone, and the branch tip is already an ancestor
+    // of the default branch. None of that is authorization to retire the work.
+    //
+    // A dead creator PID does not mean the work is unowned. A worker can die
+    // after committing — or after leaving tracked, untracked or ignored edits —
+    // and never be resumed, and the ancestry test stays true the whole time
+    // because the branch was cut from an already-merged base. That combination
+    // is exactly what the 2026-10-23 custody audit reproduced as `orphan-dead`:
+    // a dirty, locked worktree whose creator crashed, force-removed together
+    // with its uncommitted files. It is also why no dirty/untracked/ignored/
+    // nested-checkout check below would be sufficient on its own: the sweep is
+    // not the owner, so it has no standing to decide this work is disposable.
+    //
+    // The previous cut additionally ran `worktree unlock` and
+    // `worktree remove --force`, overriding another owner's lock as a side
+    // effect of a maintenance sweep. That is a separate authority the sweep
+    // does not hold, so both calls are gone: no unlock, no forced removal, no
+    // branch deletion. Nothing here can clear a lock, remove a directory, or
+    // retire a ref.
+    //
+    // What remains is the honest verdict: the entry is a retirement CANDIDATE
+    // that stays on disk for root to authorize against the recorded owner,
+    // accepted head and recovery reference. The cleanup wave also retains the checkout;
+    // final retirement requires a manual root-operated native Git handoff.
+    results.push({
+      path: gitKnownPath,
+      status: 'retained',
+      reason: 'owner_completion_authorization_required',
+    });
   }
 
-  // 5. Always prune stale metadata (handles missing-on-disk entries).
-  execGit(['worktree', 'prune'], { cwd: repoRoot });
+  // Startup nomination has no authority over unrelated stale registrations.
 
   return results;
 }
@@ -2755,7 +2930,20 @@ function cmdWorktreeReapOrphans(cwd: string, deps: RecordAgentCmdDeps & Worktree
     // Surface skipped entries so operators are aware of unresolved orphans.
     writeErr(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
   }
-  write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
+  // #ORCH-01: retained candidates are the sweep's actionable output now that it
+  // no longer removes anything. They are reported separately from `skipped`
+  // because they need root to supply owner/completion/recovery authorization,
+  // which is a different operator action than "wait for the lock to age out".
+  const retainedCount = result.filter((r) => r.status === 'retained').length;
+  if (retainedCount > 0) {
+    writeErr(
+      `[gsd] worktree.reap-orphans: ${retainedCount} orphan candidate(s) retained`
+      + ' — retirement requires owner completion/recovery authorization (nothing was removed)\n'
+    );
+  }
+  // `reaped` is kept in the payload for workflow/CLI compatibility. It is now
+  // always 0: this command removes nothing. `retained` carries the candidates.
+  write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, retained: retainedCount, entries: result }, null, 2)}\n`);
 }
 
 // ─── Worker lifecycle records (#4624) ────────────────────────────────────────
@@ -3072,9 +3260,8 @@ function resolveWorktreeRoot(cwd: string, deps: WorktreeDeps = {}): { root: stri
 }
 
 /**
- * Clear stale worktree metadata references via `git worktree prune`.
- *
- * Destructive linked-worktree removal is disabled by default for safety.
+ * Report retained worktree metadata. Repository-wide pruning requires root
+ * accounting for all affected owners and recovery references.
  *
  * @param repoRoot - absolute path to the main (or any) worktree of
  *   the repository; used as `cwd` for git commands.
@@ -3094,7 +3281,10 @@ function pruneOrphanedWorktrees(repoRoot: string, deps: WorktreeDeps & { writeEr
       { allowDestructive: false },
       { parseWorktreePorcelain, ...deps }
     );
-    const pruneResult = executeWorktreePrunePlan(plan, deps) as { timedOut?: boolean } | null;
+    const pruneResult = executeWorktreePrunePlan(plan, deps);
+    if (pruneResult.reason === 'manual_root_prune_required') {
+      writeErr('[gsd-tools] worktree metadata retained: repository-wide prune requires root owner/recovery accounting.\n');
+    }
     if (pruneResult && pruneResult.timedOut) {
       writeErr(
         '[gsd-tools] WARNING: worktree health check degraded' +
@@ -3118,6 +3308,9 @@ export = {
   listLinkedWorktreePaths,
   inspectWorktreeHealth,
   snapshotWorktreeInventory,
+  rescueSummaryArtifacts,
+  evaluateRetirementAuthorization,
+  findNestedCheckout,
   normalizeCleanupManifest,
   planWorktreeWaveCleanup,
   executeWorktreeWaveCleanupPlan,

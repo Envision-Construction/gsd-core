@@ -115,10 +115,10 @@ dispatch-isolation`. `ISOLATION` gates every worktree decision below —
 substitute `{harnessFlag}` in Step 6's `Agent()` with `$HARNESS_FLAG`+comma
 when `ISOLATION = "harness-worktree"`, else empty.
 
-If `USE_WORKTREES` is not `"false"`, sweep orphaned worktrees before dispatching anything (mirrors `/gsd:quick`'s own startup sweep):
+If `USE_WORKTREES` is not `"false"`, report retained orphan candidates before dispatching anything (mirrors `/gsd:quick`). This inventory authorizes no retirement; read stdout/stderr and preserve unknown/active work. Exit 0 does not prove a complete custody census:
 ```bash
 if [ "$USE_WORKTREES" != "false" ]; then
-  gsd_run query worktree.reap-orphans 2>/dev/null || true
+  gsd_run query worktree.reap-orphans || exit $?
 fi
 ```
 

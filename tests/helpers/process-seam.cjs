@@ -164,6 +164,7 @@ function toSeamResult(result) {
  *   stdin unwritten-then-closed; passing `''` is a different, deliberate
  *   choice callers may still make, but it is never implied by omission.
  * @param {number} [options.timeoutMs] - bounded; see resolveTimeoutMs.
+ * @param {number} [options.maxBuffer] - finite positive byte bound; omitted keeps Node's default.
  * @param {string} [options.killSignal] - forwarded to spawnSync verbatim;
  *   the seam asserts nothing about which signal is used.
  * @returns {{outcome:string, exitCode:number|null, stdout:string,
@@ -184,6 +185,12 @@ function spawnSeam(command, args, options = {}) {
   if (options.env !== undefined) spawnOptions.env = options.env;
   if (options.input !== undefined) spawnOptions.input = options.input;
   if (options.killSignal !== undefined) spawnOptions.killSignal = options.killSignal;
+  if (options.maxBuffer !== undefined) {
+    if (!Number.isSafeInteger(options.maxBuffer) || options.maxBuffer <= 0) {
+      throw new TypeError('process-seam: maxBuffer must be a finite positive integer byte bound');
+    }
+    spawnOptions.maxBuffer = options.maxBuffer;
+  }
 
   const result = spawnSync(command, args, spawnOptions);
   return toSeamResult(result);

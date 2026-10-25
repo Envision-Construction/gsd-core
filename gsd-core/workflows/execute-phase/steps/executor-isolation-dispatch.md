@@ -55,8 +55,10 @@ if [ "$ISOLATION" = "none" ] && [ "$USE_WORKTREES" != "false" ]; then
   exit 1
 fi
 
-# Sweep orphaned locked worktrees from prior crashed sessions (#3707).
-[ "$ISOLATION" != "none" ] && gsd_run query worktree.reap-orphans 2>/dev/null || true
+# Report orphan candidates only; age/PID/ancestry never authorize retirement (#3707, ORCH-01).
+if [ "$ISOLATION" != "none" ]; then
+  gsd_run query worktree.reap-orphans || exit $?
+fi
 # Auto-degrade if HEAD diverged from the fork base (#683) — both isolation models.
 if [ "$ISOLATION" != "none" ]; then
   _SHOULD_DEGRADE=$(gsd_run query worktree.base-check --mode "$ISOLATION" --pick shouldDegrade 2>/dev/null || true)
@@ -329,7 +331,7 @@ EXEC_JSON=$(gsd_run query dispatch-isolation --json \
 #    and halt rather than silently running the wave unisolated.
 EXEC_OK=$(printf '%s' "$EXEC_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j&&j.isolation==="orchestrator-worktree"&&j.exec&&j.exec.command?"true":"false")}catch{process.stdout.write("false")}})')
 if [ "$EXEC_OK" != "true" ]; then
-  echo "FATAL: could not resolve an orchestrator-exec invocation for plan {plan_number} after its worktree was created. The wave is halted rather than run unisolated. Retained for inspection: $WT_PATH (branch $WT_BRANCH, recorded in $WAVE_WORKTREE_MANIFEST) — run 'gsd_run query worktree.cleanup-wave --manifest \"$WAVE_WORKTREE_MANIFEST\"' to merge/clean it." >&2
+  echo "FATAL: could not resolve an orchestrator-exec invocation for plan {plan_number} after its worktree was created. The wave is halted rather than run unisolated. Retained for inspection: $WT_PATH (branch $WT_BRANCH, recorded in $WAVE_WORKTREE_MANIFEST) — root must inspect the halted owner and retained evidence before any accepted integration; automatic retirement is held." >&2
   exit 1
 fi
 ```
@@ -340,7 +342,7 @@ fi
 
 `worktree create` records the entry in `$WAVE_WORKTREE_MANIFEST` itself, so **do not** call `worktree.record-agent` for these plans — that verb is the harness-path counterpart, used because the harness creates the worktree behind GSD's back. Double-recording is deduped by path+branch, but the create verb is the single writer here.
 
-Spawn `EXEC_JSON`'s `command` + `args` as a background process with its working directory set to `EXEC_JSON.cwd`, capturing the PID (`WORKER_PID=$!`) and redirecting stdout+stderr into a per-worker log placed BESIDE the worktree — `${WT_PATH}.worker.log`, not inside it: cleanup removes the worktree, and the log plus the lifecycle record must survive it. The `cwd` is returned for **every** host, including those whose descriptor has no cwd flag (`cwdFlag: null`) and therefore bind through the process's own working directory — always set it, never assume the flag did the job. Launch from a shell that has `cd`'d into it (`cd "$cwd" && command args &`), not from a process API that only sets the child's working directory: OpenCode 2.x resolves its directory from `$PWD` and ignores a bare cwd change, so a stale inherited `$PWD` would bind the worker to the main checkout.
+Spawn `EXEC_JSON`'s `command` + `args` as a background process with its working directory set to `EXEC_JSON.cwd`, capturing the PID (`WORKER_PID=$!`) and redirecting stdout+stderr into a per-worker log placed BESIDE the worktree — `${WT_PATH}.worker.log`, not inside it: keep logs and lifecycle evidence independently of the retained checkout and any later manual root retirement. The `cwd` is returned for **every** host, including those whose descriptor has no cwd flag (`cwdFlag: null`) and therefore bind through the process's own working directory — always set it, never assume the flag did the job. Launch from a shell that has `cd`'d into it (`cd "$cwd" && command args &`), not from a process API that only sets the child's working directory: OpenCode 2.x resolves its directory from `$PWD` and ignores a bare cwd change, so a stale inherited `$PWD` would bind the worker to the main checkout.
 
 **Record the launch before any wait (#4624).** A bare background `wait` left the wave with no durable lifecycle: when the orchestrator's turn ended first, a finished worker sat undiscovered and a blocked one sat unreported, and a resumed session had nothing to recover from. Immediately after the spawn — before waiting on anything — persist the launch identity and result location:
 
@@ -368,7 +370,7 @@ gsd_run query worktree.worker-complete --path "$WT_PATH" --exit-code "$WORKER_EX
 
 The executor never touches `STATE.md`/`ROADMAP.md`, and that guard needs no new code — `execute-plan` auto-detects worktree mode via the `IS_WORKTREE` (`.git`-is-a-file) primitive, which a GSD-created worktree trips identically to a harness-created one.
 
-Merge-back, validation, and cleanup are the **existing** gauntlet, unchanged: the serialized `worktree.cleanup-wave` merge loop that stops the wave and retains the worktree on conflict, and manifest-only cleanup (never glob-inferred). Because the manifest shape is identical, the orchestrator path reuses it verbatim.
+Merge-back uses the serialized, manifest-only `worktree.cleanup-wave` path in execute-phase step 5.5, including its actual-exit capture and per-entry integration/retention report. Accepted integration returns `integrated_retained` with exit 1 because manual retirement is held; false/unknown integration or changed custody holds progression. Read `worktree-recovery-policy.md` before interpreting the result; no glob discovery or legacy cleanup fallback.
 
 > **Declared-scope conformance (#2596):** ADR-1239 specifies that *both* isolation adapters route their merge through a check that each plan branch's committed diff stayed inside its declared `files_modified` scope. That check now exists, advisory-first, and is wired into **both** paths: this one passes `--files "$PLAN_FILES"` to `worktree create` above, the harness path passes it to `worktree record-agent`, and `cleanup-wave` runs the one comparison for both. A path outside the declared scope is reported in the result's `warnings` array; it does not block the merge. Promotion to a hard gate is a separate, disclosed change.
 

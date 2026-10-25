@@ -128,13 +128,7 @@ Destination: .planning/milestones/v{X.Y}-quick/
 
 **Stale local branches (upstream gone):**
 
-First, update remote-tracking refs so the candidate list matches the execution list exactly:
-
-```bash
-git fetch --prune 2>/dev/null || true
-```
-
-Then enumerate candidates (protected branch names are excluded even if their upstream is gone):
+Enumerate advisory candidates from current local tracking metadata (which may be stale). A gone upstream is not owner completion, integration or recovery proof; do not automatically prune refs. Protected branch names are excluded:
 
 ```bash
 git branch -vv | awk '/: gone\]/ { if ($1 !~ /^\*$|^main$|^next$|^trunk$|^develop$/) print $1 }'
@@ -158,7 +152,7 @@ Stop here.
 
 
 **Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Antigravity, etc.) where `AskUserQuestion` is not available.
-AskUserQuestion: "Proceed with archiving and pruning?" with options: "Yes — archive phases and prune stale branches" | "Cancel"
+AskUserQuestion: "Proceed with archiving? Branch retirement remains held for root review." with options: "Yes — archive phases; retain branches" | "Cancel"
 
 If "Cancel": Stop.
 
@@ -204,17 +198,7 @@ This moves every directory under `.planning/quick/` into `.planning/milestones/v
 
 <step name="prune_local_branches">
 
-After phase archival, prune local branches whose upstream has been deleted. Use the same filter as the dry-run so the execution list matches exactly what the user confirmed:
-
-```bash
-git branch -vv | awk '/: gone\]/ { if ($1 !~ /^\*$|^main$|^next$|^trunk$|^develop$/) print $1 }' | xargs -r git branch -D
-```
-
-Notes:
-- `git fetch --prune` already ran in `show_dry_run` — the tracking refs are current and this step enumerates from the same state the user confirmed.
-- `!~ /^\*$/` skips the currently checked-out branch (prefixed with `* ` in `git branch -vv` output, so `$1` yields `*`).
-- `!~ /^main$|^next$|^trunk$|^develop$/` excludes protected branch names even if their upstream is gone — matches the dry-run exclusion exactly.
-- `xargs -r` prevents `git branch -D` from running with no arguments when no stale branches exist.
+After phase archival, report the advisory branch candidates as **retained; manual root retirement pending**. Do not delete refs based on upstream absence or a broad confirmation. Follow `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement for each exact branch and every associated checkout. Unknown/active owners or unavailable independent recovery evidence retain the branch. Archival can complete independently; branch retirement has not succeeded.
 
 </step>
 
@@ -239,7 +223,7 @@ Archived:
 {If quick-task archival ran}
 - v{X.Y}: {N} quick-task directories → .planning/milestones/v{X.Y}-quick/ (bucket-all — see known limit)
 
-Pruned: {N} local branches whose upstream is gone.
+Retained: {N} advisory local branch candidates; manual root retirement pending. No refs deleted.
 
 .planning/phases/ cleaned up.
 ```

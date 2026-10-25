@@ -38,6 +38,22 @@ const WORKTREE_BRANCH_CHECK_FRAGMENT = path.join(REPO_ROOT, 'gsd-core', 'referen
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function hasRetainedCleanupContract(content) {
+  return /RETENTION_RESULT=\$\(gsd_run query worktree\.cleanup-wave --manifest "\$RETENTION_MANIFEST" --exit-contract=v1\) \|\| RETENTION_RC=\$\?/.test(content)
+    && content.includes('[ "$RETENTION_RC" -eq 0 ] || exit "$RETENTION_RC"')
+    && content.includes('[ "$RETENTION_REPORT_RC" -eq 0 ] || exit "$RETENTION_REPORT_RC"')
+    && content.includes('result.pending.length')
+    && content.includes('integrated_retained')
+    && content.includes('retirement_manual_root_handoff_required');
+}
+
+function assertRetainedCleanupContract(content) {
+  assert.ok(hasRetainedCleanupContract(content),
+    'capture the actual helper status, validate complete retained-integration evidence, and propagate helper/report failures');
+  assert.doesNotMatch(content, /gsd_run query worktree\.cleanup-wave[^\n]*\|\| true/,
+    'never erase a cleanup refusal');
+}
+
 function extractNamedBlock(markdown, blockName) {
   const open = `<${blockName}>`;
   const close = `</${blockName}>`;
@@ -487,18 +503,18 @@ describe('worktree cleanup after executor completes (#1496)', () => {
 
   test('execute-phase.md includes worktree cleanup step', () => {
     const content = fs.readFileSync(executePhasePath, 'utf8');
-    assert.ok(content.includes('Worktree cleanup'),
+    assert.ok(content.includes('Accepted integration and retained worktree handoff'),
       'execute-phase should have a worktree cleanup step');
-    assert.ok(content.includes('git worktree remove'),
-      'cleanup should remove worktrees');
-    assert.ok(content.includes('git branch -D'),
-      'cleanup should delete temporary branches');
+    assertRetainedCleanupContract(content);
+    assert.doesNotMatch(content, /git worktree (?:remove|unlock|prune)|git branch -D/,
+      'workflow must retain worktrees and branches for manual root retirement');
   });
 
-  test('execute-phase.md merges worktree branch before removing', () => {
+  test('execute-phase.md delegates accepted integration and retains the worker', () => {
     const content = fs.readFileSync(executePhasePath, 'utf8');
-    assert.ok(content.includes('git merge'),
-      'cleanup should merge worktree branch into current branch');
+    assert.ok(content.includes('worktree.cleanup-wave'),
+      'integration uses the bounded accepted-entry helper');
+    assert.ok(content.includes('exact accepted SHA'), 'integration requires reviewed immutable source');
   });
 
   test('execute-phase.md handles merge conflicts gracefully', () => {
@@ -517,7 +533,7 @@ describe('worktree cleanup after executor completes (#1496)', () => {
 
   test('quick.md includes worktree cleanup after executor returns', () => {
     const content = fs.readFileSync(quickPath, 'utf8');
-    assert.ok(content.includes('Worktree cleanup') || content.includes('worktree cleanup'),
+    assert.ok(content.includes('Accepted integration and retained worktree handoff') || content.includes('worktree cleanup'),
       'quick should have worktree cleanup');
     // After #3797 architectural fix: quick.md delegates entirely to the SDK's
     // worktree.cleanup-wave command (which handles git worktree remove and branch
@@ -528,15 +544,11 @@ describe('worktree cleanup after executor completes (#1496)', () => {
     );
   });
 
-  test('quick.md cleanup-wave uses || exit 1 to enforce safety semantics', () => {
+  test('quick.md cleanup-wave preserves actual helper/report failure statuses to enforce safety semantics', () => {
     const content = fs.readFileSync(quickPath, 'utf8');
     // The || exit 1 guards against SDK safety refusals (#3174/#3384).
     // A soft || { warn } fallback would silently swallow blocked cleanups.
-    assert.match(
-      content,
-      /gsd_run query worktree\.cleanup-wave.*\|\| exit 1/,
-      'quick.md cleanup-wave must use || exit 1 — SDK safety refusals must surface (#3797)',
-    );
+    assertRetainedCleanupContract(content);
   });
 
   test('cleanup uses git worktree list to discover orphans', () => {
@@ -554,27 +566,20 @@ describe('worktree merge: orchestrator file protection (#1756)', () => {
   // backup and restore internally). The manual shell backup loop has been removed.
   // The workflow contracts now verify SDK delegation rather than inline backup code.
 
-  test('execute-phase.md delegates wave cleanup to SDK with fail-closed || exit 1', () => {
+  test('execute-phase.md delegates wave cleanup to SDK with validated retained-integration reporting', () => {
     const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
     // worktree.cleanup-wave handles STATE.md/ROADMAP.md backup + restore internally.
-    assert.match(
-      content,
-      /gsd_run query worktree\.cleanup-wave --manifest "\$WAVE_WORKTREE_MANIFEST" \|\| exit 1/,
-      'execute-phase.md must delegate to gsd_run query worktree.cleanup-wave with || exit 1 (#3797)',
-    );
+    assertRetainedCleanupContract(content);
   });
 
-  test('execute-phase.md cleanup-tail snippet still backs up STATE.md for custom deviations', () => {
+  test('execute-phase.md has one bounded integration path for custom deviations', () => {
     const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
     // The cleanup-tail snippet (for deviations from the standard wave merge path)
     // uses git worktree remove directly — it doesn't use the SDK helper.
     // This snippet doesn't need STATE.md backup because it only removes worktrees
     // that were already manually merged — not performing merges itself.
-    assert.match(
-      content,
-      /Cleanup-tail: remove residual agent worktrees after a cross-wave-dependency deviation/,
-      'execute-phase.md must contain the cleanup-tail snippet for custom merge deviations',
-    );
+    assert.match(content, /Both standard merges and cross-wave custom merges use this SAME bounded helper path/);
+    assert.doesNotMatch(content, /git worktree (?:remove|unlock|prune)/);
   });
 
   test('execute-phase.md detects files deleted on main but re-added by worktree (cleanup-tail)', () => {
@@ -588,15 +593,11 @@ describe('worktree merge: orchestrator file protection (#1756)', () => {
       'execute-phase must use WAVE_WORKTREE_MANIFEST to scope cleanup (#3384)');
   });
 
-  test('quick.md delegates wave cleanup to SDK with fail-closed || exit 1', () => {
+  test('quick.md delegates wave cleanup to SDK with validated retained-integration reporting', () => {
     const content = fs.readFileSync(QUICK_PATH, 'utf-8');
     // After #3797 architectural fix: quick.md no longer contains inline STATE.md/ROADMAP.md
     // backup code — that is handled internally by worktree.cleanup-wave.
-    assert.match(
-      content,
-      /gsd_run query worktree\.cleanup-wave --manifest "\$QUICK_WORKTREE_MANIFEST" \|\| exit 1/,
-      'quick.md must delegate to gsd_run query worktree.cleanup-wave with || exit 1 (#3797)',
-    );
+    assertRetainedCleanupContract(content);
   });
 });
 
@@ -633,7 +634,7 @@ describe('worktree commit safety hardening (#1977)', () => {
 
   test('execute-phase.md worktree merge section includes pre-merge deletion check', () => {
     const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
-    const worktreeCleanupStart = content.indexOf('Worktree cleanup');
+    const worktreeCleanupStart = content.indexOf('Accepted integration and retained worktree handoff');
     assert.ok(worktreeCleanupStart > -1, 'must have a worktree cleanup section');
     const cleanupSection = content.slice(worktreeCleanupStart);
     // After #3797: deletion check is handled by SDK worktree.cleanup-wave.
@@ -690,8 +691,8 @@ describe('bug #3384: worktree cleanup workflow contracts', () => {
     // #1298: the per-agent manifest write now goes through the validated
     // `worktree record-agent` writer verb (was a prose "atomically append").
     assert.match(content, /record the `\{agent_id, worktree_path, branch, expected_base\}` entry with `gsd_run query worktree\.record-agent/);
-    assert.match(content, /try\{if\(!p\)throw new Error\("WAVE_WORKTREE_MANIFEST is unset"\)/);
-    assert.match(content, /WT_PATHS_FILE=.*gsd-worktree-paths-/);
+    assert.match(content, /BLOCKED: missing WAVE_WORKTREE_MANIFEST; refusing broad worktree cleanup/);
+    assertRetainedCleanupContract(content);
     assert.doesNotMatch(content, /done < <\(node -e 'const fs=require\("fs"\);const p=process\.env\.WAVE_WORKTREE_MANIFEST/);
     assert.doesNotMatch(content, /done < <\(git worktree list --porcelain \| grep "\^worktree " \| grep "\\\.claude\/worktrees\/agent-"/);
   });
@@ -729,7 +730,7 @@ describe('bug #3384: worktree cleanup workflow contracts', () => {
     // command (which handles manifest parsing internally). The shell fallback with manual
     // QUICK_WORKTREE_MANIFEST node-e code is removed — the gsd_run call with || exit 1 is the
     // only cleanup path, enforcing safety-refusal semantics (#3174/#3384).
-    assert.match(content, /gsd_run query worktree\.cleanup-wave --manifest "\$QUICK_WORKTREE_MANIFEST" \|\| exit 1/);
+    assertRetainedCleanupContract(content);
     assert.doesNotMatch(content, /done < <\(node -e 'const fs=require\("fs"\);const p=process\.env\.QUICK_WORKTREE_MANIFEST/);
     assert.doesNotMatch(content, /done < <\(git worktree list --porcelain \| grep "\^worktree " \| grep "\\\.claude\/worktrees\/agent-"/);
   });
@@ -744,23 +745,21 @@ test('#3425: helper cleanup path pins orchestrator CWD to primary worktree and c
   // #630: the orchestrator root is now resolved from the manifest's orchestrator_root; the
   // git-worktree-list first entry survives only as a guarded fallback for pre-#630 manifests.
   assert.match(content, /PRIMARY_WT=\$\(MANIFEST="\$WAVE_WORKTREE_MANIFEST" node -e '[^']*orchestrator_root[^']*'\)/);
-  assert.match(content, /\[ -n "\$PRIMARY_WT" \] \|\| PRIMARY_WT=\$\(git worktree list --porcelain \| awk '\/\^worktree \/\{print substr\(\$0,10\); exit\}'\)/);
+  assert.doesNotMatch(content, /PRIMARY_WT=\$\(git worktree list/);
+  assert.match(content, /missing orchestrator_root/);
   assert.match(content, /if \[ -z "\$PRIMARY_WT" \]; then\s+echo "FATAL: could not resolve orchestrator worktree before cleanup" >&2\s+exit 1\s+fi/);
   assert.match(content, /cd "\$PRIMARY_WT" \|\| \{ echo "FATAL: cannot cd to primary worktree \$PRIMARY_WT" >&2; exit 1; \}/);
   assert.match(content, /ORCH_BRANCH=\$\(git rev-parse --abbrev-ref HEAD\)/);
   assert.match(content, /FATAL: orchestrator on '\$ORCH_BRANCH' but expected '\$EXPECTED_BRANCH' before worktree cleanup — refusing to merge \(#3174-class drift\)/);
   // After #3797 architectural fix, callsites use gsd_run
-  assert.match(content, /gsd_run query worktree\.cleanup-wave --manifest "\$WAVE_WORKTREE_MANIFEST"/);
+  assertRetainedCleanupContract(content);
 });
 
-test('#3425: cleanup-tail snippet carries the same primary-worktree pin before removal', () => {
+test('#3425: custom merges share the exact dispatch-root bounded path', () => {
   const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf8');
-
-  assert.match(content, /Cleanup-tail: pin orchestrator CWD to its OWN worktree before cleanup-tail \(#3174, #630\)\./);
-  // #630: cleanup-tail resolves the orchestrator root from the manifest, with first-entry fallback.
-  assert.match(content, /PRIMARY_WT=\$\(MANIFEST="\$WAVE_WORKTREE_MANIFEST" node -e '[^']*orchestrator_root[^']*'\)/);
-  assert.match(content, /FATAL: cannot cd to primary worktree \$PRIMARY_WT/);
-  assert.match(content, /# Cleanup-tail: remove residual agent worktrees after a cross-wave-dependency deviation\./);
+  assert.match(content, /Both standard merges and cross-wave custom merges use this SAME bounded helper path/);
+  assert.equal((content.match(/RETENTION_RESULT=\$\(gsd_run query worktree\.cleanup-wave/g) || []).length, 1);
+  assert.doesNotMatch(content, /PRIMARY_WT=\$\(git worktree list|git worktree (?:remove|unlock|prune)/);
 });
 
 describe('bug #48: orchestrator cwd-drift guard at execute_waves entry', () => {
@@ -855,10 +854,8 @@ function parseExecutePhaseContract(filePath) {
   return {
     // Does the workflow call the worktree.cleanup-wave SDK command?
     delegatesToCleanupWave: lines.some(l => l.includes('worktree.cleanup-wave')),
-    // Does the cleanup-wave invocation use || exit 1 (fail-closed)?
-    cleanupWaveFailClosed: lines.some(
-      l => /gsd_run query worktree\.cleanup-wave.*\|\| exit 1/.test(l),
-    ),
+    // Does the cleanup-wave invocation preserve actual helper/report failure statuses (fail-closed)?
+    cleanupWaveFailClosed: hasRetainedCleanupContract(lines.join('\n')),
     // Does the workflow export/reference WAVE_WORKTREE_MANIFEST for the SDK?
     passesWaveManifest: lines.some(l => l.includes('WAVE_WORKTREE_MANIFEST')),
   };
@@ -877,12 +874,12 @@ describe('execute-phase.md — post-merge deletion audit (#2384)', () => {
     );
   });
 
-  test('execute-phase cleanup-wave uses || exit 1 (fail-closed for blocked deletions)', () => {
+  test('execute-phase cleanup-wave preserves actual helper/report failure statuses (fail-closed for blocked deletions)', () => {
     // If worktree.cleanup-wave detects deletions, it exits 1 (blocked).
     // The || exit 1 in the workflow propagates that refusal rather than swallowing it.
     assert.ok(
       contract.cleanupWaveFailClosed,
-      'execute-phase.md must use || exit 1 so deletion-blocked cleanups surface to the orchestrator',
+      'execute-phase.md must preserve actual helper/report failure statuses so deletion-blocked cleanups surface to the orchestrator',
     );
   });
 
@@ -1126,17 +1123,13 @@ describe('bug #3521 — quick.md post-merge cleanup CWD safety (via SDK delegati
     );
   });
 
-  test('quick.md cleanup-wave call uses || exit 1 to enforce fail-closed safety (#3521 contract)', () => {
+  test('quick.md cleanup-wave call preserves actual helper/report failure statuses to enforce fail-closed safety (#3521 contract)', () => {
     const content = readQuickMd();
     // The || exit 1 enforces fail-closed: SDK safety refusals (e.g. branch
     // drift detection from #3174) surface immediately rather than being swallowed.
     // This is the equivalent of the pre-#3797 `gsd_run query ... || exit 1` in the
     // `if command -v gsd-sdk` branch.
-    assert.match(
-      content,
-      /gsd_run query worktree\.cleanup-wave.*\|\| exit 1/,
-      'quick.md cleanup-wave must use || exit 1 — fail-closed for safety refusals (#3521/#3797)',
-    );
+    assertRetainedCleanupContract(content);
   });
 
   test('quick.md manifest guard still blocks broad cleanup when manifest is missing (#3384)', () => {
@@ -1205,10 +1198,8 @@ function parseWorkflowContract(filePath) {
     nonEmpty: lines.length > 0 && lines.some(l => l.length > 0),
     // Does the workflow delegate SUMMARY rescue to worktree.cleanup-wave?
     delegatesToCleanupWave: lines.some(l => l.includes('worktree.cleanup-wave')),
-    // Does the cleanup-wave invocation use || exit 1 (fail-closed)?
-    cleanupWaveFailClosed: lines.some(
-      l => /gsd_run query worktree\.cleanup-wave.*\|\| exit 1/.test(l),
-    ),
+    // Does the cleanup-wave invocation preserve actual helper/report failure statuses (fail-closed)?
+    cleanupWaveFailClosed: hasRetainedCleanupContract(lines.join('\n')),
     // Does the workflow still contain the broken ls-files --exclude-standard rescue form?
     hasBrokenLsFilesForm: lines.some(
       l => l.includes('ls-files --modified --others --exclude-standard'),
@@ -1264,20 +1255,20 @@ describe('bug-2838: SUMMARY rescue delegates to SDK (worktree.cleanup-wave)', ()
     );
   });
 
-  test('execute-phase.md cleanup-wave uses || exit 1 (fail-closed so rescue errors surface)', () => {
+  test('execute-phase.md cleanup-wave preserves actual helper/report failure statuses (fail-closed so rescue errors surface)', () => {
     // If the SDK's rescue fails (e.g. filesystem error), || exit 1 surfaces
     // the failure to the orchestrator rather than silently continuing and
     // losing the SUMMARY.
     assert.ok(
       executePhaseContract.cleanupWaveFailClosed,
-      'execute-phase.md cleanup-wave must use || exit 1 so SUMMARY rescue failures surface (#2838/#3797)',
+      'execute-phase.md cleanup-wave must preserve actual helper/report failure statuses so SUMMARY rescue failures surface (#2838/#3797)',
     );
   });
 
-  test('quick.md cleanup-wave uses || exit 1 (fail-closed so rescue errors surface)', () => {
+  test('quick.md cleanup-wave preserves actual helper/report failure statuses (fail-closed so rescue errors surface)', () => {
     assert.ok(
       quickContract.cleanupWaveFailClosed,
-      'quick.md cleanup-wave must use || exit 1 so SUMMARY rescue failures surface (#2838/#3797)',
+      'quick.md cleanup-wave must preserve actual helper/report failure statuses so SUMMARY rescue failures surface (#2838/#3797)',
     );
   });
 });
@@ -1343,9 +1334,8 @@ function git(cwd, args) {
 }
 
 // runNode never throws; the shipped manifest-reader one-liner is expected to
-// exit cleanly (it emits either a resolved path or nothing — never an
-// error), so a non-clean exit here is a genuine defect and must still abort
-// the test loudly, matching the pre-migration execFileSync throw.
+// exit cleanly for valid dispatch-root evidence. Missing/invalid roots are
+// tested separately as deliberate refusals, never fallback authority.
 function runManifestReaderOrThrow(args, opts) {
   const r = runNode(args, opts);
   throwIfFailed(r, `node ${args.join(' ')}`);
@@ -1380,18 +1370,18 @@ describe('bug #630 — wave-cleanup pins to the orchestrator root, not git-workt
     );
   });
 
-  test('both cleanup guards resolve PRIMARY_WT from the manifest orchestrator_root (#630)', () => {
+  test('the bounded cleanup path resolves PRIMARY_WT from the exact manifest root (#630)', () => {
     const content = readMd();
     const readers = content.match(
       /PRIMARY_WT=\$\(MANIFEST="\$WAVE_WORKTREE_MANIFEST" node -e '[^']*orchestrator_root[^']*'\)/g,
     );
     assert.ok(
-      readers && readers.length >= 2,
-      `both wave-cleanup guards (templated + cleanup-tail) must read orchestrator_root from the manifest; found ${readers ? readers.length : 0}`,
+      readers && readers.length === 1,
+      `the single bounded integration path must read orchestrator_root from the manifest; found ${readers ? readers.length : 0}`,
     );
   });
 
-  test('first-entry resolution survives only as a guarded fallback, never the sole resolver (#630)', () => {
+  test('first-entry resolution is forbidden when dispatch-root evidence is missing (#630)', () => {
     const content = readMd();
     // Every remaining first-entry resolution must be preceded by the `[ -n "$PRIMARY_WT" ] ||`
     // guard, i.e. it only runs when the manifest lookup produced nothing.
@@ -1403,7 +1393,7 @@ describe('bug #630 — wave-cleanup pins to the orchestrator root, not git-workt
         `first-entry resolution must be a guarded fallback, not the primary resolver: ${line.trim()}`,
       );
     }
-    assert.ok(firstEntryLines.length >= 2, 'expected the fallback in both cleanup guards');
+    assert.equal(firstEntryLines.length, 0, 'missing dispatch-root evidence must never select the first registered checkout');
   });
 
   // ── Behavioral proof of the pivot ─────────────────────────────────────────
@@ -1461,18 +1451,20 @@ describe('bug #630 — wave-cleanup pins to the orchestrator root, not git-workt
     }
   });
 
-  test('manifest reader falls through (empty output) when orchestrator_root is absent — fallback engages (#630)', () => {
+  test('manifest reader refuses absent orchestrator_root without choosing another checkout (#630)', () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-630-fb-'));
     try {
       const manifest = path.join(tmpRoot, 'legacy.json');
       // Pre-#630 manifest shape: no orchestrator_root.
       fs.writeFileSync(manifest, JSON.stringify({ worktrees: [] }) + '\n');
       const script = extractManifestReaderScript();
-      const out = runManifestReaderOrThrow(['-e', script], {
+      const result = runNode(['-e', script], {
         env: { ...process.env, MANIFEST: manifest },
         timeoutMs: BUG_630_TIMEOUT_MS,
       });
-      assert.equal(out, '', 'reader must emit nothing for a manifest without orchestrator_root so the first-entry fallback engages');
+      assert.equal(result.exitCode, 1, 'missing dispatch-root evidence must hold');
+      assert.equal(result.stdout, '', 'no fallback checkout may be emitted');
+      assert.match(result.stderr, /missing orchestrator_root/);
     } finally {
       cleanup(tmpRoot);
     }

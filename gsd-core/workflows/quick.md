@@ -156,11 +156,11 @@ in Step 6's `Agent()` with `$HARNESS_FLAG`+comma when `ISOLATION = "harness-work
 empty. `{harnessFlag}`
 is a template placeholder, not a shell variable.
 
-If `USE_WORKTREES` is not `"false"`, run a startup orphan sweep before spawning any executors. This reaps locked worktrees whose lock-owner process is dead, whose branch is merged into the default branch, and whose lock file mtime is older than 5 minutes. Running it at startup prevents accumulation of orphaned worktrees from prior sessions that exited without cleanup (#3707).
+If `USE_WORKTREES` is not `"false"`, run the report-only orphan inventory before dispatch. Dead-PID, ancestry and age heuristics nominate retained candidates; they never authorize unlocking, removal, branch deletion or pruning. Read its retained/skipped entries and stderr; even exit 0 is not retirement or a complete custody census (#3707, ORCH-01).
 
 ```bash
 if [ "$USE_WORKTREES" != "false" ]; then
-  gsd_run query worktree.reap-orphans 2>/dev/null || true
+  gsd_run query worktree.reap-orphans || exit $?
 fi
 ```
 
@@ -544,20 +544,61 @@ SUMMARY.md and stop — the user must rerun with worktrees disabled.
 If the executor ran isolated (`ISOLATION = "harness-worktree"` at dispatch), append its returned `{agent_id, worktree_path, branch, expected_base, allowed_bases}` metadata to `QUICK_WORKTREE_MANIFEST` before cleanup. Set `expected_base` to `${EXPECTED_BASE}` and `allowed_bases` to `["${EXPECTED_BASE}", "${QUICK_PLAN_PARENT}"]` with duplicates removed. If any required field is unavailable, stop and ask for recovery; do not discover global worktrees.
 
 After executor returns:
-1. **Worktree cleanup:** If the executor ran isolated (`ISOLATION = "harness-worktree"` at dispatch), merge the worktree branch back and clean up:
+1. **Accepted integration with retirement held:** If the executor ran isolated (`ISOLATION = "harness-worktree"` at dispatch), use only its recorded manifest. Read `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement; missing root acceptance or native completed-owner evidence holds integration and retains the work.
    ```bash
-   QUICK_WORKTREE_MANIFEST=${QUICK_WORKTREE_MANIFEST:-$WAVE_WORKTREE_MANIFEST}
+   QUICK_WORKTREE_MANIFEST=${QUICK_WORKTREE_MANIFEST:-${WAVE_WORKTREE_MANIFEST:-}}
    [ -n "${QUICK_WORKTREE_MANIFEST:-}" ] && [ -f "$QUICK_WORKTREE_MANIFEST" ] || {
      echo "BLOCKED: missing QUICK_WORKTREE_MANIFEST; refusing broad worktree cleanup (#3384)." >&2
      exit 1
    }
-
-   # Prefer the bounded cleanup helper. It verifies branch identity, expected
-   # base, deletion diffs, merge result, and worktree removal before branch
-   # deletion. If it blocks, resolve the reported manifest entry and rerun.
-   # Fail closed: SDK refusal (safety guard #3174/#3384) must surface — do not swallow exit 1.
-   gsd_run query worktree.cleanup-wave --manifest "$QUICK_WORKTREE_MANIFEST" || exit 1
+   RETENTION_MANIFEST="$QUICK_WORKTREE_MANIFEST"
+   # Capture the v1 CLI exit without erasing it; retained integration exits 1 too.
+   RETENTION_RC=0
+   RETENTION_RESULT=$(gsd_run query worktree.cleanup-wave --manifest "$RETENTION_MANIFEST" --exit-contract=v1) || RETENTION_RC=$?
+   printf '%s\n' "$RETENTION_RESULT"
+   RETENTION_REPORT_RC=0
+   # shellcheck disable=SC2016 # JavaScript template expressions must reach node literally.
+   printf '%s\n' "$RETENTION_RESULT" | RETENTION_MANIFEST="$RETENTION_MANIFEST" RETENTION_EXIT="$RETENTION_RC" node -e '
+   const fs = require("fs");
+   try {
+     const response = JSON.parse(fs.readFileSync(0, "utf8"));
+     const manifest = JSON.parse(fs.readFileSync(process.env.RETENTION_MANIFEST, "utf8"));
+     const expected = Array.isArray(manifest) ? manifest : manifest.worktrees;
+     const result = response.result;
+     if (!Array.isArray(expected) || !expected.length || !result ||
+         !Array.isArray(result.entries) || result.entries.length !== expected.length ||
+         !Array.isArray(result.pending) || result.pending.length ||
+         response.ok !== false || result.ok !== false || result.reason !== "cleanup_blocked") {
+       throw new Error("incomplete or unexpected cleanup response; retain every entry");
+     }
+     const key = e => JSON.stringify([e.agent_id, e.worktree_path, e.branch]);
+     const wanted = new Map(expected.map(e => [key(e), e]));
+     if (wanted.size !== expected.length) throw new Error("duplicate manifest identities");
+     let confirmed = process.env.RETENTION_EXIT === "1";
+     for (const entry of result.entries) {
+       const requested = wanted.get(key(entry));
+       if (!requested) throw new Error("unmatched result identity");
+       wanted.delete(key(entry));
+       console.error(`${entry.status}: integrated=${JSON.stringify(entry.integrated)}; reason=${entry.reason}; retained ${entry.worktree_path}`);
+       const accepted = requested.retirement_authorization;
+       if (entry.integrated !== true || entry.status !== "integrated_retained" ||
+           entry.reason !== "retirement_manual_root_handoff_required" || !accepted ||
+           entry.retirement_authorization?.accepted_head !== accepted.accepted_head) confirmed = false;
+     }
+     if (!confirmed) throw new Error("integration or retirement evidence needs root review; hold progression");
+     console.error("Accepted integration confirmed; manual retirement held. Project verification may proceed separately; cleanup and phase acceptance are not complete.");
+   } catch (error) {
+     console.error(`BLOCKED: ${error.message}`);
+     process.exitCode = 1;
+   }
+   ' || RETENTION_REPORT_RC=$?
+   # Preserve the command failure even when accepted integration was observed.
+   [ "$RETENTION_RC" -eq 0 ] || exit "$RETENTION_RC"
+   [ "$RETENTION_REPORT_RC" -eq 0 ] || exit "$RETENTION_REPORT_RC"
+   echo "BLOCKED: unexpected cleanup success; root review required before progression." >&2
+   exit 1
    ```
+   Preserve the cleanup exit 1 and report the retirement hold. Continue to the summary/review/verification steps only if every requested entry is `integrated:true`, `status:integrated_retained`, reason `retirement_manual_root_handoff_required`, with no pending or mismatched entry, and the reporter confirms accepted integration. False/unknown integration, another reason, invalid output or another exit holds progression for root review. The helper invocation never proves cleanup success or quick-task/product acceptance. Keep the manifest, worktree, branch and recovery metadata; no automatic retirement or deletion fallback.
    If `ISOLATION` was not `"harness-worktree"` at dispatch (including a #1941 base-check degrade — that is *this* file's degrade; #2649 is the `diagnose-issues.md` / `execute-plan.md` one), skip this step.
 
    > **ISOLATED-RUN RECOVERY — FAIL SAFE (#1292):** When an isolated (worktree) run is *rejected* — the user declines to merge it, the orchestrator surfaces recovery guidance for a blocked/halted plan, or the run over-reached the requested scope — the worktree-isolation contract MUST hold through recovery. Do **NOT** propose continuing on `main`/the primary checkout as the default or recommended recovery path. Default to a **safe halt** and offer: (a) re-attempt in a **fresh, narrowly-scoped worktree**, or (b) inspect or discard the rejected worktree without merging. Any path that edits the primary checkout requires an **explicit, clearly-labeled confirmation** from the user first — editing `main` directly is never the proposed or default option for a run the user configured to be isolated.

@@ -329,10 +329,12 @@ describe('quick-batch workflow: durable worktree-recovery persistence (#3677)', 
     assert.match(content, /dispatched_base/);
   });
 
-  test('merge-wave.md clears the durable triple back to null after a successful merge_removed (the worktree no longer exists on disk)', () => {
+  test('merge-wave.md preserves durable recovery fields after accepted integration while retirement is held', () => {
     const content = readStep('merge-wave.md');
-    assert.match(content, /Clear the\s*\n?\s*durable worktree-recovery fields now/i);
-    assert.match(content, /"dispatchedWorktree":null,"dispatchedBranch":null,"dispatchedBase":null/);
+    assert.match(content, /integrated_retained/);
+    assert.match(content, /manual retirement pending/);
+    assert.match(content, /Keep `dispatched_worktree`\/`dispatched_branch`\/`dispatched_base` and the manifest intact/);
+    assert.doesNotMatch(content, /"dispatchedWorktree":null,"dispatchedBranch":null,"dispatchedBase":null/);
   });
 
   test('merge-wave.md fails closed (never guesses) when an item has no worktree record anywhere', () => {
