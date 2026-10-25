@@ -147,9 +147,9 @@ interface WorktreeDeps {
   /** Raw bytes for evidence identity; the text reader remains separate. */
   readFileBytes?: (p: string) => Buffer;
   /**
-   * #ORCH-02: real-path / symlink resolution for the SUMMARY-rescue destination
-   * containment check. Injectable so the check is exercised without a real
-   * filesystem; defaults to node's `fs.realpathSync`.
+   * Real-path / symlink resolution for SUMMARY containment and registration
+   * identity. Injectable for fixture evidence; SUMMARY defaults to node's
+   * `fs.realpathSync`, registration to `fs.realpathSync.native`.
    */
   realpathSync?: (p: string) => string;
   /**
@@ -1439,7 +1439,11 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
         const ancestor = canonicalIdentity(parent);
         return ancestor === null ? null : path.join(ancestor, path.basename(target));
       }
-      return (deps.realpathSync || fs.realpathSync)(target);
+      // Git for Windows records native long-form paths. The JavaScript
+      // realpath walker can retain 8.3 names or input casing for non-symlinks,
+      // so compare names obtained from the filesystem, never lexical folds.
+      // Missing suffixes above still require a verified existing ancestor.
+      return (deps.realpathSync || fs.realpathSync.native)(target);
     } catch { return null; }
   };
   const registeredFor = (worktreePath: string): WorktreeEntry | undefined => {

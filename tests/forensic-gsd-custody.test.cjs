@@ -389,3 +389,102 @@ describe('integration status is observed independently of merge exit', () => {
     assert.ok(fs.existsSync(w.wt)); assert.ok(git(['rev-parse', `refs/heads/${w.entry.branch}`], f.repo));
   });
 });
+
+describe('registration path identity', () => {
+  function aliasedWorker(t) {
+    const w = worker();
+    const alias = path.join(f.base, 'RUNNER~1');
+    fs.symlinkSync(f.base, alias, 'junction');
+    const entry = { ...w.entry, worktree_path: path.join(alias, 'worker') };
+    const recordPath = w.wt + '.worker.json';
+    const record = JSON.parse(fs.readFileSync(recordPath, 'utf8'));
+    fs.writeFileSync(recordPath, JSON.stringify({ ...record, worktreePath: entry.worktree_path }));
+    const legacy = fs.realpathSync;
+    const native = legacy.native;
+    const nativeCalls = [];
+    // Model the Windows distinction at the resolver boundary, using a real
+    // filesystem alias and actual Git everywhere else. This is not Windows
+    // acceptance: the JavaScript resolver preserves a non-symlink 8.3 name,
+    // whereas the native resolver obtains the filesystem's canonical name.
+    t.mock.method(fs, 'realpathSync', (target, ...options) => {
+      if (typeof target === 'string' && (target === alias || target.startsWith(alias + path.sep))) return path.resolve(target);
+      return legacy(target, ...options);
+    });
+    t.mock.method(fs.realpathSync, 'native', (target, ...options) => {
+      nativeCalls.push(target);
+      return native(target, ...options);
+    });
+    return { ...w, alias, entry, nativeCalls };
+  }
+
+  for (const absent of [false, true]) test(`native filesystem evidence identifies the ${absent ? 'absent' : 'present'} registered alias`, (t) => {
+    const w = aliasedWorker(t);
+    assert.notEqual(fs.realpathSync(w.entry.worktree_path), fs.realpathSync(w.wt), 'the JavaScript resolver alone must reproduce distinct spellings');
+    assert.equal(fs.realpathSync.native(w.entry.worktree_path), fs.realpathSync.native(w.wt), 'the two paths actually identify the same checkout');
+    w.nativeCalls.length = 0;
+    if (absent) cleanup(w.wt);
+    const { result, calls } = runCleanup(w.entry);
+    assert.equal(result.entries[0].reason, 'retirement_manual_root_handoff_required', JSON.stringify(result));
+    assert.equal(result.entries[0].integrated, true);
+    assert.equal(result.entries[0].status, 'integrated_retained');
+    assert.ok(w.nativeCalls.includes(absent ? w.alias : w.entry.worktree_path), 'registration must use native evidence for the existing path or ancestor');
+    assert.ok(calls.filter(a => a.join(' ') === 'worktree list --porcelain').length >= 3, 'all registration boundaries must be freshly observed');
+    assert.equal(calls.filter(a => a[0] === 'merge').length, 1);
+    assert.equal(git(['rev-parse', w.entry.retirement_authorization.recovery_ref], f.repo), w.entry.retirement_authorization.accepted_head);
+    assert.equal(git(['rev-parse', `refs/heads/${w.entry.branch}`], f.repo), w.entry.retirement_authorization.accepted_head);
+    assert.equal(fs.existsSync(w.wt), !absent, 'only fixture setup may remove the checkout');
+  });
+
+  for (const boundary of [1, 2, 3]) for (const fault of ['missing', 'branch', 'locked', 'unverified', 'different-directory', 'realpath-error']) {
+    test(`${fault} registration at fresh boundary ${boundary} retains the alias and recovery`, (t) => {
+      const w = aliasedWorker(t);
+      const other = path.join(f.base, 'worker-other'); fs.mkdirSync(other);
+      const before = snapshot(f.repo);
+      let reads = 0;
+      const native = fs.realpathSync.native;
+      t.mock.method(fs.realpathSync, 'native', (target, ...options) => {
+        if (fault === 'realpath-error' && reads >= boundary && target === w.entry.worktree_path) throw Object.assign(new Error('injected native identity error'), { code: 'EACCES' });
+        return native(target, ...options);
+      });
+      const { result, calls } = runCleanup(w.entry, { execGit: (a, o, real) => {
+        const r = real(a, o);
+        if (a.join(' ') !== 'worktree list --porcelain' || ++reads < boundary) return r;
+        if (fault === 'unverified') return { ...r, exitCode: 1, stdout: '', stderr: 'injected list failure', timedOut: true };
+        const blocks = r.stdout.split('\n\n').filter(Boolean);
+        const index = blocks.findIndex(block => block.includes(`branch refs/heads/${w.entry.branch}`));
+        assert.ok(index >= 0, 'the real fixture registration must exist before substituting its observation');
+        if (fault === 'missing') blocks.splice(index, 1);
+        if (fault === 'branch') blocks[index] = blocks[index].replace(`branch refs/heads/${w.entry.branch}`, 'branch refs/heads/worktree-agent-other');
+        if (fault === 'locked') blocks[index] += '\nlocked resumed owner';
+        if (fault === 'different-directory') blocks[index] = blocks[index].replace(/^worktree .*/m, `worktree ${other}`);
+        return { ...r, stdout: blocks.join('\n\n') + '\n\n' };
+      } });
+      assert.equal(reads, boundary, 'no registration result may be cached across boundaries');
+      assert.equal(result.entries[0].reason, boundary === 1 ? 'retirement_registration_unverified' : 'retirement_registration_changed', JSON.stringify(result));
+      assert.equal(result.entries[0].integrated, boundary === 3);
+      assert.equal(result.entries[0].status, boundary === 3 ? 'integrated_retained' : 'blocked');
+      assert.equal(calls.filter(a => a[0] === 'merge').length, boundary === 3 ? 1 : 0);
+      if (boundary < 3) assert.deepEqual(snapshot(f.repo), before);
+      assert.ok(fs.existsSync(w.wt));
+      assert.equal(git(['rev-parse', w.entry.retirement_authorization.recovery_ref], f.repo), w.entry.retirement_authorization.accepted_head);
+      assert.equal(git(['rev-parse', `refs/heads/${w.entry.branch}`], f.repo), w.entry.retirement_authorization.accepted_head);
+    });
+  }
+
+  test('a different common directory with the same branch and accepted commit is not a registered alias', () => {
+    const w = worker();
+    const foreign = path.join(f.base, 'foreign');
+    git(['clone', '--no-local', f.repo, foreign], f.base);
+    git(['checkout', '-b', w.entry.branch, w.entry.retirement_authorization.accepted_head], foreign);
+    const record = JSON.parse(fs.readFileSync(w.wt + '.worker.json', 'utf8'));
+    fs.writeFileSync(foreign + '.worker.json', JSON.stringify({ ...record, worktreePath: foreign }));
+    assert.notEqual(fs.realpathSync.native(path.resolve(foreign, git(['rev-parse', '--git-common-dir'], foreign))), fs.realpathSync.native(path.resolve(f.repo, git(['rev-parse', '--git-common-dir'], f.repo))));
+    const before = snapshot(f.repo);
+    const { result, calls } = runCleanup({ ...w.entry, worktree_path: foreign });
+    assert.equal(result.entries[0].reason, 'retirement_registration_unverified', JSON.stringify(result));
+    assert.equal(result.entries[0].integrated, false);
+    assert.equal(calls.some(a => a[0] === 'merge'), false);
+    assert.deepEqual(snapshot(f.repo), before);
+    assert.ok(fs.existsSync(foreign)); assert.ok(fs.existsSync(w.wt));
+  });
+});
