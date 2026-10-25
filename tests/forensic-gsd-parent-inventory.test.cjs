@@ -23,7 +23,9 @@ function fixture(t) {
   const env = installSpawnEnv({ ...homeSandboxEnv(home), GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' });
   const git = (args, cwd = repo) => gitOrThrow(args, { cwd, env, timeoutMs: GIT_TIMEOUT_MS }).trim();
-  git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'Fixture']);
+  git(['init', '-q', '-b', 'main']);
+  // Setup commits must not leave detached maintenance writing into .git snapshots.
+  git(['config', 'maintenance.auto', 'false']); git(['config', 'user.name', 'Fixture']);
   git(['config', 'user.email', 'fixture@example.invalid']); git(['config', 'commit.gpgsign', 'false']);
   git(['config', 'core.hooksPath', hooks]);
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
