@@ -385,7 +385,7 @@ describe('RGS-10 accepted merge, refusal, autostash and unknown controls', () =>
       return real(a, o);
     });
     assertHalted(f, out); assert.equal(f.git(['rev-parse', 'HEAD']), f.head);
-    assert.equal(snapshotTree(f.repo)['.git/index'].bytes, before['.git/index'].bytes);
+    assert.equal(snapshotTree(f.repo)[path.join('.git', 'index')].bytes, before[path.join('.git', 'index')].bytes);
   });
   test('a successful merge with unknown observation halts pending entries for root', (t) => {
     const f = fixture(t);
