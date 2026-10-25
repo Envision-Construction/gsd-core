@@ -1067,8 +1067,13 @@ describe('install — changeset CLI lands at scripts/changeset/cli.cjs (#935)', 
     assert.ok(fs.existsSync(changelogPath), 'CHANGELOG.md must be installed under gsd-core/');
     const result = runNode(
       [cliPath, 'extract', '--from', '0.0.0', '--to', '9999.0.0', '--changelog', changelogPath, '--json'],
-      { timeoutMs: PROBE_TIMEOUT_MS },
+      // The full installed changelog currently renders 1,062,507 JSON bytes,
+      // exceeding spawnSync's 1 MiB default (ENOBUFS, not a CLI failure).
+      // Keep the full input/range and a finite output bound with room to grow.
+      { timeoutMs: PROBE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
     );
+    assert.strictEqual(result.outcome, 'exited',
+      `extract subprocess failed: ${result.outcome}; ${result.code}; ${result.signal}`);
     // extract must NOT throw a MODULE_NOT_FOUND or Cannot find module error
     assert.ok(
       !result.stderr.includes('MODULE_NOT_FOUND') && !result.stderr.includes('Cannot find module'),

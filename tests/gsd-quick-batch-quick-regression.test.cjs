@@ -21,6 +21,7 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const {
   git,
   resolveBase,
@@ -124,8 +125,24 @@ function editsBeyondSharedDirective(base, file) {
   });
 }
 
+// ORCH-03 is a reviewed shared custody migration, not #3676 phase work.
+// Reuse that review only for its exact before/after bytes. A pathname exemption
+// would also admit unrelated quick edits; this pair deliberately does not.
+// Review: direct-codex-gsd-workflows/r1/REPORT.md in the forensic remediation
+// evidence; current quick.md is byte-identical to that accepted input.
+const REVIEWED_QUICK_CUSTODY = {
+  before: 'f4877d414b09469dbabe4acc0c5f204a0369a4f3b8d3e3c13247f065da9c68f8',
+  after: '6c900c7b05f154e3919a3ed02f828a65fa90a186c5ed5224b9321d9e382cf3c7',
+};
+function isReviewedQuickCustodyChange(file, beforeHash, afterHash) {
+  return file === 'gsd-core/workflows/quick.md'
+    && beforeHash === REVIEWED_QUICK_CUSTODY.before
+    && afterHash === REVIEWED_QUICK_CUSTODY.after;
+}
+const sha256 = text => createHash('sha256').update(text).digest('hex');
+
 describe('quick-batch: /gsd:quick command + workflow stay byte-identical (row 48)', () => {
-  test('commands/gsd/quick.md and gsd-core/workflows/quick.md are not in this branch\'s changed-path set', (t) => {
+  test('ordinary quick has no unreviewed changes beside quick-batch phase work', (t) => {
     // Environmental skip (ADR-2719 §6 idiom) — same as tests/emitted-attribution.test.cjs:
     // a base ref is not universally resolvable (gsd-test's shallow-merged container
     // carries no origin/* remote-tracking refs). t.skip is REPORTED as skipped, unlike
@@ -157,7 +174,13 @@ describe('quick-batch: /gsd:quick command + workflow stay byte-identical (row 48
     // this row away from, arriving by the other door: not a branch that misses
     // the surface, but one that touches all of it. So a path counts only when
     // its diff says something other than the coverage contract.
-    const isPhaseWork = (p) => editsBeyondSharedDirective(resolved.ref, p);
+    const baseSha = git(['merge-base', resolved.ref, 'HEAD']).trim();
+    const isPhaseWork = (p) => {
+      if (!editsBeyondSharedDirective(resolved.ref, p)) return false;
+      if (p !== 'gsd-core/workflows/quick.md') return true;
+      return !isReviewedQuickCustodyChange(p,
+        sha256(git(['show', `${baseSha}:${p}`])), sha256(git(['show', `HEAD:${p}`])));
+    };
     const touchesQuickBatch = changed.some((p) =>
       /quick-batch/.test(p) && !p.startsWith('tests/') && isPhaseWork(p));
     if (!touchesQuickBatch) {
@@ -190,6 +213,19 @@ describe('quick-batch: /gsd:quick command + workflow stay byte-identical (row 48
     // catch; same false-positive class already scoped away twice above (#3730, #2529 round 40).
     const touchedQuickSteps = unexpectedQuickStepChanges(changed, isPhaseWork);
     assert.deepEqual(touchedQuickSteps, [], `unexpected changes under gsd-core/workflows/quick/steps/: ${touchedQuickSteps.join(', ')}`);
+  });
+
+  test('review-bound custody allowance rejects any additional ordinary quick or command edit', () => {
+    const file = 'gsd-core/workflows/quick.md';
+    const { before, after } = REVIEWED_QUICK_CUSTODY;
+    assert.equal(isReviewedQuickCustodyChange(file, before, after), true);
+    assert.equal(isReviewedQuickCustodyChange(file, before + 'unexpected base change', after), false);
+    assert.equal(isReviewedQuickCustodyChange(file, before, sha256('an unrelated quick step')), false);
+    assert.equal(isReviewedQuickCustodyChange(file, before, sha256('exit 0 instead of the helper failure')), false,
+      'an exit-propagation regression inside the reviewed block loses the allowance');
+    for (const lookalike of ['commands/gsd/quick.md', file + '.orig', 'gsd-core/workflows/quick/steps/quick-execution.md']) {
+      assert.equal(isReviewedQuickCustodyChange(lookalike, before, after), false);
+    }
   });
 
   test('positive control: the #5118 allowance exempts exactly one path; every other quick path in the same branch shape still trips row 48', () => {

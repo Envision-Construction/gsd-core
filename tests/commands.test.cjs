@@ -5846,7 +5846,7 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
       'the very first commit in a repo must not be swallowed by the empty-diff guard');
   });
 
-  test('a merge in progress is still concluded when the named paths carry no diff', () => {
+  test('a scoped no-diff path cannot conclude a merge or consume its unrelated staged resolution', () => {
     const shared = path.posix.join('.planning', 'shared.md');
     fs.writeFileSync(path.join(tmpDir, shared), 'base\n');
     gitOrThrow(['add', '--', shared], { cwd: tmpDir });
@@ -5868,12 +5868,22 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
       'fixture must leave a merge in progress');
 
-    // `rel` is committed and unmodified — it contributes no diff of its own.
+    // `rel` is committed and unmodified. Completing this merge would also
+    // commit `shared`, which the caller did not authorize in --files.
+    const { snapshotFixtureTree } = require('./helpers/custody-fixture.cjs');
+    const info = path.join(tmpDir, '.git', 'info');
+    fs.mkdirSync(info, { recursive: true });
+    fs.writeFileSync(path.join(info, 'exclude'), '.planning/ignored.bin\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ignored.bin'), Buffer.from([255, 0, 42, 10]));
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'untracked.bin'), Buffer.from([1, 0, 2]));
+    const before = snapshotFixtureTree(tmpDir);
     const output = commitFiles(rel);
-    assert.strictEqual(output.committed, true,
-      'the merge must still be concluded, not reported as nothing to commit');
-    assert.ok(!fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
-      'MERGE_HEAD must be gone once the merge commit lands');
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'scoped_commit_refused_during_merge');
+    assert.deepStrictEqual(snapshotFixtureTree(tmpDir), before,
+      'preserve HEAD, every ref, MERGE_HEAD, exact index and all tracked/ignored/untracked bytes');
+    assert.strictEqual(gitOrThrow(['diff', '--cached', '--name-only'], { cwd: tmpDir }).trim(), shared,
+      'the separately staged resolution remains available for manual merge recovery');
   });
 });
 

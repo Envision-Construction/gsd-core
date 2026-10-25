@@ -502,7 +502,7 @@ describe('#2971 — pr-branch.md planning.pr_strict filter (failing-first)', () 
       }
     });
 
-    test('25: NEGATIVE — a real code conflict is not swallowed by the filter, and the halt path fully unwinds the partial prbranch', () => {
+    test('25: NEGATIVE — a real code conflict retains the partial PR branch, unresolved index and every unrelated byte', () => {
       const transientDirs = currentTransientDirs();
       const dir = buildFixture({ conflict: true });
       try {
@@ -512,16 +512,42 @@ describe('#2971 — pr-branch.md planning.pr_strict filter (failing-first)', () 
           result.stderr.includes('Conflict outside the .planning/ filter'),
           `expected the real halt message in stderr, got: ${result.stderr}`,
         );
-        const currentBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], dir).trim();
-        assert.strictEqual(
-          currentBranch, 'feature',
-          `expected the halt path to restore CURRENT_BRANCH (feature), got: ${currentBranch}`,
-        );
-        assert.throws(
-          () => git(['rev-parse', '--verify', 'prbranch'], dir),
-          /.*/,
-          'expected the partial prbranch to be deleted by the halt path, not left stranded mid cherry-pick',
-        );
+        assert.match(result.stderr, /Partial PR branch prbranch retained with its conflict state/);
+        assert.match(result.stderr, /do not rerun while sequencer state is unresolved/);
+        assert.strictEqual(git(['rev-parse', '--abbrev-ref', 'HEAD'], dir).trim(), 'prbranch');
+        assert.strictEqual(git(['rev-parse', 'prbranch'], dir).trim(), git(['rev-parse', 'main'], dir).trim(),
+          'a conflict on the first pick must not create a partial commit or delete the PR ref');
+        // cherry-pick --no-commit may retain only unmerged index stages,
+        // without CHERRY_PICK_HEAD. Snapshot the actual Git state below.
+        assert.match(git(['ls-files', '--unmerged'], dir), /[123]\tcode\.txt/,
+          'retain the actual unresolved index stages for root recovery');
+        // Exercise the exact final hold against that real conflicted state.
+        // This brackets the hold itself, after the recipe's legitimate planning
+        // filter writes, rather than equating a pre-pick tree with a conflict.
+        const { snapshotFixtureTree } = require('./helpers/custody-fixture.cjs');
+        const info = path.join(dir, '.git', 'info');
+        fs.mkdirSync(info, { recursive: true });
+        fs.writeFileSync(path.join(info, 'exclude'), 'ignored.bin\n');
+        fs.writeFileSync(path.join(dir, 'ignored.bin'), Buffer.from([255, 0, 42, 10]));
+        fs.writeFileSync(path.join(dir, 'untracked.bin'), Buffer.from([1, 0, 2]));
+        git(['update-ref', 'refs/forensic-recovery/feature', 'feature'], dir);
+        const loop = extractPickLoop(readWorkflowText());
+        const holdStart = loop.indexOf('  if [ -n "$(git diff --name-only --diff-filter=U)" ]; then');
+        assert.ok(holdStart >= 0, 'the actual recipe must contain the final conflict hold');
+        const holdEnd = loop.indexOf('\n  fi', holdStart);
+        assert.ok(holdEnd > holdStart);
+        const hold = loop.slice(holdStart, holdEnd + '\n  fi'.length);
+        const before = snapshotFixtureTree(dir);
+        const held = require('node:child_process').spawnSync('sh', ['-c',
+          'HASH=fixture PR_BRANCH=prbranch TARGET=main\n' + hold], {
+          cwd: dir, encoding: 'utf8', timeout: CHERRY_PICK_RECIPE_TIMEOUT_MS,
+        });
+        assert.ifError(held.error);
+        assert.strictEqual(held.signal, null);
+        assert.strictEqual(held.status, 1, held.stderr);
+        assert.match(held.stderr, /Conflict outside the \.planning\/ filter/);
+        assert.deepStrictEqual(snapshotFixtureTree(dir), before,
+          'the real halt must leave every index, sequencer, ref and tracked/ignored/untracked byte intact');
       } finally {
         teardown();
       }

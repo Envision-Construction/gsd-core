@@ -3619,20 +3619,15 @@ describe('bug #3384: adjacent worktree data-loss guards', () => {
     assert.ok(fragmentSource.includes('exit 42'), 'canonical fragment must fail closed with exit 42 on base mismatch (#48)');
   });
 
-  test('remove-workspace fails closed when git worktree remove fails', () => {
+  test('remove-workspace holds every strategy for manual root custody instead of deleting data', () => {
     const source = read('gsd-core/workflows/remove-workspace.md');
-    const init = source.indexOf('REMOVE_FAILED=false');
-    const loop = source.indexOf('For each repo in the workspace');
-    const remove = source.indexOf('git worktree remove "$WORKSPACE_PATH/$REPO_NAME"');
-
-    assert.doesNotMatch(
-      source,
-      /git worktree remove "\$WORKSPACE_PATH\/\$REPO_NAME" 2>&1 \|\| true/,
-      'worktree removal failures must not be swallowed',
-    );
-    assert.ok(init > 0 && init < loop, 'REMOVE_FAILED must initialize once before the per-repo loop');
-    assert.ok(remove > loop, 'worktree removal should remain inside the per-repo loop');
-    assert.match(source, /Refusing to delete "\$WORKSPACE_PATH"/);
+    assert.match(source, /Automatic workspace\/worktree retirement is held for every strategy/);
+    assert.match(source, /execute-phase\/steps\/worktree-recovery-policy\.md/);
+    assert.match(source, /Missing\/unknown state retains the entire workspace/);
+    assert.match(source, /echo "BLOCKED: workspace retained; manual root retirement required: \$WORKSPACE_PATH" >&2\r?\nexit 1/);
+    assert.doesNotMatch(source, /\bgit\s+worktree\s+(?:remove|unlock|prune)\b|\bgit\s+branch\s+-[dD]\b|\brm\s+-[rfRF]/,
+      'no destructive command or deletion fallback may bypass the manual hold');
+    assert.match(source, /Do not report the workspace deleted or worktrees cleaned up/);
   });
 
   test('validate health warns when worktree inventory cannot be listed', () => {
@@ -6011,11 +6006,14 @@ describe('#2596 scope conformance — unaccepted cleanup diagnostics', () => {
     // reported `merged_removed`/`ok` indistinguishably from an ordinary merge, which
     // removed the operator's only signal for the case where something OTHER than the
     // harness removed the path.
+    // ORCH-01's reviewed failed/unknown-merge contract adds the explicit
+    // manual-root recovery advisory; retain the exact frozen vocabulary lock.
     assert.deepEqual(
       Object.keys(WAVE_CLEANUP_WARNING).sort(),
       [
         'ACCEPTED_ABSENT_WORKTREE',
         'MERGE_AUTOSTASH_UNRESTORED',
+        'MERGE_MANUAL_ROOT_RECOVERY_REQUIRED',
         'MERGE_RESIDUE_LEFT_STAGED',
         'MERGE_RESIDUE_RESTORED',
         'SCOPE_CHECK_UNAVAILABLE',

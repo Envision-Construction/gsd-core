@@ -83,7 +83,6 @@ const EXACT_INLINE_DIRECTIVE_WORKFLOWS = new Set([
   'execute-phase/steps/gap-closure-artifacts.md',
   'execute-phase/steps/regression-gate.md',
   'execute-phase/steps/regression-gate-run.md',
-  'execute-phase/steps/worktree-recovery-policy.md',
   'help/modes/brief.md',
   'help/modes/default.md',
   'help/modes/full.md',

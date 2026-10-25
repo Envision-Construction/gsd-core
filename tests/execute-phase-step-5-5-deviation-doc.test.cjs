@@ -7,7 +7,7 @@
  * Regression tests for #3264: cross-wave-dependency deviation cleanup documentation
  *
  * Guards that step 5.5 of execute-phase.md documents both skip conditions and
- * contains a self-contained cleanup-tail snippet for the deviation path.
+ * uses the same bounded retention contract for standard and custom merges.
  */
 
 const { describe, test } = require('node:test');
@@ -59,103 +59,68 @@ describe('execute-phase step 5.5: cross-wave-deviation cleanup documentation (#3
   });
 
   test('step 5.5 documents the standard wave contract', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('Standard wave contract'),
-      'step 5.5 must name the standard wave contract explicitly',
-    );
+    const block = extractStep55Block(readWorkflow());
+    assert.match(block, /Each wave integrates only its dispatch-time `WAVE_WORKTREE_MANIFEST`/);
+    assert.match(block, /before dependent work forks/);
   });
 
-  test('step 5.5 names cross-wave dependency deviation as a supported execution mode', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('Cross-wave dependency deviation'),
-      'step 5.5 must name the cross-wave dependency deviation as a supported mode',
-    );
+  test('standard and cross-wave custom merges use one bounded helper path', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.match(block, /Both standard merges and cross-wave custom merges use this SAME bounded helper path/);
+    assert.match(block, /Custom history is not evidence of owner completion/);
   });
 
-  test('cleanup-tail snippet contains git worktree prune', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('git worktree prune'),
-      'step 5.5 cleanup-tail snippet must include git worktree prune',
-    );
+  test('cleanup has no broad worktree prune command', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.doesNotMatch(block, /git worktree prune/);
+    assert.match(block, /no separate cleanup-tail that unlocks, removes or prunes/);
   });
 
-  test('cleanup-tail snippet contains git worktree remove --force', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('git worktree remove') && block.includes('--force'),
-      'step 5.5 cleanup-tail snippet must include git worktree remove --force',
-    );
+  test('cleanup has no forced or non-forced worktree removal command', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.doesNotMatch(block, /git worktree remove/);
+    assert.match(block, /Worktrees, branch refs and registrations remain retained/);
   });
 
-  test('cleanup-tail snippet contains git worktree unlock', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('git worktree unlock'),
-      'step 5.5 cleanup-tail snippet must include git worktree unlock',
-    );
+  test('cleanup cannot unlock a retained owner', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.doesNotMatch(block, /git worktree unlock/);
+    assert.match(block, /Missing native owner evidence retains the work and holds integration/);
   });
 
-  test('cleanup-tail snippet contains git branch -D', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('git branch -D'),
-      'step 5.5 cleanup-tail snippet must include git branch -D',
-    );
+  test('cleanup cannot delete branch refs or discard recovery identity', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.doesNotMatch(block, /git branch -[dD]|git update-ref -d/);
+    assert.match(block, /exact accepted SHA and independent recovery ref/);
   });
 
-  test('skip conditions enumerate empty-WAVE_WORKTREE_PLANS case', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('WAVE_WORKTREE_PLANS'),
-      'step 5.5 must document the empty-WAVE_WORKTREE_PLANS skip condition',
-    );
+  test('only an empty WAVE_WORKTREE_PLANS permits skipping the handoff', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.match(block, /Skip only if `WAVE_WORKTREE_PLANS` is empty/);
+    assert.match(block, /Mixed waves process exactly the manifest entries/);
   });
 
-  test('skip conditions enumerate custom-merge-deviation case', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    // The deviation skip condition must reference the cleanup-tail as the alternative
-    assert.ok(
-      block.includes('cleanup-tail'),
-      'step 5.5 must document the custom-merge-deviation skip condition with a pointer to the cleanup-tail',
-    );
+  test('custom merges run the same guarded snippet once and cannot bypass it', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.match(block, /For custom merges, run the same guarded snippet above once/);
+    assert.match(block, /do not retry unchanged failures or run a legacy deletion fallback/);
   });
 
-  test('cleanup-tail uses wave manifest instead of agent namespace discovery', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.ok(
-      block.includes('WAVE_WORKTREE_MANIFEST'),
-      'cleanup-tail must consume the current wave manifest',
-    );
-    assert.ok(
-      block.includes('avoid touching unrelated active agents'),
-      'cleanup-tail must document why manifest-scoped cleanup is required',
-    );
+  test('cleanup consumes only a present dispatch manifest and its original root', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.match(block, /\[ -f "\$WAVE_WORKTREE_MANIFEST" \]/);
+    assert.match(block, /missing orchestrator_root/);
+    assert.match(block, /missing\/invalid manifest must not select another checkout/);
+    assert.match(block, /worktree\.cleanup-wave --manifest "\$RETENTION_MANIFEST" --exit-contract=v1/);
   });
 
-  test('cleanup-tail does not rediscover global agent worktrees', () => {
-    const content = readWorkflow();
-    const block = extractStep55Block(content);
-    assert.doesNotMatch(
-      block,
-      /git worktree list --porcelain.*\.claude\/worktrees\/agent-/s,
-      'cleanup-tail must not parse global git worktree list output for agent worktrees',
-    );
-    assert.ok(
-      block.includes('IFS= read -r'),
-      'cleanup-tail still reads manifest paths line-by-line to preserve paths with whitespace',
-    );
+  test('manifest identity preserves paths with whitespace without global rediscovery', () => {
+    const block = extractStep55Block(readWorkflow());
+    assert.doesNotMatch(block, /git worktree list --porcelain.*\.claude\/worktrees\/agent-/s);
+    assert.match(block, /never discover unrelated worktrees for cleanup/);
+    assert.match(block, /JSON\.stringify\(\[e\.agent_id, e\.worktree_path, e\.branch\]\)/);
+    assert.match(block, /result\.entries\.length !== expected\.length/);
+    assert.match(block, /duplicate manifest identities|unmatched result identity/);
   });
 });
 

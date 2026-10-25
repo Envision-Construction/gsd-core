@@ -492,7 +492,9 @@ describe('workspace command files', () => {
       content.includes('init remove-workspace') || content.includes('init.remove-workspace'),
       'expected init remove-workspace or gsd-sdk query init.remove-workspace'
     );
-    assert.ok(content.includes('git worktree remove'));
+    assert.match(content, /Automatic workspace\/worktree retirement is held for every strategy/);
+    assert.match(content, /workspace retained; manual root retirement required/);
+    assert.doesNotMatch(content, /\bgit worktree (?:remove|unlock|prune)\b/);
   });
 });
 

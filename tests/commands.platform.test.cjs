@@ -893,38 +893,39 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
       'and the recorded mode must actually be the executable one');
   });
 
-  // git refuses a partial commit during a cherry-pick exactly as it does during
-  // a merge, so the guard must stay out of the way there too — this arm pins
-  // that the pre-fix outcome is preserved rather than turned into a silent
-  // no-op. Driven, not assumed: the three sequencer states disagree.
-  test('a cherry-pick in progress keeps its pre-existing outcome', () => {
+  // The accepted custody policy refuses explicit scopes in every active
+  // sequencer before staging or invoking a hook, even for a no-diff path.
+  function assertScopedSequencerRetained(rel, state) {
+    const { snapshotFixtureTree } = require('./helpers/custody-fixture.cjs');
+    const info = path.join(tmpDir, '.git', 'info');
+    fs.mkdirSync(info, { recursive: true });
+    fs.writeFileSync(path.join(info, 'exclude'), 'ignored.bin\n');
+    fs.writeFileSync(path.join(tmpDir, 'ignored.bin'), Buffer.from([255, 0, 42, 10]));
+    fs.writeFileSync(path.join(tmpDir, 'untracked.bin'), Buffer.from([1, 0, 2]));
+    const before = snapshotFixtureTree(tmpDir);
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'scoped_commit_refused_during_merge');
+    assert.match(String(output.error), new RegExp('in-progress ' + state));
+    assert.deepStrictEqual(snapshotFixtureTree(tmpDir), before,
+      'the actual CLI must retain every ref, sequencer file, index byte and unrelated file');
+  }
+
+  test('a cherry-pick in progress refuses an explicit no-diff scope without consuming its resolution', () => {
     const rel = commitFixtureFile();
     conflictedSequence('cherry-pick');
     assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
       'fixture must leave a cherry-pick in progress');
     installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'commit_failed',
-      'git refuses the partial commit here; that must not become a silent nothing_to_commit');
-    assert.match(String(output.error), /partial commit/,
-      "git's own refusal must reach the caller");
+    assertScopedSequencerRetained(rel, 'cherry-pick');
   });
 
-  // REVERT_HEAD is deliberately NOT in the refusal set: a revert permits partial
-  // commits, so the fix must still apply there. Including it would suppress the
-  // fix during a revert and reintroduce the misreport.
-  test('a revert in progress still reports nothing_to_commit, not the hook rejection', () => {
+  test('a revert in progress retains its sequencer and unrelated resolution for manual recovery', () => {
     const rel = commitFixtureFile();
     conflictedSequence('revert');
     assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'REVERT_HEAD')),
       'fixture must leave a revert in progress');
     installHook(REJECTING_HOOK);
-
-    const output = commitFiles(rel);
-    assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit',
-      'a revert permits partial commits, so the empty-diff guard must still apply');
+    assertScopedSequencerRetained(rel, 'revert');
   });
 });

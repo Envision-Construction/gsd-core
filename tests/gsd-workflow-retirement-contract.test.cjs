@@ -9,7 +9,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { createTempDir, cleanup, installSpawnEnv, homeSandboxEnv, TOOLS_PATH } = require('./helpers.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-const { authorizeFixtureEntry, git } = require('./helpers/custody-fixture.cjs');
+const { authorizeFixtureEntry, git, snapshotFixtureTree } = require('./helpers/custody-fixture.cjs');
 const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -198,12 +198,35 @@ describe('ORCH-03 maintained workflow retirement inventory', () => {
   });
 
   for (const relative of ['remove-workspace.md', 'complete-milestone/detail/elaboration.md']) {
-    test(`${relative} has an executable manual retirement hold`, () => {
+    test(`${relative} has an executable manual retirement hold`, (t) => {
       const block = shellBlocks(readWorkflow(relative)).find(b => b.includes('BLOCKED:') && b.includes('retirement'));
       assert.ok(block);
-      const result = spawn('bash', ['-eu', '-c', block], { env: { ...f.env, WORKSPACE_PATH: f.wt } });
+      const base = createTempDir('manual-retirement-hold-');
+      t.after(() => cleanup(base));
+      const repo = path.join(base, 'repo');
+      const wt = path.join(base, 'worker');
+      fs.mkdirSync(repo);
+      git(['init', '-b', 'main'], repo);
+      git(['config', 'user.name', 'Fixture'], repo);
+      git(['config', 'user.email', 'fixture@example.invalid'], repo);
+      fs.writeFileSync(path.join(repo, 'accepted.txt'), 'accepted\n');
+      git(['add', 'accepted.txt'], repo); git(['commit', '-m', 'base'], repo);
+      git(['worktree', 'add', '-b', 'worktree-agent-hold', wt], repo);
+      git(['update-ref', 'refs/forensic-recovery/hold', 'HEAD'], repo);
+      // Preserve linked worktree registrations, recovery refs and dirty data.
+      fs.writeFileSync(path.join(wt, 'accepted.txt'), 'accepted but now modified\n');
+      git(['add', 'accepted.txt'], wt);
+      const info = path.join(repo, '.git', 'info');
+      fs.mkdirSync(info, { recursive: true });
+      fs.writeFileSync(path.join(info, 'exclude'), 'ignored.bin\n');
+      fs.writeFileSync(path.join(wt, 'ignored.bin'), Buffer.from([255, 0, 42, 10]));
+      fs.writeFileSync(path.join(wt, 'untracked.bin'), Buffer.from([1, 0, 2]));
+      const before = snapshotFixtureTree(base);
+      const result = spawn('bash', ['-eu', '-c', block], { env: { ...f.env, WORKSPACE_PATH: wt } });
       assert.equal(result.status, 1);
-      assert.ok(fs.existsSync(path.join(f.wt, 'accepted.txt')));
+      assert.match(result.stderr, /BLOCKED:/);
+      assert.deepEqual(snapshotFixtureTree(base), before,
+        'a retirement hold must preserve all bytes, raw indexes, refs and registrations');
     });
   }
 

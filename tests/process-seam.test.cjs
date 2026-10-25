@@ -230,6 +230,25 @@ describe('process-seam', () => {
     assert.ok(BUFFER_OVERFLOW_CODES.includes(result.code));
   });
 
+  test('an explicit bounded buffer captures a large successful result without changing the default overflow control', () => {
+    const fixture = writeFixture(tmpDir, 'large-output.cjs', FIXTURE_OVERFLOW);
+    const result = runNode([fixture, '0'], { maxBuffer: 4 * 1024 * 1024 });
+    assert.equal(result.outcome, OUTCOME.EXITED);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.code, null);
+    assert.equal(result.stdout.length, 300 * 10000, 'retain every output byte');
+    const tooSmall = runNode([fixture, '0'], { maxBuffer: 128 * 1024 });
+    assert.equal(tooSmall.outcome, OUTCOME.BUFFER_OVERFLOW);
+    assert.ok(BUFFER_OVERFLOW_CODES.includes(tooSmall.code));
+  });
+
+  test('invalid maxBuffer cannot create an unbounded or silently coerced capture', () => {
+    const fixture = writeFixture(tmpDir, 'buffer-validation.cjs', FIXTURE_EXIT);
+    for (const invalid of [0, -1, Infinity, NaN, '4000000', null, 1.5]) {
+      assert.throws(() => runNode([fixture, '0'], { maxBuffer: invalid }), TypeError);
+    }
+  });
+
   test('a missing binary is SPAWN_FAILED, not a timeout', () => {
     // git exists on the test host; a nonexistent cwd makes the OS-level
     // spawn itself fail with ENOENT (uv_spawn), the same failure class as a
