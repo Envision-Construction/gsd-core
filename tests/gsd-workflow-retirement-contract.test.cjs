@@ -207,6 +207,7 @@ describe('ORCH-03 maintained workflow retirement inventory', () => {
       const wt = path.join(base, 'worker');
       fs.mkdirSync(repo);
       git(['init', '-b', 'main'], repo);
+      git(['config', 'maintenance.auto', 'false'], repo);
       git(['config', 'user.name', 'Fixture'], repo);
       git(['config', 'user.email', 'fixture@example.invalid'], repo);
       fs.writeFileSync(path.join(repo, 'accepted.txt'), 'accepted\n');

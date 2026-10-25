@@ -42,7 +42,9 @@ function fixture(t, { autoStash = false, conflict = false } = {}) {
   const env = fixtureEnv(root);
   const git = (args, cwd = repo) => gitOrThrow(args, { cwd, env, timeoutMs: GIT_TIMEOUT_MS }).trim();
   const hooks = path.join(root, 'hooks'); fs.mkdirSync(hooks);
-  git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'Fixture']);
+  git(['init', '-q', '-b', 'main']);
+  // Setup commits must not leave detached maintenance writing into .git snapshots.
+  git(['config', 'maintenance.auto', 'false']); git(['config', 'user.name', 'Fixture']);
   git(['config', 'user.email', 'fixture@example.invalid']); git(['config', 'commit.gpgsign', 'false']);
   git(['config', 'core.hooksPath', hooks]); git(['config', 'merge.autoStash', String(autoStash)]);
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
