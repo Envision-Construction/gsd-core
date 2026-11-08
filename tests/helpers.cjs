@@ -589,14 +589,28 @@ function mockPartialWriteThenThrow(fsModule, matches, bytesBeforeThrow, options 
   const { code = 'ENOSPC', message = `${code}: simulated partial write failure` } = options;
   const shouldMatch = typeof matches === 'function' ? matches : () => true;
   const origWriteFileSync = fsModule.writeFileSync;
+  const origOpenSync = fsModule.openSync;
+  // With `resolveDescriptors`, a write through a descriptor is matched by the path
+  // it was opened under (the seam writes temp files via an exclusively-created fd).
+  const openedPaths = new Map();
+  if (options.resolveDescriptors === true) {
+    fsModule.openSync = (p, ...rest) => {
+      const fd = origOpenSync.call(fsModule, p, ...rest);
+      if (typeof p === 'string') openedPaths.set(fd, p);
+      return fd;
+    };
+  }
   fsModule.writeFileSync = (target, data, writeOptions) => {
-    if (!shouldMatch(target)) {
+    if (!shouldMatch(typeof target === 'number' && openedPaths.has(target) ? openedPaths.get(target) : target)) {
       return origWriteFileSync.call(fsModule, target, data, writeOptions);
     }
     origWriteFileSync.call(fsModule, target, String(data).slice(0, bytesBeforeThrow), writeOptions);
     throw Object.assign(new Error(message), { code });
   };
-  return () => { fsModule.writeFileSync = origWriteFileSync; };
+  return () => {
+    fsModule.writeFileSync = origWriteFileSync;
+    fsModule.openSync = origOpenSync;
+  };
 }
 
 /**
@@ -1313,7 +1327,40 @@ function withAmbientCapabilityHome(t, prefix, id, point) {
   return home;
 }
 
-module.exports = { runGsdTools, homeSandboxEnv, seedConfigSection, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, isolateWorkstreamEnv, restoreWorkstreamEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv, installSpawnEnv, installSpawnHome, sandboxHome, writePackageSourceMarkerFixture, writeAmbientCapabilityGate, withAmbientCapabilityHome, TEST_HOME_SANDBOX_MARKER, mockPartialWriteThenThrow, captureFdSync, suppressFdAsync };
+/** Shared custom-phase projects for the CLI reader and mutation contracts. */
+function createCustomPhaseProject(projectCode = null, phaseNaming = 'custom', roadmap = '# Roadmap\n\n## Milestone v1.0: Test\n\n## Phases\n') {
+  const cwd = fs.realpathSync(createTempProject());
+  fs.writeFileSync(path.join(cwd, '.planning', 'config.json'), JSON.stringify({phase_naming: phaseNaming, project_code: projectCode}));
+  fs.writeFileSync(path.join(cwd, '.planning', 'ROADMAP.md'), roadmap);
+  return cwd;
+}
+
+function runCustomPhaseCommand(cwd, args) {
+  const result = runGsdTools(args, cwd, homeSandboxEnv(cwd));
+  require('node:assert/strict').equal(result.success, true, result.error || result.output);
+  return JSON.parse(result.output);
+}
+
+function addCustomPhase(cwd, id, title = 'Boundary', projectCode = null) {
+  runCustomPhaseCommand(cwd, ['query', 'phase.add', title, '--id', id]);
+  // Fixture titles use word/space text. Keep the expected shape independent of
+  // production slug code; add literal cases here when punctuation is exercised.
+  const slug = title.toLowerCase().replaceAll(' ', '-').slice(0, 60);
+  const directory = `.planning/phases/${projectCode ? `${projectCode}-` : ''}${id}-${slug}`;
+  require('node:assert/strict').ok(fs.statSync(path.join(cwd, directory)).isDirectory());
+  return directory;
+}
+
+/** Existing installations can contain IDs that today's writers rightly refuse. */
+function seedCustomPhaseDirectory(cwd, id, title, projectCode = null) {
+  const directory = `.planning/phases/${projectCode ? `${projectCode}-` : ''}${id}-${title.toLowerCase().replaceAll(' ', '-')}`;
+  fs.mkdirSync(path.join(cwd, directory));
+  fs.writeFileSync(path.join(cwd, directory, '.phase-id'), id);
+  fs.appendFileSync(path.join(cwd, '.planning', 'ROADMAP.md'), `\n### Phase ${id}: ${title}\n`);
+  return directory;
+}
+
+module.exports = { createCustomPhaseProject, runCustomPhaseCommand, addCustomPhase, seedCustomPhaseDirectory, runGsdTools, homeSandboxEnv, seedConfigSection, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, isolateWorkstreamEnv, restoreWorkstreamEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv, installSpawnEnv, installSpawnHome, sandboxHome, writePackageSourceMarkerFixture, writeAmbientCapabilityGate, withAmbientCapabilityHome, TEST_HOME_SANDBOX_MARKER, mockPartialWriteThenThrow, captureFdSync, suppressFdAsync };
 
 // Lazy, for the reason builtLib() is lazy: reading either of these is what
 // forces the built-lib require, so a test file that needs neither can still
