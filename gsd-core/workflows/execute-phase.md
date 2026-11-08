@@ -846,8 +846,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
    SKIP_HOOKS=$(gsd_run query config-get workflow.worktree_skip_hooks --default false --raw) || exit $?
    case "$SKIP_HOOKS" in true|false) ;; *) echo "BLOCKED: invalid hook policy; preserve work for root review." >&2; exit 1;; esac
    if [ "$SKIP_HOOKS" = "true" ]; then
-     # No uncommitted parent data is accounted by this block. Inventory errors,
-     # diagnostics, untracked AND ignored data all hold; no stash/restore.
+     # Inventory errors and any untracked or ignored data hold; no stash/restore.
      PARENT_INVENTORY=$(git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain=v1 --untracked-files=all --ignored=matching --ignore-submodules=none 2>&1) || {
        echo "BLOCKED: parent inventory is unknown; retain work for root review." >&2
        exit 1
@@ -857,7 +856,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
        exit 1
      }
      TRACKED_INVENTORY=$(git --no-optional-locks ls-files --stage -v 2>&1) || exit 1
-     # Hidden tracked flags, unmerged entries and nested gitlinks are unknown.
+     # Hidden flags, unmerged entries, nested gitlinks: unknown.
      printf '%s\n' "$TRACKED_INVENTORY" | node -e '
        const text = require("fs").readFileSync(0, "utf8");
        const records = text === "\n" ? [] : text.replace(/\n$/, "").split("\n");
@@ -872,17 +871,17 @@ increases monotonically across waves. `{status}` is `complete` (success),
      [ "$HOOK_RC" -eq 0 ] || { echo "BLOCKED: pre-commit failed; retain work and report exit $HOOK_RC." >&2; exit "$HOOK_RC"; }
    fi
    ```
-   This block permits no unaccounted ignored data, including build/cache output. Root must account for parent writers and surviving hooks before invoking it. The inventory is an observation, not an exclusive writer lease or protection against later concurrent writes. A dirty/unknown inventory or failed hook holds progression. Preserve and report the actual status for root review; do not stash work, hide failure or continue the wave on unknown acceptance.
+   Ignored build/cache output counts as unaccounted. A dirty or unknown inventory or failed hook holds the wave: report it for root review; never stash work or hide the failure (5.5 writer caveats apply).
 
 5.5. **Accepted integration and retained worktree handoff (when worktree isolation was used):**
 
-   Each wave integrates only its dispatch-time `WAVE_WORKTREE_MANIFEST` before dependent work forks. Worktrees, branch refs and registrations remain retained; removal is not a prerequisite for project verification or a claim of phase acceptance. Do not reuse a retained path or overwrite its manifest.
+   Each wave integrates only its dispatch-time `WAVE_WORKTREE_MANIFEST` before dependent work forks. Worktrees, branch refs and registrations remain retained; removal is not required for verification or phase acceptance. Do not reuse a retained path or overwrite its manifest.
 
    Both standard merges and cross-wave custom merges use this SAME bounded helper path. There is no separate cleanup-tail that unlocks, removes or prunes residual worktrees. Custom history is not evidence of owner completion, accepted HEAD or independently retained recovery.
 
    Read `execute-phase/steps/worktree-recovery-policy.md` § Accepted integration and manual retirement. Root acceptance must already name the completed owner, exact accepted SHA and independent recovery ref in each manifest entry; do not manufacture it from SUMMARY, ancestry, age or a dead PID. Missing native owner evidence retains the work and holds integration.
 
-   Before invoking integration, root must account for parent writers and surviving hooks. The helper permits only an observed clean parent with tracked recovery in its recorded `parent_head_before_merge`; untracked/ignored data, hidden tracked flags, nested gitlinks or unknown inventory hold for manual root accounting. A rescued uncommitted SUMMARY also holds until root accounts for it. The preflight reads do not establish an exclusive writer lease and cannot protect against writers arriving after the last read.
+   Before invoking integration, root must account for parent writers and surviving hooks. The helper permits only an observed clean parent with tracked recovery in its recorded `parent_head_before_merge`; untracked/ignored data, hidden tracked flags, nested gitlinks or unknown inventory hold for manual root accounting. A rescued uncommitted SUMMARY also holds until root accounts for it. Preflight reads are an observation, not a writer lease: they cannot exclude writers arriving after the last read.
 
    ```bash
    [ -n "${WAVE_WORKTREE_MANIFEST:-}" ] && [ -f "$WAVE_WORKTREE_MANIFEST" ] || {
