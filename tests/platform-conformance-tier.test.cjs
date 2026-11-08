@@ -62,6 +62,17 @@ const MACOS_GENERATED_PATH = path.join(ROOT, 'scripts', 'lib', 'macos-conformanc
 const WINDOWS_TIER_RATIO_CEILING = 0.33;
 const MACOS_TIER_RATIO_CEILING = 0.25;
 
+// Fork (Envision-Construction/gsd-core): the custody tests from fork #6 run on a real OS by design
+// (forensic-gsd-parent-inventory is in ALWAYS_REAL_OS). They stay in the generated tier but are
+// counted outside upstream's #4641 aggregate, so the ceiling keeps guarding upstream's categories.
+const FORK_REAL_OS_TESTS = new Set([
+  'forensic-gsd-custody.test.cjs',
+  'forensic-gsd-merge-failure.test.cjs',
+  'forensic-gsd-parent-inventory.test.cjs',
+  'gsd-workflow-retirement-contract.test.cjs',
+]);
+const countsTowardTierRatio = (file) => !FORK_REAL_OS_TESTS.has(path.basename(file));
+
 // ─── Rows 1-15: classifyContent, pure fixtures ────────────────────────────────
 
 describe('classifyContent — happy-path signals', () => {
@@ -342,12 +353,14 @@ describe('gen-platform-conformance-tier.cjs — real repo tree (regression)', ()
     // changes (a hardcoded exact-count sanity range already broke once in
     // this PR). Derived from the live tree, not a hardcoded number.
     const { suiteOf } = require('../scripts/lib/suite-detection.cjs');
-    const eligibleCount = walkTestFiles(realTestsDir).filter((absPath) => suiteOf(absPath) === null).length;
-    const ratio = fresh.files.length / eligibleCount;
+    const eligibleCount = walkTestFiles(realTestsDir)
+      .filter((absPath) => suiteOf(absPath) === null && countsTowardTierRatio(absPath)).length;
+    const tierCount = fresh.files.filter(countsTowardTierRatio).length;
+    const ratio = tierCount / eligibleCount;
     assert.ok(
       ratio > 0 && ratio <= WINDOWS_TIER_RATIO_CEILING,
       `expected a nonzero conformance tier within the #4641 ratio ceiling (<=${WINDOWS_TIER_RATIO_CEILING * 100}%), ` +
-        `got ${fresh.files.length}/${eligibleCount} (${(ratio * 100).toFixed(1)}%)`,
+        `got ${tierCount}/${eligibleCount} (${(ratio * 100).toFixed(1)}%)`,
     );
 
     delete require.cache[require.resolve(GENERATED_PATH)];
@@ -624,7 +637,7 @@ describe('conformance tier narrowing (#4641)', () => {
     const { suiteOf } = require('../scripts/lib/suite-detection.cjs');
 
     const absoluteFiles = walkTestFiles(realTestsDir);
-    const eligibleFiles = absoluteFiles.filter((absPath) => suiteOf(absPath) === null);
+    const eligibleFiles = absoluteFiles.filter((absPath) => suiteOf(absPath) === null && countsTowardTierRatio(absPath));
     const eligibleCount = eligibleFiles.length;
 
     let tierCount = 0;

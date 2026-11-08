@@ -415,8 +415,6 @@ describe('shell fences name scoped planning artifacts through resolved paths (#5
   const SHELL_INFO = /^(bash|z?sh|shell)\b/;
 
   const PR_BRANCH_WHY = 'pr-branch.md classifies commit paths with drift-guarded mirrors of src/pr-branch-patterns.cts (scripts/lint-pr-branch-pattern-drift.cjs), which describe the root planning layout. Widening them to nested scopes is a change to the pattern module, its drift guard and the cherry-pick recipe tests, not to this fence.';
-  const SYNTH_WHY = '#5859 owns the research synthesizer write/commit targets (it needs a scoped research_dir passed in the spawn prompt); changing these lines here would collide with that fix.';
-  const ROADMAPPER_WHY = '#5859 owns the roadmapper write targets and their write-guard sentinel; changing these lines here would collide with that fix.';
   const SHARED_WHY = 'Shared root copy per the #5861 triage (per-scope placement is a maintainer decision): HANDOFF.json, the root .continue-here.md, RETROSPECTIVE.md and reports/MILESTONE_SUMMARY stay one .planning/ copy for every project and workstream, and their writers and readers name that copy.';
   // Each entry: { file, match, why }. An entry that no longer suppresses an offending line
   // is stale and fails the second test, so the list only shrinks.
@@ -429,13 +427,6 @@ describe('shell fences name scoped planning artifacts through resolved paths (#5
     { file: 'gsd-core/workflows/pr-branch.md', match: /^\s*# milestones yet \(`\.planning\/milestones\/` absent\)/, why: PR_BRANCH_WHY },
     { file: 'gsd-core/workflows/pr-branch.md', match: /^\s*# `\.planning\/milestones\/`\), not just the expected-absent case/, why: PR_BRANCH_WHY },
     { file: 'gsd-core/workflows/pr-branch.md', match: /^\s*MILESTONE_PHASE_DIRS=\$\(find \.planning\/milestones -mindepth 1/, why: PR_BRANCH_WHY },
-    { file: 'agents/gsd-research-synthesizer.md', match: /^cat \.planning\/research\/(STACK|FEATURES|ARCHITECTURE|PITFALLS)\.md$/, why: SYNTH_WHY },
-    { file: 'agents/gsd-research-synthesizer.md', match: /--files \.planning\/research\/$/, why: SYNTH_WHY },
-    { file: 'agents/gsd-research-synthesizer.compact.md', match: /^cat \.planning\/research\/(STACK|FEATURES|ARCHITECTURE|PITFALLS)\.md$/, why: SYNTH_WHY },
-    { file: 'agents/gsd-research-synthesizer.compact.md', match: /--files \.planning\/research\/$/, why: SYNTH_WHY },
-    { file: 'agents/gsd-roadmapper.md', match: /^\s*\[ -f \.planning\/(ROADMAP|STATE)\.md \] && printf '\.planning\/(ROADMAP|STATE)\.md\\n' > \.planning\/\.gsd-allow-shrink$/, why: ROADMAPPER_WHY },
-    { file: 'gsd-core/workflows/new-project.md', match: /^gsd_run query commit "docs: create roadmap \(\[N\] phases\)" --files \.planning\/ROADMAP\.md /, why: '#5859 owns the new-project roadmap commit, which must commit the files the roadmapper writes; it changes together with the roadmapper targets.' },
-    { file: 'gsd-core/workflows/new-milestone/steps/reset-phase-safety.md', match: /^find \.planning\/phases -mindepth 1 -maxdepth 1 -type d -exec mv/, why: '#5860 owns reset-phase-safety (the phase archive move needs its own guard and test).' },
     { file: 'gsd-core/workflows/pause-work.md', match: /^gsd_run query commit "docs\(pause\): \[context-name\] paused at \[X\]\/\[Y\]" --files \[handoff-path\] \.planning\/HANDOFF\.json$/, why: SHARED_WHY },
     { file: 'gsd-core/workflows/resume-project.md', match: /^cat \.planning\/HANDOFF\.json 2>\/dev\/null \|\| true$/, why: SHARED_WHY },
     { file: 'gsd-core/workflows/resume-project.md', match: /^#\s+dropping every pattern after it, including `\.planning\/\.continue-here\*\.md` \(#3689\);$/, why: SHARED_WHY },
@@ -979,7 +970,8 @@ describe('shell fences name scoped planning artifacts through resolved paths (#5
     test('the step-1 paths, passed as {phase_dirs}, give a non-empty export map', () => {
       const phaseDirs = run(audit.replace('$ARGUMENTS', ''), 'audit-milestone step 1').split('\n')
         .filter((l) => l && !l.startsWith('PLANNING_DIR='));
-      assert.deepStrictEqual(phaseDirs, ['01-x', '02-y'].map((d) => path.join(fs.realpathSync(repo), '.planning', 'phases', d)));
+      // The fence prints the forward-slash path config-path reports on every platform (#5861).
+      assert.deepStrictEqual(phaseDirs, ['01-x', '02-y'].map((d) => path.join(fs.realpathSync(repo), '.planning', 'phases', d).split(path.sep).join('/')));
       assertMap(run(checker.replace('{phase_dirs}', phaseDirs.join('\n')), 'integration checker Step 1'));
     });
 
