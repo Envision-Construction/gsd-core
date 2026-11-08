@@ -299,6 +299,22 @@ describe('CR-AGENT: code review agent frontmatter', () => {
     );
   });
 
+  // #5861: the fixer no longer reads a root .planning/config.json itself; the orchestrator resolves
+  // workflow.use_worktrees for the selected scope and hands it over in every spawn's <config> block.
+  test('#5861 code-review-fix.md passes use_worktrees to every gsd-code-fixer spawn', () => {
+    const wf = fs.readFileSync(path.join(WORKFLOWS_DIR, 'code-review-fix.md'), 'utf-8');
+    assert.match(wf, /USE_WORKTREES=\$\(gsd_run query config-get workflow\.use_worktrees \$\{GSD_WS:\+--ws=\$\{GSD_WS##\* \}\} --raw/,
+      'USE_WORKTREES must be resolved from the selected scope\'s config');
+    const spawns = wf.split('Agent(subagent_type="gsd-code-fixer"').slice(1);
+    assert.equal(spawns.length, 2, 'expected the initial and the iteration fixer spawn');
+    for (const [i, spawn] of spawns.entries()) {
+      const config = spawn.slice(spawn.indexOf('<config>'), spawn.indexOf('</config>'));
+      assert.match(config, /^use_worktrees: \$\{USE_WORKTREES\}$/m, `fixer spawn ${i + 1} must pass use_worktrees in its <config> block`);
+    }
+    const agent = fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.md'), 'utf-8');
+    assert.doesNotMatch(agent, /directly from `\.planning\/config\.json`/, 'the fixer must not claim to read the root config itself');
+  });
+
   test('#2825 gsd-code-fixer.md forbids rm -rf on a possible reparse point (Windows junction safety)', () => {
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.md'), 'utf-8');
     assert.ok(
@@ -485,6 +501,30 @@ describe('CR-WORKFLOW: code review workflow structure', () => {
 
       assert.ok(!stepContent.includes('render-hooks execute:post'),
         'check_config_gate must no longer gate on render-hooks execute:post — manual invocation must work regardless of workflow.code_review_point');
+    });
+
+    // #5753: the fix workflow's gate follows the same toggle as the review workflow.
+    test('G2b (#5753): code-review-fix check_config_gate reads workflow.code_review, not execute:post hooks', () => {
+      const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'code-review-fix.md'), 'utf-8');
+      const stepContent = extractStepBody(content, 'check_config_gate');
+      assert.ok(stepContent, 'code-review-fix.md missing check_config_gate step');
+
+      assert.ok(/gsd_run query config-get workflow\.code_review\b/.test(stepContent),
+        'check_config_gate must read workflow.code_review via gsd_run query config-get');
+      assert.ok(/\|\| echo "true"/.test(stepContent),
+        'check_config_gate must default to active when workflow.code_review is absent');
+      assert.ok(!stepContent.includes('render-hooks execute:post'),
+        'check_config_gate must not gate on render-hooks execute:post — it must work for any workflow.code_review_point');
+      assert.ok(stepContent.includes('Code review fix skipped (code-review capability inactive)'),
+        'skip message must be unchanged');
+    });
+
+    test('G2c (#5753): code-review-fix closing checklist describes the toggle check', () => {
+      const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'code-review-fix.md'), 'utf-8');
+      const gateLine = (content.match(/^- \[ \] Capability gate checked.*$/m) || [])[0];
+      assert.ok(gateLine, 'code-review-fix.md missing "Capability gate checked" checklist item');
+      assert.ok(gateLine.includes('workflow.code_review'), 'checklist must name the workflow.code_review toggle');
+      assert.ok(!gateLine.includes('execute:post'), 'checklist must not name the execute:post hook');
     });
 
     test('G3: computeFileScopeDerivesLastReviewCommit', () => {

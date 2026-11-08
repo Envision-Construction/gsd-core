@@ -1,8 +1,7 @@
 Apply response_language to all user-facing prose — narration between tool calls, status updates, progress notes, and findings included; preserve code, paths, and identifiers.
 
 <purpose>
-Interactive configuration of GSD power-user knobs — plan bounce, planner stall detection, node
-repair, subagent timeouts, inline plan threshold, cross-AI execution, base branch, branch templates, response language,
+Interactive configuration of GSD power-user knobs — plan bounce, planner stall detection and timing, node repair, subagent timeouts, inline plan threshold, cross-AI execution, base branch, branch templates, response language,
 context window, gitignored search, graphify build timeout, runtime model tier overrides, and
 model policy configuration (provider + budget → canonical tier mapping, or manual model ID
 assignment per cost tier).
@@ -24,15 +23,15 @@ Read all files referenced by the invoking prompt's execution_context before star
 Ensure config exists and resolve the workstream-aware config path (mirrors `settings.md`):
 
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
 _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { set -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}" "$HOME/.gemini/antigravity-ide" "$HOME/.gemini/antigravity-cli" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}" "${CLINE_CONFIG_DIR:-$HOME/.cline}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}" "${CODEX_HOME:-$HOME/.codex}" "${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}" "${HERMES_HOME:-$HOME/.hermes}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}" "${KIMI_CONFIG_DIR:-$HOME/.config/agents}" "$HOME/.agents" "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}" "${TRAE_CONFIG_DIR:-$HOME/.trae}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}" "${ZCODE_CONFIG_DIR:-$HOME/.zcode}" "${GROK_AGENTS_HOME:-$HOME/.agents}"; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
-gsd_run query config-ensure-section
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+gsd_run query config-ensure-section ${GSD_WS:+--ws=${GSD_WS##* }}
 if [[ -z "${GSD_CONFIG_PATH:-}" ]]; then
-  if [[ -f .planning/active-workstream ]]; then
-    WS=$(tr -d '\n\r' < .planning/active-workstream)
-    GSD_CONFIG_PATH=".planning/workstreams/${WS}/config.json"
-  else
-    GSD_CONFIG_PATH=".planning/config.json"
-  fi
+  GSD_CONFIG_PATH=$(gsd_run query config-path ${GSD_WS:+--ws=${GSD_WS##* }} --raw)
 fi
 ```
 
@@ -50,6 +49,8 @@ shown in parentheses:
 
 Planning Tuning:
 - `planner.stall_detection_enabled` (default: `true`)
+- `planner.stall_threshold_minutes` (default: `10`)
+- `planner.stall_detect_interval_minutes` (default: `5`)
 - `workflow.plan_bounce` (default: `false`)
 - `workflow.plan_bounce_passes` (default: `2`)
 - `workflow.plan_bounce_script` (default: `null`)
@@ -106,10 +107,10 @@ in `$ARGUMENTS` OR `text_mode` is true in config. When `TEXT_MODE=true`, replace
 choice number or free-text value.
 
 **Numeric-input validation.** For any numeric field (`*_passes`, `*_budget`, `*_timeout`,
-`*_threshold`, `context_window`, `graphify.build_timeout`), if the user types a value that
+`*_threshold`, `*_minutes`, `context_window`, `graphify.build_timeout`), if the user types a value that
 is not a non-negative integer, the workflow MUST reject it, state which value was invalid,
 and re-prompt that single field. The minimum accepted value is field-specific and is stated
-in each field's prompt below — `workflow.plan_bounce_passes` and `workflow.max_discuss_passes`
+in each field's prompt below — the `*_passes` fields and the `planner.stall_*_minutes` fields
 require `>= 1`; all other numeric fields accept `>= 0`. An empty input means "keep current"
 — the existing value is retained. Non-numeric input is never silently coerced.
 
@@ -127,7 +128,9 @@ stored verbatim as a string.
 
 ### Section 1 — Planning Tuning
 
-Before offering the disabled choice, display this warning verbatim:
+Asked as four calls, 1a–1d (`AskUserQuestion` takes at most 4 questions per call).
+
+**1a — Planner watchdog.** Before offering the disabled choice, display this warning verbatim:
 
 `Warning: disabling planner stall detection gives up bounded automatic recovery if the runtime loses an agent completion handoff. Planning still waits through the runtime-native completion mechanism, but you may need to interrupt and use the filesystem fallback.`
 
@@ -141,7 +144,40 @@ AskUserQuestion([
       { label: "Yes (default: true)", description: "Poll for completion markers and plan-file activity, with bounded recovery." },
       { label: "No (false)", description: "Await runtime-native completion without polling. Gives up bounded automatic recovery if completion handoff is lost." }
     ]
+  }
+])
+```
+
+**1b — Stall timing.** Ask only when `planner.stall_detection_enabled` is effectively `true` after 1a (anything but boolean `false`); otherwise skip 1b.
+`planner.stall_threshold_minutes`: idle time before plan-phase offers recovery; raise it for slow models. `planner.stall_detect_interval_minutes`: check cadence. Both integer `>= 1`.
+
+```text
+AskUserQuestion([
+  {
+    question: "Planner stall threshold (minutes)? (current: <value or 10>)",
+    header: "Stall Threshold",
+    multiSelect: false,
+    options: [
+      { label: "Keep current", description: "Leave the threshold unchanged." },
+      { label: "Enter minutes", description: "Integer >= 1. Default: 10." }
+    ]
   },
+  {
+    question: "Planner stall check interval (minutes)? (current: <value or 5>)",
+    header: "Stall Interval",
+    multiSelect: false,
+    options: [
+      { label: "Keep current", description: "Leave the interval unchanged." },
+      { label: "Enter minutes", description: "Integer >= 1. Default: 5." }
+    ]
+  }
+])
+```
+
+**1c — Plan bounce.**
+
+```text
+AskUserQuestion([
   {
     question: "Run external plan-bounce validator against generated PLAN.md? (current: <value or false>)",
     header: "Plan Bounce",
@@ -169,7 +205,14 @@ AskUserQuestion([
       { label: "Clear (null)", description: "Unset the script path." },
       { label: "Enter path", description: "Type an absolute or repo-relative path. Receives PLAN.md path as first argument." }
     ]
-  },
+  }
+])
+```
+
+**1d — Timeouts.**
+
+```text
+AskUserQuestion([
   {
     question: "Subagent timeout (milliseconds)? (current: <value or 300000>)",
     header: "Subagent Timeout",
@@ -180,12 +223,12 @@ AskUserQuestion([
     ]
   },
   {
-    question: "Inline plan threshold — tasks allowed inline before splitting to PLAN.md? (current: <value or 3>)",
+    question: "Inline plan threshold — plans with this many tasks or fewer execute inline instead of spawning a subagent? (current: <value or 2>)",
     header: "Inline Plan Threshold",
     multiSelect: false,
     options: [
       { label: "Keep current", description: "Leave threshold unchanged." },
-      { label: "Enter number", description: "Integer count. Non-numeric rejected. Default: 3" }
+      { label: "Enter number", description: "Integer >= 0. Non-numeric rejected. Default: 2. Set 0 to always spawn a subagent." }
     ]
   }
 ])
@@ -448,7 +491,7 @@ AskUserQuestion([
 
 If "Other (Group B or custom)" is selected, prompt the user to enter the runtime name as a free-text string.
 If the selected runtime differs from the stored `runtime` key, update `runtime` via
-`gsd_run query config-set runtime <value>` before proceeding to Step C.
+`gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} runtime <value>` before proceeding to Step C.
 
 **Step C — Configure tier overrides for the selected runtime:**
 
@@ -489,14 +532,14 @@ AskUserQuestion([
 
 **Step D — Apply the changes:**
 
-For each tier where the user chose "Enter model ID":
+One write per changed tier: its model ID for "Enter model ID", or `null` for "Clear override" (null removes the key):
 ```bash
-gsd_run query config-set model_profile_overrides.<runtime>.<tier> "<model-id>"
-```
-
-For each tier where the user chose "Clear override", remove the key by setting it to null:
-```bash
-gsd_run query config-set model_profile_overrides.<runtime>.<tier> null
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} model_profile_overrides.<runtime>.<tier> "<model-id or null>"
 ```
 
 "Keep current" selections are skipped entirely. Never write a key the user did not explicitly
@@ -508,22 +551,19 @@ change.
 Merge the new settings into the existing config at `$GSD_CONFIG_PATH`. This merge is the
 core correctness invariant: **preserve every unrelated key** — do not clobber siblings.
 
-Apply each selected value via `gsd_run query config-set <key> <value>` so the central
+Apply each selected value via `gsd_run query config-set <key> <value>`, forwarding `--ws` as below (#5861), so the central
 validator (`isValidConfigKey`) accepts the write and the deep-merge preserves unrelated
 keys and sibling sub-objects.
 
 ```bash
-# Example — only write keys the user changed. "Keep current" selections are skipped.
-gsd_run query config-set planner.stall_detection_enabled false
-gsd_run query config-set workflow.plan_bounce_passes 5
-gsd_run query config-set workflow.subagent_timeout 300000
-gsd_run query config-set git.base_branch main
-gsd_run query config-set context_window 1000000
-# Runtime model tier examples (antigravity ships no built-in tier defaults, so
-# overrides are how you pin its models):
-gsd_run query config-set runtime antigravity
-gsd_run query config-set model_profile_overrides.antigravity.opus gemini-3.1-pro-preview
-gsd_run query config-set model_profile_overrides.antigravity.haiku null
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+# One line per key the user changed ("Keep current" selections are skipped), e.g. config-set planner.stall_detection_enabled false,
+# workflow.plan_bounce_passes 5, workflow.subagent_timeout 300000, git.base_branch main, context_window 1000000:
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} "<key>" "<value>"
 ```
 
 Conceptual shape after merge (unchanged top-level keys like `model_profile`,
@@ -535,7 +575,9 @@ anything not listed in Sections 1–8 MUST survive the update):
   ...existing_config,
   "planner": {
     ...existing_planner,
-    "stall_detection_enabled": <new|existing>
+    "stall_detection_enabled": <new|existing>,
+    "stall_threshold_minutes": <new|existing>,
+    "stall_detect_interval_minutes": <new|existing>
   },
   "workflow": {
     ...existing_workflow,
@@ -743,20 +785,18 @@ Proceed to Step E.
 **Step E — Write model_policy to config:**
 
 ```bash
-# Known-provider path — write all four keys atomically:
-gsd_run query config-set model_policy.provider "<provider>"   # e.g., anthropic / anthropic-fable / openai / google / qwen
-gsd_run query config-set model_policy.budget   "<budget>"    # high / medium / low
-gsd_run query config-set model_policy.high     "<high-id>"
-gsd_run query config-set model_policy.medium   "<medium-id>"
-gsd_run query config-set model_policy.low      "<low-id>"
-
-# Generic-provider path — write only tiers the user changed ("Keep current" skipped):
-gsd_run query config-set model_policy.provider "custom"
-gsd_run query config-set model_policy.budget   null
-# Per-tier writes for each non-"Keep current" answer:
-gsd_run query config-set model_policy.high     "<high-id>"   # omit if user chose "Keep current"
-gsd_run query config-set model_policy.medium   "<medium-id>" # omit if user chose "Keep current"
-gsd_run query config-set model_policy.low      "<low-id>"    # omit if user chose "Keep current"
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+# Known provider: all five keys. Generic provider: provider "custom", budget null, and only the
+# tiers the user changed (omit a tier line per "Keep current" answer).
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} model_policy.provider "<provider>"   # e.g., anthropic / anthropic-fable / openai / google / qwen
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} model_policy.budget   "<budget>"    # high / medium / low
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} model_policy.high     "<high-id>"
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} model_policy.medium   "<medium-id>"
+gsd_run query config-set ${GSD_WS:+--ws=${GSD_WS##* }} model_policy.low      "<low-id>"
 ```
 
 Never write a tier the user explicitly chose to keep; the existing value must survive.
@@ -772,6 +812,8 @@ Display:
 | Setting                                    | Value |
 |--------------------------------------------|-------|
 | planner.stall_detection_enabled            | {true/false} |
+| planner.stall_threshold_minutes            | {minutes} |
+| planner.stall_detect_interval_minutes      | {minutes} |
 | workflow.plan_bounce                       | {on/off} |
 | workflow.plan_bounce_passes                | {n} |
 | workflow.plan_bounce_script                | {path/null} |
@@ -826,6 +868,7 @@ UI/AI phase gates), use /gsd:settings.
 - [ ] Eight sections rendered (Planning, Execution, Discussion, Cross-AI, Git, Runtime/Output, Runtime Model Tiers, Model Policy)
 - [ ] Every field pre-selected to its current value (or documented default if absent)
 - [ ] Disabling planner stall detection shows the bounded-recovery warning before writing `false`
+- [ ] Stall threshold/interval asked only while stall detection is on; no call exceeds 4 questions
 - [ ] Numeric inputs validated — non-numeric rejected and re-prompted
 - [ ] Branch-template inputs validated — non-default must contain a placeholder
 - [ ] Null-allowed fields accept an empty input as a clear

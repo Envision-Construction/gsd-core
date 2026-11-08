@@ -73,12 +73,12 @@ After applying each fix:
 | Language | Check Command |
 |----------|--------------|
 | JavaScript | `node -c {file}` (syntax check) |
-| TypeScript | `npx tsc --noEmit {file}` (if tsconfig.json exists) |
+| TypeScript | Project-aware check only, output filtered to `{file}`: the project's own typecheck (`npm run typecheck` / `tsc -b`) if it exists, else `npx tsc --noEmit -p <nearest tsconfig*.json>` whose `--listFilesOnly` output lists `{file}`; no config includes `{file}` → Tier 1 only. Never pass `{file}` to `tsc` positionally. |
 | Python | `python -c "import ast; ast.parse(open('{file}').read())"` |
 | JSON | `node -e "JSON.parse(require('fs').readFileSync('{file}','utf-8'))"` |
 | Other | Skip to Tier 1 only |
 
-**Scoping:** TypeScript errors in OTHER files are pre-existing — IGNORE; only fail on errors in the file you edited. `node -c` is unreliable for JSX/TS/ESM bare specifiers — if it fails because the type is unsupported, fall back to Tier 1 only, do NOT rollback. General rule: if errors existed BEFORE your edit, your fix didn't cause them — proceed to commit.
+**Scoping:** TypeScript errors in OTHER files are pre-existing — IGNORE; only fail on errors in the file you edited. A solution-style root `tsconfig.json` (`"files": []` plus `references`) checks no source files and exits 0 — NOT a passing check; use a referenced config whose `--listFilesOnly` lists `{file}`, or fall back to Tier 1. TypeScript procedure: prefer a `typecheck` script in the nearest `package.json`; else walk up from `{file}` to the nearest `tsconfig.json` (solution-style: try each referenced config in turn), run from that config's directory `npx tsc --noEmit -p <config> --listFilesOnly` and keep the first config listing `{file}` (none → Tier 1), then `npx tsc --noEmit -p <config>` (never `-b`: no build artifacts) keeping only output lines for `{file}`; roll back only for errors on lines you changed, otherwise treat as pre-existing and proceed. `node -c` is unreliable for JSX/TS/ESM bare specifiers — if it fails because the type is unsupported, fall back to Tier 1 only, do NOT rollback. General rule: if errors existed BEFORE your edit, your fix didn't cause them — proceed to commit.
 
 - Syntax check FAILS with NEW errors in your file → rollback_strategy immediately.
 - FAILS with pre-existing errors only → proceed to commit.
@@ -120,17 +120,12 @@ After applying each fix:
 <step name="setup_worktree">
 **Isolation: create a dedicated git worktree BEFORE touching any files.** This agent runs as a background process that commits — operating on the main working tree would race the foreground session (shared index/HEAD/files). Every instance runs in its own isolated worktree.
 
-**Honor `workflow.use_worktrees` (the documented opt-out; the same flag the sibling writer workflows `/gsd:execute-phase` and `/gsd:quick`, plus the `execute-plan` and `diagnose-issues` workflows, all honor — this is the only writer that hand-rolls its own worktree).** Read it directly via `node` from `.planning/config.json` (NOT the gsd-tools CLI — this step runs before the launcher preamble is sourced). When `false`: edit/commit in the main checkout directly — `wt="."`, `reviewfix_branch="$branch"`, no temp branch, no sentinel, no `git worktree add`, skip the whole cleanup tail. The hand-rolled worktree has no `node_modules` and cannot run the project's gates safely, so the opt-out is also the safe path.
+**Honor `workflow.use_worktrees` (the documented opt-out; the same flag the sibling writer workflows `/gsd:execute-phase` and `/gsd:quick`, plus the `execute-plan` and `diagnose-issues` workflows, all honor — this is the only writer that hand-rolls its own worktree).** Take it from `use_worktrees` in the `<config>` block: the orchestrator resolves it through gsd-tools (`config-get`, so the selected project's or workstream's config is read; the CLI is not available here — this step runs before the launcher preamble is sourced). When `false`: edit/commit in the main checkout directly — `wt="."`, `reviewfix_branch="$branch"`, no temp branch, no sentinel, no `git worktree add`, skip the whole cleanup tail. The hand-rolled worktree has no `node_modules` and cannot run the project's gates safely, so the opt-out is also the safe path.
 
 ```bash
-USE_WORKTREES=$(node -e '
-  try {
-    const fs = require("fs");
-    const p = (process.env.GSD_PROJECT_DIR || process.cwd()) + "/.planning/config.json";
-    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-    process.stdout.write(String((cfg.workflow && cfg.workflow.use_worktrees) ?? true));
-  } catch { process.stdout.write("true"); }
-')
+# Resolved by the orchestrator (gsd-tools config-get) and passed in <config>; absent or unrecognised: worktrees stay on.
+USE_WORKTREES="${use_worktrees:-true}"
+[ "$USE_WORKTREES" = "false" ] || USE_WORKTREES=true
 
 branch=$(git branch --show-current)
 test -n "$branch" || { echo "Detached HEAD is not supported for review-fix (#2686)"; exit 1; }
@@ -256,17 +251,17 @@ Treat this as a finally-block obligation: even on early exit (config error, no f
 
 <step name="load_context">
 1. Read all `<required_reading>` files if present.
-2. Parse `<config>` block: `phase_dir`, `padded_phase`, `review_path` (full path to REVIEW.md), `fix_scope` ("critical_warning" default, or "all" includes Info), `fix_report_path` (output REVIEW-FIX.md path).
+2. Parse `<config>` block: `use_worktrees`, `phase_dir`, `padded_phase`, `review_path` (full path to REVIEW.md), `fix_scope` ("critical_warning" default, or "all" includes Info and necessity), `fix_report_path` (output REVIEW-FIX.md path).
 3. `cat {review_path}`.
 4. Parse frontmatter `status:`. If `"clean"` or `"skipped"`: exit with "No issues to fix -- REVIEW.md status is {status}." — do NOT create REVIEW-FIX.md, exit 0 (not an error).
 5. Load project context (`<project_context>`): CLAUDE.md, skills.
 </step>
 
 <step name="parse_findings">
-1. Extract findings via `<finding_parser>` rules: `id`, `severity` (Critical CR-*/BL-*, Warning WR-*, Info IN-*), `title`, `file` (primary), `files` (all referenced, for multi-file fixes), `line` (or null), `issue`, `fix` (may be multi-line/code fences).
-2. Filter by `fix_scope`: `critical_warning` → CR-*/BL-*/WR-* only; `all` → + IN-*.
-3. Sort: Critical first, then Warning, then Info; same-severity keeps document order.
-4. Record `findings_in_scope` count for frontmatter.
+1. Extract findings via `<finding_parser>` rules: `id`, `severity` (Critical CR-*/BL-*, Warning WR-*, Info IN-*), `category` (`necessity` when the finding carries a `**Category:** necessity` line, #4100 — unnecessary code, not broken code), `title`, `file` (primary), `files` (all referenced, for multi-file fixes), `line` (or null), `issue`, `fix` (may be multi-line/code fences).
+2. Filter by `fix_scope`: `critical_warning` → CR-*/BL-*/WR-* only, and `critical_warning` excludes necessity findings (removal is the human's scope call; the marker overrides the prefix, so a WR-* carrying `**Category:** necessity` is out of scope and skipped with no edit); `all` → + IN-*, and `all` includes necessity findings, ordered last — record each as `fixed: requires human verification`.
+3. Sort: Critical first, then Warning, then Info, then necessity; same-severity keeps document order.
+4. Record `findings_in_scope` count for frontmatter. If `findings_in_scope` is 0, apply nothing: write REVIEW-FIX.md with `fixed: 0`, `skipped: 0`, `status: all_fixed`, and a body stating no finding was in scope and the out-of-scope findings remain in REVIEW.md.
 </step>
 
 <step name="apply_fixes">

@@ -65,12 +65,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { allow } = require('./lib/hook-exit.js');
+const { readConfigFileBounded } = require('./lib/config-read.js');
 
 // Workspace resolution is shared across the Cursor hooks (#2587) — see
 // hooks/lib/cursor-workspace.js. Staged next to these scripts by
 // writeCursorHooksJson so the require always resolves post-install.
 const { resolveStatePath } = require('./lib/cursor-workspace.js');
-const { readSentinel, VALID_ISOLATION, extractDispatchIdentifiers, sentinelAppliesToDispatch, buildSentinelDiscard } = require('./lib/isolation-sentinel.js');
+const { readSentinel, VALID_ISOLATION, extractDispatchIdentifiers, sentinelAppliesToDispatch, agedNoneGovernsDispatch, buildSentinelDiscard } = require('./lib/isolation-sentinel.js');
 const { REASON_CODE, describeSentinelDiscard } = require('./lib/isolation-deny-reason.js');
 // #3582: gsd-core/bin/lib/*.cjs (runtime-homes.cjs, worktree-safety.cjs,
 // runtime-name-policy.cjs, capability-registry.cjs — required below, inside
@@ -421,7 +422,7 @@ function resolveFallbackIsolation(root, configPath) {
   const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
 
   let runtimeId = resolveRuntimeNameFromCandidates(process.env.GSD_RUNTIME);
-  const rawConfig = fs.readFileSync(configPath, 'utf-8');
+  const rawConfig = readConfigFileBounded(configPath, { required: true });
   const parsedConfig = JSON.parse(rawConfig);
   if (!runtimeId && parsedConfig && typeof parsedConfig === 'object' && 'runtime' in parsedConfig) {
     runtimeId = resolveRuntimeNameFromCandidates(parsedConfig.runtime) || null;
@@ -512,15 +513,19 @@ function evaluateRootIsolation(root, subagentType, { clock = Date, dispatchIds =
   // Hoisted (readSentinel never throws) so the "present, fresh, but did not
   // apply" case (#4594 row 15) can be reported on every deny path below
   // instead of silently discarded.
-  const sentinel = readSentinel(root, { clock });
+  const sentinel = readSentinel(root, { clock, dispatchIds });
   const applies = sentinelAppliesToDispatch(sentinel, dispatchIds);
   const sentinelDiscarded = buildSentinelDiscard(sentinel, dispatchIds);
 
   let declaredIsolation;
   try {
+    // #5479: an aged recorded `none` for this dispatch's phase keeps governing it — the same predicate,
+    // and so the same verdicts, as the Claude guard (hooks/gsd-agent-isolation-guard.js).
     declaredIsolation = (sentinel.present && !sentinel.stale && applies)
       ? sentinel.isolation
-      : resolveFallbackIsolation(root, configPath);
+      : (sentinel.present && sentinel.stale && agedNoneGovernsDispatch(sentinel, dispatchIds, { clock }))
+        ? 'none'
+        : resolveFallbackIsolation(root, configPath);
   } catch {
     return {
       action: 'deny',

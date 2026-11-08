@@ -72,18 +72,25 @@ File not found: {FILEPATH}
 
 Load project context for conflict detection:
 
-1. Read `.planning/ROADMAP.md` — extract phase structure, phase numbers, dependencies
-2. Read `.planning/PROJECT.md` — extract project constraints, tech stack, scope boundaries.
+1. Read the selected project's or workstream's ROADMAP.md (`gsd_run query init.resume ${GSD_WS:+--ws=${GSD_WS##* }} --pick roadmap_path`; `.planning/ROADMAP.md` for the root project — the file `plan_finalize` updates) — extract phase structure, phase numbers, dependencies
+2. Read its PROJECT.md (`--pick project_path` from the same query) — extract project constraints, tech stack, scope boundaries.
    **If PROJECT.md does not exist:** skip constraint checks that rely on it and display:
    ```
    GSD > Note: No PROJECT.md found. Conflict checks against project constraints will be skipped.
    ```
-3. Read `.planning/REQUIREMENTS.md` — extract existing requirements for overlap and contradiction checks.
+3. Read the REQUIREMENTS.md beside that ROADMAP.md — extract existing requirements for overlap and contradiction checks.
    **If REQUIREMENTS.md does not exist:** skip requirement conflict checks and continue.
-4. Glob for all CONTEXT.md files across phase directories:
-   ```bash
-   find .planning/phases/ -name "*-CONTEXT.md" -o -name "CONTEXT.md" 2>/dev/null
-   ```
+4. Glob for all CONTEXT.md files across this project's (or workstream's) phase directories:
+```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END' || true
+$ARGUMENTS
+GSD_ARGS_END
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+PLANNING_DIR=$(gsd_run query config-path ${GSD_WS:+--ws=${GSD_WS##* }} --raw) && PLANNING_DIR=${PLANNING_DIR%/config.json}
+: "${PLANNING_DIR:?planning directory not resolved for this scope}"
+find "$PLANNING_DIR/phases/" -name "*-CONTEXT.md" -o -name "CONTEXT.md" 2>/dev/null
+```
    Read each CONTEXT.md found — extract locked decisions (any decision in a `<decisions>` block)
 
 Store loaded context for conflict detection in the next step.
@@ -227,7 +234,7 @@ Agent({
 
 > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
-Handle the checker return by severity, never by the sentinel alone: count BLOCKER + WARNING entries in the YAML issues block; an entry whose severity is missing or unrecognized counts as a BLOCKER (fail closed). If the return is `## VERIFICATION PASSED`, or the count is zero — every entry is explicitly INFO — display `ℹ advisory — {dimension}: {description}` per INFO entry and treat the plan as imported; INFO is advisory and never blocks an import (#3724). Otherwise:
+Handle the checker return by severity, never by the sentinel alone: count BLOCKER + WARNING entries in the YAML issues block; an entry whose severity is missing or unrecognized counts as a BLOCKER (fail closed). A `## VERIFICATION PASSED` return that lists an entry whose severity is BLOCKER or WARNING, in the YAML issues block or listed in prose (a mention such as "no warnings" or a zero count is not an entry) is counted as `## ISSUES FOUND`, the prose entries counted as BLOCKER/WARNING entries (#5578). If the return is `## VERIFICATION PASSED` with no such entry, or the count is zero — every entry is explicitly INFO — display `ℹ advisory — {dimension}: {description}` per INFO entry and treat the plan as imported; INFO is advisory and never blocks an import (#3724). Otherwise:
 - Display the blocking issues to the user
 - Ask the user to resolve issues before the plan is considered imported
 - Do not delete the written file — the user can fix and re-validate manually
@@ -239,15 +246,16 @@ If the checker returns clean:
 
 <step name="plan_finalize">
 
-Update `.planning/ROADMAP.md` to reflect the new plan:
+Update ROADMAP.md (init's `roadmap_path` from the `init.phase-op` call above — the selected project's or workstream's roadmap) to reflect the new plan:
 - Add the plan to the Plans list under the correct phase section
 - Include the plan name and description
 
-Update `.planning/STATE.md` if appropriate (e.g., increment total plan count).
+Update STATE.md (init's `state_path`) if appropriate (e.g., increment total plan count).
 
 Commit the imported plan and updated files:
 ```bash
-gsd_run query commit "docs({phase}): import plan from {basename FILEPATH}" --files .planning/phases/{phase}/{plan}-PLAN.md .planning/ROADMAP.md
+ROADMAP_FILE="{roadmap_path}"; [ -f "$ROADMAP_FILE" ] || ROADMAP_FILE=  # init.phase-op's roadmap_path is null when ROADMAP.md is absent: left out, never an empty pathspec
+gsd_run query commit "docs({phase}): import plan from {basename FILEPATH}" --files "{phase_dir}/{plan}-PLAN.md" ${ROADMAP_FILE:+"$ROADMAP_FILE"}
 ```
 
 Display completion:

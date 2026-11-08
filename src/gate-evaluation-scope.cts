@@ -37,6 +37,9 @@ import { gateVerdict, gateUnreadable, gateUsageFailure, isGateUsageFailure, GATE
 import type { GateResult } from './gate-verdict.cjs';
 import { resolveContainedPath, resolvePhaseDir } from './gate-phase-context.cjs';
 import { escapeEre } from './pattern.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningWorkspaceMod = require('./planning-workspace.cjs');
+const { readScopedConfigValue } = planningWorkspaceMod;
 import { readPlanScanEvidence } from './gate-evidence.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -107,7 +110,10 @@ export interface EvaluationScope {
   files: string[];
   /** `changedFiles` that no longer exist on disk, by name. */
   missingOnDisk: string[];
-  /** Range minus union: files changed in the phase window by commits that are not the unit's. */
+  /**
+   * Range minus union: files changed in the phase window by commits that are not the unit's. What a
+   * listed catch-up merge brought in from the base branch is base work, and is not named here.
+   */
   outsideUnion: string[];
   /** Listed commit ids not reachable from the ref (other branch, dropped by a rebase), by name. */
   unreachable: string[];
@@ -173,23 +179,123 @@ function paddedPattern(value: string): string {
 }
 
 /**
+ * The `<phase>-<plan>` fragment of a plan subject pattern, or null when `id` is not that shape.
+ *
+ * Zero-padding tolerant in both halves: `03-01` yields `0*3-0*1`, so `feat(03-01):`, `test(3-1):`
+ * and `fix(03-01)!:` match while `feat(03-010):` does not (#4003, #4619, #4748).
+ */
+function phasePlanPattern(id: string): string | null {
+  const dash = id.indexOf('-');
+  const phasePart = dash > 0 ? id.slice(0, dash) : '';
+  const planPart = dash > 0 ? id.slice(dash + 1) : '';
+  if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
+    return `${paddedPattern(phasePart)}-${paddedPattern(planPart)}`;
+  }
+  return null;
+}
+
+/**
+ * The anchored subject pattern for a `<phase>-<plan>` ERE fragment, optionally behind one scope
+ * qualifier as the group `(<qualifier>-)?`.
+ *
+ * Every spelling of a plan id goes through this one builder: the bare id, the id carrying the
+ * configured project code (#5271), and the workstream-qualified id `<ws>-<phase>-<plan>` that #5177
+ * proposes. The qualifier is ERE-escaped, so a workstream name (a path segment, not a project-code
+ * token) is matched literally. The group is a real capture group, never `(?:…)`: the pattern goes
+ * to `git log --extended-regexp`, and POSIX ERE has no non-capturing group.
+ */
+export function qualifiedPlanSubjectPattern(fragment: string, qualifier: string | null = null): string {
+  const group = qualifier === null ? '' : `(${escapeEre(qualifier)}-)?`;
+  return `^[a-z]+\\(${group}${fragment}\\)!?:`;
+}
+
+/**
+ * The `<CODE>-` prefix of `planId` when it is EXACTLY the project's configured `project_code`
+ * followed by a dash — the separator included — else null.
+ *
+ * The match is CASE-SENSITIVE and anchored to the configured value. The phase-id module's
+ * `stripProjectCodePrefix` grammar (case-insensitive, any code before a digit) recognises ANY
+ * letter prefix, which is deliberately wider than the project: `AUTH-01-02` and `setup-1-2` are
+ * ids this project never assigned a code to, and stripping their prefixes made them resolve
+ * another plan's commits (#5271). Only the code the project actually configures may be
+ * stripped, so an id that merely LOOKS coded keeps its literal-match guarantee.
+ */
+function configuredCodePrefix(planId: string, projectCode: string | null): string | null {
+  if (projectCode === null || !isUsableProjectCode(projectCode)) return null;
+  const prefix = `${projectCode}-`;
+  return planId.startsWith(prefix) ? prefix : null;
+}
+
+/**
  * The anchored subject pattern for a plan id, or null when `planId` is empty, over-long or carries a
  * control / whitespace character.
  *
  * A `<phase>-<plan>` id (`03-01`) is zero-padding tolerant: `feat(03-01):`, `test(3-1):` and
- * `fix(03-01)!:` match, `feat(03-010):` does not. Any other id (a plan FILE NAME that does not follow
- * the numbering) is matched LITERALLY — every ERE metacharacter escaped — so `x.*` or `a[b]` can only
- * match a commit that names that exact id, and never widens the pattern.
+ * `fix(03-01)!:` match, `feat(03-010):` does not. An id carrying the CONFIGURED project code
+ * (`PRJ-01-01` with `project_code: "PRJ"`, #5271) matches either spelling of the SAME plan —
+ * `feat(PRJ-01-01):` and `feat(01-01):` — because the two init verbs hand out different phase
+ * tokens for one plan. The code is stripped ONLY when it is the configured one: an id like
+ * `AUTH-01-02` or `setup-1-2`, which merely looks coded, is matched LITERALLY — every ERE
+ * metacharacter escaped — so it can only match a commit naming that exact id and never widens the
+ * pattern to another plan's commits. Any other id (a plan FILE NAME that does not follow the
+ * numbering) is matched literally for the same reason.
+ *
+ * `projectCode` is the project's configured `project_code`; with none (no config, no `planningDir`),
+ * every id is matched literally, which is the pre-#5271 behaviour.
  */
-export function planSubjectPattern(planId: string): string | null {
+export function planSubjectPattern(planId: string, projectCode: string | null = null): string | null {
   if (planId.length === 0 || planId.length > 200 || /[\s\x00-\x1f\x7f]/.test(planId)) return null;
-  const dash = planId.indexOf('-');
-  const phasePart = dash > 0 ? planId.slice(0, dash) : '';
-  const planPart = dash > 0 ? planId.slice(dash + 1) : '';
-  if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
-    return `^[a-z]+\\(${paddedPattern(phasePart)}-${paddedPattern(planPart)}\\)!?:`;
+  const direct = phasePlanPattern(planId);
+  if (direct) return qualifiedPlanSubjectPattern(direct);
+  // #5271: `init.execute-phase` returns `phase_number: "PRJ-01"` where `init.plan-phase` returns
+  // `padded_phase: "01"`, and every gate builds its `--plan` from the former. Splitting `PRJ-01-01`
+  // at its FIRST dash leaves `01-01` as the plan half, which is not a plan number, so the id fell
+  // through to the literal pattern that no executor commit can ever carry — an empty scope at exit
+  // 0, which is the correct answer for a plan that has NOT started and the wrong one for one that
+  // has. Retry on the CONFIGURED project-code-stripped id, with the code OPTIONAL so the commit the
+  // executor actually wrote still matches.
+  //
+  // The `(PRJ-)?` group comes from `qualifiedPlanSubjectPattern`, and it rides ONLY on a remainder
+  // that could be a plan number, so an empty or non-numeric remainder keeps the whole id literal —
+  // never WIDER than the pre-#5271 pattern.
+  const prefix = configuredCodePrefix(planId, projectCode);
+  if (prefix !== null) {
+    const stripped = planId.slice(prefix.length);
+    const coded = phasePlanPattern(stripped);
+    // The only remainder `phasePlanPattern` cannot split is the N-segment milestone shape
+    // (`01-02-03`), so require that whole shape: a bare `1`, `01-` or a trailing dash would
+    // otherwise widen the optional group onto `feat(1):`.
+    const planShaped = coded !== null || /^\d[0-9A-Za-z.]*(-[0-9A-Za-z.]+){2,}$/.test(stripped);
+    if (!planShaped) return qualifiedPlanSubjectPattern(escapeEre(planId));
+    return qualifiedPlanSubjectPattern(coded ?? escapeEre(stripped), projectCode);
   }
-  return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
+  return qualifiedPlanSubjectPattern(escapeEre(planId));
+}
+
+/**
+ * Whether a configured `project_code` can safely be stripped from a plan id and put in a pattern.
+ *
+ * `config-set` stores `project_code` unvalidated and docs/CONFIGURATION.md calls it "any short
+ * string", so this is a SAFETY check, not the phase-id module's uppercase grammar: a letter first,
+ * then letters, digits, `_`, `.` or `-`, at most 32 characters. That admits `gsd` and `AUTH-X`
+ * (which the uppercase grammar left in the #5271 symptom) while excluding whitespace, control
+ * characters and anything long enough to be a sentence. The value is ERE-escaped by the pattern
+ * builder, so no metacharacter it admits can change the pattern.
+ */
+function isUsableProjectCode(code: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9_.-]{0,31}$/.test(code);
+}
+
+/**
+ * The project's configured `project_code`, or null when it is absent, non-string or unusable
+ * (`isUsableProjectCode`). An unusable value reads as ABSENT: the coded id keeps its LITERAL
+ * spelling, which is never WIDER than the pre-#5271 pattern, since a literal id can only match a
+ * subject naming that exact id.
+ */
+function configuredProjectCode(projectDir: string): string | null {
+  const { present, value } = readScopedConfigValue(projectDir, ['project_code']);
+  if (!present || typeof value !== 'string') return null;
+  return isUsableProjectCode(value) ? value : null;
 }
 
 // ─── Git plumbing ─────────────────────────────────────────────────────────────
@@ -207,12 +313,19 @@ class ScopeUnreadable extends Error {
 
 type Git = (args: string[], cwd?: string) => string;
 
+/** The git subcommand of `args`: the first argument after any leading `-c <key=value>` pairs. */
+function gitSubcommand(args: readonly string[]): string {
+  let index = 0;
+  while (args[index] === '-c') index += 2;
+  return args[index] ?? '';
+}
+
 function makeGit(projectDir: string, runner: GitRunner): Git {
   return (args, cwd = projectDir) => {
     const result = runner(args, { cwd });
     if (result.timedOut) throw new ScopeUnreadable('git-timeout');
     if (result.exitCode === 127) throw new ScopeUnreadable('git-unavailable');
-    if (result.exitCode !== 0) throw new ScopeUnreadable(`git-failed:${args[0] ?? ''}`, result.exitCode);
+    if (result.exitCode !== 0) throw new ScopeUnreadable(`git-failed:${gitSubcommand(args)}`, result.exitCode);
     return result.stdout;
   };
 }
@@ -260,6 +373,21 @@ function isAncestor(git: Git, sha: string, of: string): boolean {
   return gitOrNo(git, ['merge-base', '--is-ancestor', sha, of]) !== null;
 }
 
+/**
+ * Whether commit `sha` is an ancestor of commit `of` (#5275): ancestry, never log position or commit
+ * date, so a history merged from worktree branches is judged by what it descends from. `null` means
+ * git could not answer (missing, hung, a bad object): the caller must not read that as "no".
+ */
+export function commitIsAncestor(projectDir: string, sha: string, of: string, execGit?: GitRunner): boolean | null {
+  if (!isSafeRefArgument(sha) || !isSafeRefArgument(of)) return null;
+  try {
+    return isAncestor(makeGit(projectDir, execGit ?? execGitSeam), sha, of);
+  } catch (error) {
+    if (error instanceof ScopeUnreadable) return null;
+    throw error;
+  }
+}
+
 // ─── The resolver ─────────────────────────────────────────────────────────────
 
 function emptyScope(unit: ScopeUnit): EvaluationScope {
@@ -280,7 +408,7 @@ export function resolveEvaluationScope(projectDir: string, unit: ScopeUnit, opti
     const repoRoot = git(['rev-parse', '--show-toplevel']);
 
     if (unit.kind === 'phase') resolvePhase(projectDir, unit, scope, git, ref, options, repoRoot);
-    else resolveBySubject(unit, scope, git, ref, options, repoRoot);
+    else resolveBySubject(projectDir, unit, scope, git, ref, options, repoRoot);
     return scope;
   } catch (error) {
     const reason = error instanceof ScopeUnreadable ? error.reason : 'resolver-error';
@@ -288,8 +416,64 @@ export function resolveEvaluationScope(projectDir: string, unit: ScopeUnit, opti
   }
 }
 
-/** A commit's own file set. `--first-parent`: a merge commit contributes its diff against parent 1. */
-function commitFiles(git: Git, sha: string): string[] {
+/** First git release with `show --remerge-diff` (#5751). */
+const REMERGE_DIFF_MIN_GIT: readonly [number, number] = [2, 36];
+
+/**
+ * The first `<major>.<minor>` in `git --version` output ("git version 2.45.1.windows.1",
+ * "2.36.0-rc0", "2.54.0 (Apple Git-157)"), or null when there is none.
+ */
+export function parseGitVersion(output: string): { major: number; minor: number } | null {
+  const match = /(\d+)\.(\d+)/.exec(output);
+  return match ? { major: Number(match[1]), minor: Number(match[2]) } : null;
+}
+
+/** Whether `git --version` output names a git that has `show --remerge-diff`; unparseable reads as no. */
+export function remergeDiffSupported(output: string): boolean {
+  const version = parseGitVersion(output);
+  if (version === null) return false;
+  return version.major > REMERGE_DIFF_MIN_GIT[0]
+    || (version.major === REMERGE_DIFF_MIN_GIT[0] && version.minor >= REMERGE_DIFF_MIN_GIT[1]);
+}
+
+/** Per-resolve cache of the `git --version` probe, keyed by the bound git function. */
+const remergeSupportCache = new WeakMap<Git, boolean>();
+
+/**
+ * Whether this git can report a merge's own changes (`--remerge-diff`, git >= 2.36). Detected from
+ * `git --version`, never from error output: an unknown option exits 128 or 129 depending on where
+ * it is parsed. An unparseable version reads as unsupported, the safe side. A timeout still
+ * rethrows (unresolvable); any other probe failure reads as unsupported.
+ */
+function supportsRemergeDiff(git: Git): boolean {
+  const cached = remergeSupportCache.get(git);
+  if (cached !== undefined) return cached;
+  let supported = false;
+  try {
+    supported = remergeDiffSupported(git(['--version']));
+  } catch (error) {
+    if (error instanceof ScopeUnreadable && error.reason === 'git-timeout') throw error;
+  }
+  remergeSupportCache.set(git, supported);
+  return supported;
+}
+
+/**
+ * A commit's own file set. A non-merge commit contributes what it changed. A merge commit
+ * contributes only what the merge itself changed (conflict resolutions and edits, from
+ * `--remerge-diff`), so a clean merge contributes nothing and both merge orientations agree (#5751).
+ * `--first-parent` would report a catch-up merge's whole base branch. On a git without
+ * `--remerge-diff`, or for an octopus merge (remerge covers two-parent merges), a merge contributes
+ * nothing: it may under-report, and never reports the base branch's work. `parents` is the commit's
+ * parent count, read from the log that listed it (no per-commit lookup).
+ */
+function commitFiles(git: Git, sha: string, parents: number): string[] {
+  if (parents > 1) {
+    if (parents !== 2 || !supportsRemergeDiff(git)) return [];
+    return splitNul(git(
+      ['-c', 'core.quotepath=off', 'show', '--remerge-diff', '--pretty=format:', '--name-only', '-z', sha, '--', '.', ...SCOPE_EXCLUSION_PATHSPECS],
+    ));
+  }
   const out = git(
     ['-c', 'core.quotepath=off', 'show', '--first-parent', '--pretty=format:', '--name-only', '-z', sha, '--', '.', ...SCOPE_EXCLUSION_PATHSPECS],
   );
@@ -314,30 +498,117 @@ function finalizeFiles(scope: EvaluationScope, repoRoot: string, changed: Iterab
   scope.missingOnDisk = missing;
 }
 
+/** `%P` rides every log so a commit's parents come from the listing itself, never a per-commit lookup. */
 function logFormat(withBody: boolean): string {
-  return withBody ? '--format=%H%x1f%s%x1f%b%x1e' : '--format=%H%x1f%s%x1e';
+  return withBody ? '--format=%H%x1f%P%x1f%s%x1f%b%x1e' : '--format=%H%x1f%P%x1f%s%x1e';
 }
 
-function parseLog(out: string, withBody: boolean): ScopeCommit[] {
+/** Parent shas by commit sha, as read from the logs that listed the commits. */
+type ParentMap = Map<string, string[]>;
+
+function parseLog(out: string, withBody: boolean, parentsOut?: ParentMap): ScopeCommit[] {
   const commits: ScopeCommit[] = [];
   for (const record of out.split('\x1e')) {
     const trimmed = record.replace(/^\n+/, '');
     if (!trimmed) continue;
-    const [sha, subject, body] = trimmed.split('\x1f');
+    const [sha, parents, subject, body] = trimmed.split('\x1f');
     if (!sha || !/^[0-9a-f]{40}$/.test(sha)) continue;
     const commit: ScopeCommit = { sha, subject: subject ?? '' };
     if (withBody) commit.body = (body ?? '').trim();
     commits.push(commit);
+    parentsOut?.set(sha, (parents ?? '').split(' ').filter(Boolean));
   }
   return commits;
 }
 
-function subjectsFor(git: Git, shas: readonly string[], withBody: boolean, chunkSize: number): ScopeCommit[] {
+function subjectsFor(git: Git, shas: readonly string[], withBody: boolean, chunkSize: number, parentsOut: ParentMap): ScopeCommit[] {
   const out: ScopeCommit[] = [];
   for (const group of chunk(shas, chunkSize)) {
-    out.push(...parseLog(git(['log', '--no-walk=unsorted', logFormat(withBody), ...group]), withBody));
+    out.push(...parseLog(git(['log', '--no-walk=unsorted', logFormat(withBody), ...group]), withBody, parentsOut));
   }
   return out;
+}
+
+/**
+ * Whether every merge-base of `p1` and `p2` is `rangeBase` or one of its ancestors: the second side
+ * was forked from history that predates the phase, so it is base work. False when `rangeBase` is the
+ * empty tree, when there is no merge-base, and when git cannot answer (a timeout or a failure): the
+ * caller then subtracts nothing and the files stay in `outsideUnion`.
+ */
+function forkedAtOrBeforePhaseStart(git: Git, p1: string, p2: string, rangeBase: string): boolean {
+  if (rangeBase === EMPTY_TREE) return false;
+  try {
+    const bases = (gitOrNo(git, ['merge-base', '--all', p1, p2]) ?? '').split('\n').filter(Boolean);
+    return bases.length > 0 && bases.every((base) => isAncestor(git, base, rangeBase));
+  } catch (error) {
+    if (error instanceof ScopeUnreadable) return false;
+    throw error;
+  }
+}
+
+/**
+ * The files a listed two-parent merge brought in from its SECOND parent's side: base work, not the
+ * unit's. A merge contributes nothing when ANY of these holds, so unlisted phase work is never hidden:
+ * a listed commit sits on that side (`<p2> ^<p1>`: a phase branch merged into its base); a listed
+ * non-merge commit is an ancestor of `<p2>` after the phase start (`<p2> ^<rangeBase>`, one walk: a
+ * branch forked from the phase, whose unlisted commits are phase work); the fork point
+ * (`git merge-base <p1> <p2>`) is not at or before `rangeBase` (a side forked from phase work, or a
+ * later catch-up whose fork point is an earlier catch-up's base commit: reported as an advisory
+ * false positive, never hidden); `rangeBase` is the empty tree or there is no merge-base; any git
+ * call for this merge fails or times out (this merge subtracts nothing, the others are unaffected);
+ * or the file was touched by a commit of the phase window (`<rangeBase>..<tip>` minus what `<p2>`
+ * reaches, listed or not, before or after the merge, other merge commits included through their own
+ * changes against each parent, `git log -m`; the merge itself is not counted). Only files touched
+ * solely by the second parent's side are subtracted.
+ */
+function phaseSideFiles(git: Git, tip: string, p2: string, rangeBase: string, mergeSha: string): Set<string> {
+  const files = new Set<string>();
+  const out = git([
+    '-c', 'core.quotepath=off', 'log', '-m', '--format=%x01%H', '--name-only', '-z', tip, `^${p2}`,
+    ...(rangeBase === EMPTY_TREE ? [] : [`^${rangeBase}`]), '--', '.', ...SCOPE_EXCLUSION_PATHSPECS,
+  ]);
+  let own = false;
+  for (const raw of out.split('\0')) {
+    const token = raw.replace(/^\n+/, '');
+    if (token.length === 0) continue;
+    if (token.startsWith('\x01')) { own = token.slice(1) === mergeSha; continue; }
+    if (!own) files.add(token);
+  }
+  return files;
+}
+
+function baseSideMergeFiles(
+  git: Git, merges: readonly string[], parentsOf: ParentMap, listed: ReadonlySet<string>,
+  listedNonMerge: readonly string[], rangeBase: string, tip: string,
+): Set<string> {
+  const files = new Set<string>();
+  for (const sha of merges) {
+    const parents = parentsOf.get(sha) ?? [];
+    if (parents.length !== 2) continue;
+    const [p1 = '', p2 = ''] = parents;
+    try {
+      const secondSide = git(['rev-list', p2, `^${p1}`]).split('\n').filter(Boolean);
+      if (secondSide.some((entry) => listed.has(entry))) continue;
+      // One walk of the second parent's history after the phase start, intersected with the listed
+      // non-merge commits (never one ancestry spawn per listed commit).
+      const reachable = new Set(git([
+        'rev-list', p2, ...(rangeBase === EMPTY_TREE ? [] : [`^${rangeBase}`]),
+      ]).split('\n').filter(Boolean));
+      if (listedNonMerge.some((entry) => reachable.has(entry))) continue;
+      if (!forkedAtOrBeforePhaseStart(git, p1, p2, rangeBase)) continue;
+      // Every commit in the window `<rangeBase>..<tip>` the second parent does not reach, before AND
+      // after this merge, minus this merge's own records (its first-parent diff is what is being
+      // subtracted from). `-m` lists a merge commit's changes against each parent: another merge's
+      // conflict resolution or edit is phase work. Over-inclusion only keeps a file in outsideUnion.
+      const phaseSide = phaseSideFiles(git, tip, p2, rangeBase, sha);
+      const brought = rangeFiles(git, `${sha}^1`, sha).filter((file) => !phaseSide.has(file));
+      for (const file of brought) files.add(file);
+    } catch (error) {
+      // A merge whose check could not be answered subtracts nothing (its files stay named).
+      if (!(error instanceof ScopeUnreadable)) throw error;
+    }
+  }
+  return files;
 }
 
 /**
@@ -427,23 +698,37 @@ function resolvePhase(
   scope.rangeBase = options.since ?? phaseRangeBase(git, phaseDir, ref);
 
   const union = new Set<string>();
+  const merges: string[] = [];
+  const parentsOf: ParentMap = new Map();
   const commits: ScopeCommit[] = [];
   const withFiles = options.includeFiles ?? true;
   // At least 2: a chunk of one never shrinks the list `newestOf` reduces.
   const chunkSize = Math.max(2, options.shaChunk ?? SHA_CHUNK);
-  for (const meta of subjectsFor(git, [...new Set(shas)], options.includeBody === true, chunkSize)) {
-    const files = commitFiles(git, meta.sha);
+  for (const meta of subjectsFor(git, [...new Set(shas)], options.includeBody === true, chunkSize, parentsOf)) {
+    const parentCount = parentsOf.get(meta.sha)?.length ?? 0;
+    const files = commitFiles(git, meta.sha, parentCount);
+    if (parentCount > 1) merges.push(meta.sha);
     for (const file of files) union.add(file);
     commits.push(withFiles ? { ...meta, files: [...files].sort() } : meta);
   }
 
-  if (union.size > 0) {
+  // Every listed commit is a merge: a merge carries only its resolutions, so the union is not the
+  // phase's work (a SUMMARY that lists just the phase-into-base merge sha). A listed task commit that
+  // touched only excluded paths is still a task commit, so it keeps the pre-existing reasons.
+  const mergeOnly = merges.length > 0 && merges.length === commits.length;
+  if (union.size > 0 && !mergeOnly) {
     scope.source = 'task-commits';
     scope.commits = commits;
     finalizeFiles(scope, repoRoot, union);
     if (scope.rangeBase) {
-      const window = rangeFiles(git, scope.rangeBase, newestOf(git, commits.map((c) => c.sha), chunkSize));
-      scope.outsideUnion = uniqueSorted(window.filter((f) => !union.has(f)));
+      const listed = new Set(commits.map((c) => c.sha));
+      const tip = newestOf(git, [...listed], chunkSize);
+      const window = rangeFiles(git, scope.rangeBase, tip);
+      // The window still holds what a listed catch-up merge brought in from the base; that is base
+      // work the union deliberately omits, not phase work another commit did.
+      const listedNonMerge = commits.filter((c) => (parentsOf.get(c.sha)?.length ?? 0) <= 1).map((c) => c.sha);
+      const baseSide = baseSideMergeFiles(git, merges, parentsOf, listed, listedNonMerge, scope.rangeBase, tip);
+      scope.outsideUnion = uniqueSorted(window.filter((f) => !union.has(f) && !baseSide.has(f)));
     }
     return;
   }
@@ -453,7 +738,8 @@ function resolvePhase(
     summaryCount === 0 ? 'no-summary'
       : refs.length === 0 ? 'no-task-commit-rows'
         : shas.length === 0 ? (sinceDropped > 0 ? 'no-task-commits-since' : 'no-reachable-task-commits')
-          : 'empty-after-exclusions';
+          : mergeOnly ? 'merge-only-task-commits'
+            : 'empty-after-exclusions';
   if (!scope.rangeBase) throw new ScopeUnreadable(`${reason}:no-phase-start-anchor`);
   scope.status = 'degraded';
   scope.reason = reason;
@@ -467,6 +753,7 @@ function resolvePhase(
 }
 
 function resolveBySubject(
+  projectDir: string,
   unit: { kind: 'plan'; planId: string } | { kind: 'quick'; id: string }, scope: EvaluationScope,
   git: Git, ref: string, options: ScopeOptions, repoRoot: string,
 ): void {
@@ -489,7 +776,7 @@ function resolveBySubject(
   const grepArgs: string[] = [];
   let anchored: RegExp | null = null;
   if (unit.kind === 'plan') {
-    const pattern = planSubjectPattern(unit.planId);
+    const pattern = planSubjectPattern(unit.planId, configuredProjectCode(projectDir));
     if (pattern === null) throw new ScopeUnreadable('invalid-plan-id');
     grepArgs.push('--extended-regexp', `--grep=${pattern}`);
     anchored = new RegExp(pattern);
@@ -508,7 +795,8 @@ function resolveBySubject(
     ['log', range, logFormat(withBody), '-n', String(max * 2), ...sinceArgs, ...grepArgs, ...(pathspecs.length > 0 ? ['--', ...pathspecs] : [])],
   );
   // `--grep` matches ANY message line; a plan lookup is subject-anchored, so filter on the subject.
-  let commits = parseLog(out, withBody).filter((c) => anchored === null || anchored.test(c.subject)).slice(0, max);
+  const parentsOf: ParentMap = new Map();
+  let commits = parseLog(out, withBody, parentsOf).filter((c) => anchored === null || anchored.test(c.subject)).slice(0, max);
   const since = options.since;
   if (since !== undefined) commits = commits.filter((c) => !isAncestor(git, c.sha, since));
   if (options.commitsOnly === true) {
@@ -519,8 +807,11 @@ function resolveBySubject(
   const withFiles = options.includeFiles ?? false;
   const union = new Set<string>();
   const result: ScopeCommit[] = [];
+  let mergeCount = 0;
   for (const meta of commits) {
-    const files = commitFiles(git, meta.sha);
+    const parentCount = parentsOf.get(meta.sha)?.length ?? 0;
+    if (parentCount > 1) mergeCount += 1;
+    const files = commitFiles(git, meta.sha, parentCount);
     for (const file of files) union.add(file);
     result.push(withFiles ? { ...meta, files: [...files].sort() } : meta);
   }
@@ -528,9 +819,10 @@ function resolveBySubject(
   finalizeFiles(scope, repoRoot, union);
   // Found nothing: a truthful "none" (status stays `resolved` — git was read), said out loud so a
   // caller can tell "no such commits" from "an empty scope that was never computed". Commits whose
-  // every path is excluded (planning-only) are an empty scope too, and say so.
+  // every path is excluded (planning-only) are an empty scope too, and say so; so are matches that
+  // are all merges (a merge carries only its own resolutions, #5751).
   if (result.length === 0) scope.reason = 'no-matching-commits';
-  else if (scope.changedFiles.length === 0) scope.reason = 'empty-after-exclusions';
+  else if (scope.changedFiles.length === 0) scope.reason = mergeCount === result.length ? 'merge-only' : 'empty-after-exclusions';
 }
 
 // ─── The `check evaluation-scope` verb ────────────────────────────────────────

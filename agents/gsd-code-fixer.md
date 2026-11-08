@@ -110,13 +110,14 @@ Run syntax/parse check appropriate to file type:
 | Language | Check Command |
 |----------|--------------|
 | JavaScript | `node -c {file}` (syntax check) |
-| TypeScript | `npx tsc --noEmit {file}` (if tsconfig.json exists in project) |
+| TypeScript | Project-aware check only, output filtered to `{file}`: the project's own typecheck (`npm run typecheck` / `tsc -b`) if it exists, else `npx tsc --noEmit -p <nearest tsconfig*.json>` whose `--listFilesOnly` output lists `{file}`; no config includes `{file}` → Tier 1 only. Never pass `{file}` to `tsc` positionally. |
 | Python | `python -c "import ast; ast.parse(open('{file}').read())"` |
 | JSON | `node -e "JSON.parse(require('fs').readFileSync('{file}','utf-8'))"` |
 | Other | Skip to Tier 1 only |
 
 **Scoping syntax checks:**
-- TypeScript: If `npx tsc --noEmit {file}` reports errors in OTHER files (not the file you just edited), those are pre-existing project errors — **IGNORE them**. Only fail if errors reference the specific file you modified.
+- TypeScript: Run the project-aware check from the table above. If it reports errors in OTHER files (not the file you just edited), those are pre-existing project errors — **IGNORE them**. Only fail if errors reference the specific file you modified. A solution-style root `tsconfig.json` (`"files": []` plus `references`) checks no source files and exits 0, so it is NOT a passing check: use a referenced config whose `--listFilesOnly` output includes `{file}`, or fall back to Tier 1.
+- TypeScript procedure: (1) Look for a `typecheck` script in the nearest `package.json` and prefer it. (2) Otherwise start at `{file}`'s directory and walk up to the nearest `tsconfig.json`; if it is solution-style, take each config it references (e.g. `tsconfig.app.json`, `tsconfig.node.json`) and try them in turn. (3) Run from the config's own directory with `npx tsc --noEmit -p <config> --listFilesOnly` and keep the first config whose listing includes `{file}`; if none does, fall back to Tier 1. (4) Run `npx tsc --noEmit -p <config>` (use `-p`, never `-b`, so no build artifacts or `.tsbuildinfo` files are written) and keep only output lines that start with `{file}`'s path as `tsc` prints it relative to that directory. (5) Roll back only for errors on lines you changed; errors you cannot attribute to your edit are pre-existing — fall back to Tier 1 and proceed.
 - JavaScript: `node -c {file}` is reliable for plain .js but NOT for JSX, TypeScript, or ESM with bare specifiers. If `node -c` fails on a file type it doesn't support, fall back to Tier 1 (re-read only) — do NOT rollback.
 - General rule: If a syntax check produces errors that existed BEFORE your edit (compare with pre-fix state), the fix did not introduce them. Proceed to commit.
 
@@ -156,6 +157,8 @@ Each finding starts with:
 ```
 
 Where ID matches: `CR-\d+` or `BL-\d+` (Critical-tier-equivalent), `WR-\d+` (Warning), or `IN-\d+` (Info)
+
+A finding whose body carries a `**Category:** necessity` line is a **necessity finding** (#4100): code the reviewer judged unnecessary, not broken. Its prefix still gives its severity.
 
 **Required Fields:**
 
@@ -231,20 +234,15 @@ The cleanup tail (commit fixes -> remove worktree -> drop recovery sentinel) MUS
 ```bash
 # #2825: honor workflow.use_worktrees — the documented opt-out. When false,
 # edit/commit in the main checkout (wt=".", no temp branch, no sentinel, no
-# cleanup tail). Read the flag the same way the four sibling writer workflows
-# do. NOTE: this read parses .planning/config.json directly via `node` rather
-# than the gsd-tools CLI, because setup_worktree runs BEFORE the canonical
-# launcher preamble is sourced — invoking the CLI here would be undefined at
-# runtime and violates the runtime-launcher-parity preamble-ordering rule.
-# Once the preamble is sourced (later steps), the CLI is available.
-USE_WORKTREES=$(node -e '
-  try {
-    const fs = require("fs");
-    const p = (process.env.GSD_PROJECT_DIR || process.cwd()) + "/.planning/config.json";
-    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-    process.stdout.write(String((cfg.workflow && cfg.workflow.use_worktrees) ?? true));
-  } catch { process.stdout.write("true"); }
-')
+# cleanup tail). NOTE: setup_worktree runs BEFORE the canonical launcher
+# preamble is sourced, so the gsd-tools CLI is not available here (invoking it
+# would violate the runtime-launcher-parity preamble-ordering rule). The
+# orchestrator therefore resolves the flag through gsd-tools (`config-get`, so
+# the selected project's or workstream's config is read, with its inheritance,
+# never the root config by a literal path, #5861) and passes it as
+# `use_worktrees` in the <config> block. Absent or unrecognised: worktrees stay on.
+USE_WORKTREES="${use_worktrees:-true}"
+[ "$USE_WORKTREES" = "false" ] || USE_WORKTREES=true
 
 # Derive worktree path from padded_phase (parsed from config in next step,
 # but the shell snippet below is illustrative — adapt once config is parsed).
@@ -360,7 +358,7 @@ fi
 ```
 
 Concrete steps:
-1. Parse `padded_phase` and `phase_dir` from the `<config>` block (needed for the path and for the sentinel location).
+1. Parse `padded_phase`, `phase_dir` and `use_worktrees` from the `<config>` block (needed for the path, the sentinel location and the worktree opt-out).
 2. Resolve the current branch: `branch=$(git branch --show-current)`. If empty (detached HEAD), print an error and exit — detached-HEAD state is not supported; commits made in a detached-HEAD worktree would not advance the branch.
 3. **Recovery check (#2839, #2990):** If `${phase_dir}/.review-fix-recovery-pending.json` already exists, a prior run was interrupted. Parse the JSON, attempt to remove the orphan worktree it points at (best-effort, with `--force`), and delete the stale `reviewfix_branch` (best-effort, with `git branch -D`), then delete the stale sentinel before continuing. This makes a re-run of `/gsd:code-review --fix` self-healing.
 4. Create a unique worktree path **inside the repo**: `main_repo="$(git worktree list --porcelain | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"` then `wt="$main_repo/.claude/worktrees/rf-${padded_phase}-$$-$(date +%s)"` + `mkdir -p "$wt"`. The path lives under the same `.claude/worktrees/` dir the harness-managed executor worktrees use (already gitignored via `.claude/`, already in the session's permission scope), and the `$$`-PID + epoch suffix ensures concurrent runs for the same phase do not collide (#2647 — an absolute `/tmp` path landed outside the project tree and prompted on every read).
@@ -435,10 +433,11 @@ This cleanup is unconditional when a worktree was created — register it mental
 **1. Read mandatory files:** Load all files from `<required_reading>` block if present.
 
 **2. Parse config:** Extract from `<config>` block in prompt:
+- `use_worktrees`: `workflow.use_worktrees` as resolved by the orchestrator (`true`/`false`; read in setup_worktree)
 - `phase_dir`: Path to phase directory (e.g., `.planning/phases/02-code-review-command`)
 - `padded_phase`: Zero-padded phase number (e.g., "02")
 - `review_path`: Full path to REVIEW.md (e.g., `.planning/phases/02-code-review-command/02-REVIEW.md`)
-- `fix_scope`: "critical_warning" (default) or "all" (includes Info findings)
+- `fix_scope`: "critical_warning" (default) or "all" (includes Info and necessity findings)
 - `fix_report_path`: Full path for REVIEW-FIX.md output (e.g., `.planning/phases/02-code-review-command/02-REVIEW-FIX.md`)
 
 **3. Read REVIEW.md:**
@@ -464,6 +463,7 @@ Read `./CLAUDE.md` and check for `.claude/skills/` or `.agents/skills/` (as desc
 For each finding, extract:
 - `id`: Finding identifier (e.g., CR-01, WR-03, IN-12)
 - `severity`: Critical (CR-* or BL-*), Warning (WR-*), Info (IN-*)
+- `category`: `necessity` when the finding carries a `**Category:** necessity` line, otherwise none
 - `title`: Issue title from `### ` heading
 - `file`: Primary file path from **File:** line
 - `files`: ALL file paths referenced in finding (including in Fix section) — for multi-file fixes
@@ -472,15 +472,17 @@ For each finding, extract:
 - `fix`: Full fix content from **Fix:** section (may be multi-line, may contain code fences)
 
 **2. Filter by fix_scope:**
-- If `fix_scope == "critical_warning"`: include only CR-*, BL-*, and WR-* findings
-- If `fix_scope == "all"`: include CR-*, BL-*, WR-*, and IN-* findings
+- If `fix_scope == "critical_warning"`: include only CR-*, BL-*, and WR-* findings; `critical_warning` excludes necessity findings (removing code is a scope decision for the human, #4100). The marker overrides the prefix: a WR-* finding carrying `**Category:** necessity` is OUT of scope here, and is skipped without applying any edit
+- If `fix_scope == "all"`: include CR-*, BL-*, WR-*, and IN-* findings; `all` includes necessity findings, ordered last. A necessity fix removes code, so record it as `fixed: requires human verification`
 
 **3. Sort findings by severity:**
-- Critical (CR-* and BL-*) first, then Warning, then Info
+- Critical (CR-* and BL-*) first, then Warning, then Info, then necessity findings
 - Within same severity, maintain document order
 
 **4. Count findings in scope:**
 Record `findings_in_scope` for REVIEW-FIX.md frontmatter.
+
+If `findings_in_scope` is 0, apply nothing: write REVIEW-FIX.md with `fixed: 0`, `skipped: 0`, `status: all_fixed`, and a body stating that no finding was in scope and the out-of-scope findings remain in REVIEW.md.
 </step>
 
 <step name="apply_fixes">
@@ -665,9 +667,10 @@ _Iteration: {N}_
 
 **#2825 — honor `workflow.use_worktrees`.** Before creating a worktree, read the
 `workflow.use_worktrees` config flag (the documented opt-out — same key the four sibling writer
-workflows honor). `setup_worktree` reads it via `node` directly from `.planning/config.json`
-(because that step runs BEFORE the canonical gsd_run launcher preamble is sourced; later steps may
-use `gsd_run query config-get workflow.use_worktrees`). When it is `false`, do NOT create a worktree
+workflows honor). `setup_worktree` reads it from the `use_worktrees` value in the `<config>` block,
+which the orchestrator resolved for the selected project or workstream (#5861; the step runs BEFORE
+the canonical gsd_run launcher preamble is sourced, so it cannot query config itself; absent or
+unrecognised means worktrees stay on). When it is `false`, do NOT create a worktree
 — edit and commit in the main checkout directly (`wt="."`, no temp branch, no sentinel, no cleanup
 tail). A user who opted out of worktrees must
 never have one created. See the `setup_worktree` step for the gated bash.
@@ -701,7 +704,7 @@ main checkout after teardown).
 
 **DO verify each fix** using 3-tier verification strategy:
 - Minimum: re-read file, confirm fix present
-- Preferred: syntax check (node -c, tsc --noEmit, python ast.parse, etc.)
+- Preferred: syntax check (node -c, project-aware tsc -p, python ast.parse, etc.)
 - Fallback: accept minimum if no syntax checker available
 
 **DO skip findings that cannot be applied cleanly** — do not force broken fixes. Mark as skipped with clear reason.
