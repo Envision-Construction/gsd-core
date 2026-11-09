@@ -276,14 +276,8 @@ const ALWAYS_REAL_OS = new Map([
       'path module (path.resolve/path.sep) with no platform injection; its win32 branch (drive ' +
       'letters, UNC paths, \\ separator) is unreachable on Linux. Security-relevant write-confinement gate.',
   ],
-  [
-    'tests/forensic-gsd-parent-inventory.test.cjs',
-    'Exercises real Git parent/worktree paths and registration via fs.realpathSync.native ' +
-      '(src/worktree-safety.cts:1433-1455). The inventory test uses actual Git without platform/path ' +
-      'injection (tests/forensic-gsd-parent-inventory.test.cjs:17-70); its full .git/index and ' +
-      'ignored/untracked custody checks (:46-57,86-106) depend on ambient/native filesystem semantics.',
-  ],
 ]);
+for (const [rel, reason] of require('./lib/fork-conformance-overrides.cjs').ALWAYS_REAL_OS_ENTRIES) ALWAYS_REAL_OS.set(rel, reason); // fork
 
 /**
  * macOS-specific detection categories (#4593, design doc
