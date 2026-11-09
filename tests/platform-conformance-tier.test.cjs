@@ -61,7 +61,17 @@ const MACOS_GENERATED_PATH = path.join(ROOT, 'scripts', 'lib', 'macos-conformanc
 // ceiling — do not just raise the number to make a red test green.
 const WINDOWS_TIER_RATIO_CEILING = 0.33;
 const MACOS_TIER_RATIO_CEILING = 0.25;
-const { countsTowardTierRatio } = require('../scripts/lib/fork-conformance-overrides.cjs'); // fork
+
+// Fork (Envision-Construction/gsd-core): the custody tests from fork #6 run on a real OS by design
+// (forensic-gsd-parent-inventory is in ALWAYS_REAL_OS). They stay in the generated tier but are
+// counted outside upstream's #4641 aggregate, so the ceiling keeps guarding upstream's categories.
+const FORK_REAL_OS_TESTS = new Set([
+  'forensic-gsd-custody.test.cjs',
+  'forensic-gsd-merge-failure.test.cjs',
+  'forensic-gsd-parent-inventory.test.cjs',
+  'gsd-workflow-retirement-contract.test.cjs',
+]);
+const countsTowardTierRatio = (file) => !FORK_REAL_OS_TESTS.has(path.basename(file));
 
 // ─── Rows 1-15: classifyContent, pure fixtures ────────────────────────────────
 
