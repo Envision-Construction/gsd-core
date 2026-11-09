@@ -7,19 +7,20 @@ This fork is `open-gsd/gsd-core` plus a small set of fork changes, and it is wha
 Merge every fork PR through the gate, from a checkout whose `origin` is this fork:
 
 ```bash
-bash .github/fork/pre-merge-gate.sh <pr> --dry-run          # first look
-bash .github/fork/pre-merge-gate.sh <pr>                    # gate, then gh pr merge --admin --squash
-bash .github/fork/pre-merge-gate.sh <pr> --merge --full     # upstream syncs: keep merge commits, run the unit suite
+bash .github/fork/pre-merge-gate.sh <pr> --dry-run   # every check, no merge
+bash .github/fork/pre-merge-gate.sh <pr>             # gate, then gh pr merge --admin --squash
+bash .github/fork/pre-merge-gate.sh <pr> --merge     # upstream syncs: keep the merge commit
 ```
 
-The gate runs the following, then merges exactly the tested head (`--match-head-commit`):
+An admin merge bypasses review and policy gates, never tests. The gate merges the head (`--match-head-commit`) only after two checks pass:
 
-- `npm ci` and the build, failing if the build rewrites tracked files.
-- `lint:ci` pinned to the PR's merge base.
-- The generated-artifact checks, judged by their output. `benchmark-compact-content.cjs --check` always exits 0, even on drift.
-- The affected tests, CI's targeted list, and every test that names a changed file. `run-affected-tests` maps markdown only by filename, so it misses the byte-cap tests.
+1. **Local checks on the exact head.** The checks that give the same answer on any machine:
+   - `npm ci` and the build, failing if the build rewrites tracked files.
+   - `lint:ci` pinned to the PR's merge base.
+   - The generated-artifact checks, judged by their output. `benchmark-compact-content.cjs --check` always exits 0, even on drift.
+2. **The PR's own CI `Tests` run on that head.** The gate waits for it with `gh run watch --exit-status` and requires it to succeed.
 
-CI still runs on every PR, but the gate is the merge decision.
+Tests are judged by CI because a local macOS run has failures CI's runners don't, such as the `/var` → `/private/var` path and process-group `EPERM`.
 
 ## Workflows disabled on the fork
 
@@ -51,5 +52,5 @@ gh workflow list -R Envision-Construction/gsd-core --all --json path,state --jq 
 2. Branch from `origin/next` and run `git merge upstream/next`.
 3. Generated files (tier lists, benchmark baselines, `pi/package-agents`, manifests): take either side, then regenerate. Run `npm run build`, `node scripts/benchmark-compact-content.cjs --write` and `node scripts/gen-platform-conformance-tier.cjs --write`, the latter also with `--target macos`. Check that each prints "up to date" or "list matches".
 4. While `execute-phase.md` is in conflict anyway, move steps 5 and 5.5 into a fork step file and leave one pointer line, so the cap has room.
-5. Push the branch, open a PR, and run the gate with `--merge --full`.
+5. Push the branch, open a PR, and run the gate with `--merge`.
 6. Disable any newly added upstream workflows (see above). Reinstall the runtime from `next`.
