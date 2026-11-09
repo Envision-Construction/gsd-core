@@ -43,7 +43,7 @@ gh workflow list -R Envision-Construction/gsd-core --all --json path,state --jq 
 | Where | What | Conflict seam |
 |---|---|---|
 | `gsd-core/workflows/execute-phase.md` steps 5 and 5.5 | Custody: never stash, retain worktrees, hold on unknown inventory (fork #6) | Inline. The file sits a few bytes under upstream's 93600-byte cap. Move this into `execute-phase/steps/<fork step>.md` at the next sync; see below. |
-| `scripts/gen-platform-conformance-tier.cjs` and `tests/platform-conformance-tier.test.cjs` | Real-OS custody tests | One `// fork` line each. The data lives in `scripts/lib/fork-conformance-overrides.cjs`. |
+| `scripts/gen-platform-conformance-tier.cjs` (`ALWAYS_REAL_OS` entry) and `tests/platform-conformance-tier.test.cjs` (`FORK_REAL_OS_TESTS`) | Real-OS custody tests, counted outside upstream's #4641 33% tier ratio | Inline, small. Don't move the data into a new `scripts/lib/` file: the installer enumerates that directory, and ~20 golden install-tree fixtures list it. |
 | Copies of open-gsd #5914, #5915 and #5916 | Scoped-path fixes ahead of upstream | When upstream merges each one, take upstream's version of its files. |
 
 ## Next upstream sync
