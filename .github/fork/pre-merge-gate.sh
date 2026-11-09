@@ -66,6 +66,9 @@ run() {  # run LABEL CMD... : output to a log, tail it on failure
 
 # 3. Install and build. A build that rewrites tracked files means generated output was not committed.
 run npm-ci "${E[@]}" npm ci --no-audit --no-fund
+# lint-workflow-shellcheck downloads a pinned ShellCheck into node_modules/.cache; keep it across runs.
+mkdir -p "$HOME/.cache/gsd-gate/shellcheck" node_modules/.cache
+ln -sfn "$HOME/.cache/gsd-gate/shellcheck" node_modules/.cache/shellcheck
 run build "${E[@]}" npm run build
 [ -z "$(git status --porcelain)" ] || { git status --short | head -20; die "npm run build changed tracked files: commit the regenerated output"; }
 
